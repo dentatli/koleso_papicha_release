@@ -1,0 +1,10 @@
+*.log
+*.tmp
+*.bak
+*.zip
+*.7z
+*.rar
+.DS_Store
+.vscode/
+.idea/
+node_modules/
