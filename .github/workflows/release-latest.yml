@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build setup BAT
         shell: pwsh
@@ -55,17 +55,17 @@ jobs:
           git tag -f latest $env:GITHUB_SHA
           git push origin refs/tags/latest --force
 
-          $notes = @"
+          @"
           Автоматическая сборка PapichWheel.
 
           Коммит: $env:GITHUB_SHA
 
           Скачайте PapichWheel_Setup.bat, положите его в нужную папку и запустите.
           После распаковки запустите start_koleso.bat.
-          "@
+          "@ | Set-Content -LiteralPath "release-notes.md" -Encoding utf8
 
           gh release create latest `
             "dist/PapichWheel_Setup.bat" `
             --target $env:GITHUB_SHA `
             --title "PapichWheel latest" `
-            --notes $notes
+            --notes-file "release-notes.md"
