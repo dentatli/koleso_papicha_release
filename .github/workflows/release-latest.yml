@@ -56,12 +56,12 @@ jobs:
           git push origin refs/tags/latest --force
 
           @"
-          Автоматическая сборка PapichWheel.
+          РђРІС‚РѕРјР°С‚РёС‡РµСЃРєР°СЏ СЃР±РѕСЂРєР° PapichWheel.
 
-          Коммит: $env:GITHUB_SHA
+          РљРѕРјРјРёС‚: $env:GITHUB_SHA
 
-          Скачайте PapichWheel_Setup.bat, положите его в нужную папку и запустите.
-          После распаковки запустите start_koleso.bat.
+          РЎРєР°С‡Р°Р№С‚Рµ PapichWheel_Setup.bat, РїРѕР»РѕР¶РёС‚Рµ РµРіРѕ РІ РЅСѓР¶РЅСѓСЋ РїР°РїРєСѓ Рё Р·Р°РїСѓСЃС‚РёС‚Рµ.
+          РџРѕСЃР»Рµ СЂР°СЃРїР°РєРѕРІРєРё Р·Р°РїСѓСЃС‚РёС‚Рµ start_koleso.bat.
           "@ | Set-Content -LiteralPath "release-notes.md" -Encoding utf8
 
           gh release create latest `
