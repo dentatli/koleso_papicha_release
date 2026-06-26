@@ -2617,13 +2617,35 @@
       </div>
 
       <div id="donationalerts-connect-flow" class="integration-connect-flow hidden">
-        <div id="donationalerts-app-step">
+        <div id="donationalerts-mode-step">
           <div class="integration-modal-heading">
-            <span class="integration-step-label">Шаг 1 из 2</span>
-            <h2>Создайте OAuth-приложение</h2>
-            <p>Чтобы сайт мог получать донаты, создайте OAuth-приложение DonationAlerts.</p>
+            <span class="integration-step-label">Шаг 1 из 3</span>
+            <h2>Способ подключения</h2>
+            <p>Выберите быстрый вход или подключите своё OAuth-приложение DonationAlerts.</p>
           </div>
-          <div class="integration-secret-warning hidden" id="donationalerts-file-warning">Для подключения DonationAlerts запустите сайт через start_koleso.bat</div>
+          <div class="integration-secret-warning hidden" id="donationalerts-file-warning">Быстрое подключение доступно только на 127.0.0.1:5500</div>
+          <div class="integration-region-grid">
+            <button type="button" class="integration-region-card" id="donationalerts-quick-connect">
+              <strong>Быстрое подключение</strong>
+              <span>Использует готовое приложение. Просто нажмите «Разрешить» на сайте DonationAlerts.</span>
+              <small>App ID: 19587</small>
+            </button>
+            <button type="button" class="integration-region-card" id="donationalerts-custom-connect">
+              <strong>Создание собственного API-приложения</strong>
+              <span>Создайте приложение в DonationAlerts и вставьте только App ID. API Key не нужен.</span>
+            </button>
+          </div>
+          <div class="integration-modal-actions">
+            <button type="button" id="donationalerts-mode-cancel">Отмена</button>
+          </div>
+        </div>
+
+        <div id="donationalerts-custom-app-step" class="hidden">
+          <div class="integration-modal-heading">
+            <span class="integration-step-label">Шаг 2 из 3</span>
+            <h2>Собственное API-приложение</h2>
+            <p>Создайте OAuth-приложение DonationAlerts и укажите локальный redirect URL.</p>
+          </div>
           <a class="integration-external-link" href="https://www.donationalerts.com/application/clients" target="_blank" rel="noopener noreferrer">Открыть DonationAlerts</a>
           <label class="integration-modal-field">
             URL перенаправления
@@ -2634,34 +2656,30 @@
           </label>
           <p class="integration-modal-hint">Скопируйте этот адрес и вставьте его в поле URL перенаправления при создании приложения DonationAlerts.</p>
           <ol class="integration-setup-steps">
-            <li><strong>Имя приложения:</strong> любое, например «колесо».</li>
-            <li><strong>URL перенаправления:</strong> вставьте адрес из поля выше.</li>
-            <li>Нажмите «Создать».</li>
-            <li>Скопируйте ID приложения и API Key.</li>
+            <li>Откройте DonationAlerts.</li>
+            <li>Создайте OAuth-приложение.</li>
+            <li>В поле URL перенаправления вставьте адрес выше.</li>
+            <li>Скопируйте ID приложения. API Key не нужен.</li>
           </ol>
           <div class="integration-secret-warning">Не показывайте страницу подключения на стриме. Токен может кратко появиться в адресной строке, после чего сайт автоматически его скрывает.</div>
-          <div class="integration-modal-actions">
-            <button type="button" id="donationalerts-app-cancel">Отмена</button>
-            <button type="button" class="btn-primary" id="donationalerts-app-next">Далее</button>
+          <div class="integration-modal-actions integration-modal-actions-spread">
+            <button type="button" id="donationalerts-custom-back">Назад</button>
+            <div>
+              <button type="button" id="donationalerts-custom-cancel">Отмена</button>
+              <button type="button" class="btn-primary" id="donationalerts-custom-next">Далее</button>
+            </div>
           </div>
         </div>
 
-        <div id="donationalerts-id-step" class="hidden">
+        <div id="donationalerts-custom-id-step" class="hidden">
           <div class="integration-modal-heading">
-            <span class="integration-step-label">Шаг 2 из 2</span>
-            <h2>Введите данные приложения</h2>
-            <p>ID приложения и API Key отображаются в списке OAuth-приложений DonationAlerts.</p>
+            <span class="integration-step-label">Шаг 3 из 3</span>
+            <h2>ID приложения</h2>
+            <p>Введите ID приложения DonationAlerts. Авторизация пройдет через безопасный redirect без API Key.</p>
           </div>
           <label class="integration-modal-field">
             ID приложения
             <input type="text" id="donationalerts-modal-app-id" inputmode="numeric" autocomplete="off" placeholder="Например, 12345">
-          </label>
-          <label class="integration-modal-field">
-            API Key
-            <div class="integration-password-row">
-              <input type="password" id="donationalerts-modal-client-secret" autocomplete="off" placeholder="Ключ приложения">
-              <button type="button" id="donationalerts-toggle-client-secret">Показать</button>
-            </div>
           </label>
           <details class="integration-advanced">
             <summary>Расширенные настройки</summary>
@@ -2671,15 +2689,15 @@
             </label>
             <p>После авторизации локальный PowerShell-сервер периодически запрашивает новые донаты и передаёт их приложению.</p>
           </details>
-          <div class="integration-modal-error hidden" id="donationalerts-modal-error"></div>
           <div class="integration-modal-actions integration-modal-actions-spread">
             <button type="button" id="donationalerts-id-back">Назад</button>
             <div>
               <button type="button" id="donationalerts-id-cancel">Отмена</button>
-              <button type="button" class="btn-primary" id="donationalerts-modal-authorize">Разрешить доступ</button>
+              <button type="button" class="btn-primary" id="donationalerts-authorize-custom">Разрешить доступ</button>
             </div>
           </div>
         </div>
+        <div class="integration-modal-error hidden" id="donationalerts-modal-error"></div>
       </div>
     </div>
   </div>
@@ -2703,7 +2721,7 @@
       <button type="button" class="app-tab-button" data-main-tab="settings">Настройки</button>
     </nav>
     <button type="button" class="view-open-button open-admin-button" id="open-admin-view">Открыть админку</button>
-    <button type="button" class="view-open-button open-wheel-button" id="open-wheel-view">Открыть колесо</button>
+    <button type="button" class="view-open-button open-wheel-button" id="open-wheel-view">Открыть колесо в отдельной вкладке</button>
   </header>
 
   <section id="tab-auction" class="app-tab-panel">
@@ -3004,7 +3022,6 @@
     </div>
   </section>
 
-  <script src="https://cdn.jsdelivr.net/npm/centrifuge@2.8.5/dist/centrifuge.min.js"></script>
   <script>
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
@@ -3439,23 +3456,43 @@
     let activeDonationsTab = 'pending';
     let activeDonationAssignmentId = null;
     let donationIntegrations = createDefaultDonationIntegrations();
-    const appViewMode = getAppViewMode();
+    let appViewMode = getAppViewMode();
     let appChannel = null;
     let isApplyingRemoteState = false;
+    const DONATION_RUNTIME_STATUS_KEY = 'pointauc_donation_runtime_status';
+    let donationRuntimeStatus = createDefaultDonationRuntimeStatus();
+    let serverCollectorStatus = null;
+    let serverCollectorConfigInFlight = false;
+    let serverCollectorStatusInFlight = false;
+    let serverCollectorDonationsInFlight = false;
+    let serverCollectorStatusTimer = null;
+    const SERVER_COLLECTOR_POLL_INTERVAL_MS = 10000;
+    let donatePaySocket = null;
+    let donatePaySocketConnected = false;
+    let donatePaySocketSubscribed = false;
+    let donatePayManualDisconnect = false;
+    let donatePayWasDisconnected = false;
+    let donatePayRecoveryTimer = null;
+    let donatePayRecoveryRetryTimer = null;
+    let donatePayRecoveryInFlight = false;
+    let donatePayLastRecoveryAt = 0;
+    let donatePayRecoveryBackoffUntil = 0;
+    let donatePayConnectingPromise = null;
+    const DONATEPAY_CENTRIFUGE_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/centrifuge@2/dist/centrifuge.min.js';
+    const DONATEPAY_RECOVERY_DELAY_MS = 7000;
+    const DONATEPAY_RECOVERY_RETRY_MS = 30000;
+    const DONATEPAY_RECOVERY_BACKOFF_429_MS = 5 * 60 * 1000;
     const appSessionStartedAt = Date.now();
     const seenDonationKeys = new Set();
     console.info('[Donations] session started at:', new Date(appSessionStartedAt).toISOString());
 
-    let donatePayConnection = null;
-    let donatePayConnecting = false;
-    let donationAlertsTimer = null;
-    let donationAlertsAbortController = null;
-    let donationAlertsPollInFlight = false;
-    let donationAlertsBaselineReady = false;
-    let donationAlertsMaxSeenId = 0;
     let integrationModalService = null;
     let donatePayWizardRegion = null;
+    let donationAlertsConnectMode = null;
     let pendingUnlinkService = null;
+    const DONATIONALERTS_BUILTIN_APP_ID = '19587';
+    const DONATIONALERTS_REDIRECT_URL = 'http://127.0.0.1:5500/koleso_papich.html';
+    const DONATIONALERTS_SCOPES = 'oauth-user-show oauth-donation-index';
     window.settings = {
       localServerAvailable: false
     };
@@ -3479,18 +3516,53 @@
       window.open(buildViewUrl(view), '_blank', 'noopener');
     }
 
+    function createDefaultDonationRuntimeStatus() {
+      return {
+        collectorTabId: '',
+        collectorView: '',
+        updatedAt: 0,
+        services: {
+          donatepay: {
+            status: 'disconnected',
+            lastEventAt: '',
+            lastError: ''
+          },
+          donationalerts: {
+            status: 'disconnected',
+            lastEventAt: '',
+            lastError: ''
+          }
+        }
+      };
+    }
+
+    function clearDonationRuntimeStatus() {
+      donationRuntimeStatus = createDefaultDonationRuntimeStatus();
+      try {
+        localStorage.removeItem(DONATION_RUNTIME_STATUS_KEY);
+      } catch (error) {
+        console.warn('[Donations] runtime status clear failed:', error);
+      }
+    }
+
     function setupStateSync() {
       if (typeof BroadcastChannel !== 'undefined') {
         appChannel = new BroadcastChannel('pointauc-wheel-sync');
         appChannel.addEventListener('message', (event) => {
           if (event?.data?.type === 'STATE_UPDATED') {
             applyExternalStateUpdate();
+          } else if (event?.data?.type === 'RESET_ALL_DATA') {
+            handleRemoteResetAllData();
           }
         });
       }
 
       window.addEventListener('storage', (event) => {
         if (event.key === STORAGE_KEY) {
+          if (event.newValue === null) {
+            handleRemoteResetAllData();
+            return;
+          }
           applyExternalStateUpdate();
         }
       });
@@ -3537,22 +3609,25 @@
           userId: '',
           status: 'disconnected',
           lastError: '',
-          lastEventAt: ''
+          lastEventAt: '',
+          lastSeenId: 0,
+          lastSeenCreatedAt: ''
         },
         donationalerts: {
           enabled: false,
           appId: '',
-          clientSecret: '',
           accessToken: '',
-          refreshToken: '',
           tokenType: 'Bearer',
           expiresIn: '',
+          scope: '',
           userId: '',
           mode: 'polling',
           pollingIntervalSec: 10,
           status: 'disconnected',
           lastError: '',
-          lastEventAt: ''
+          lastEventAt: '',
+          lastSeenId: 0,
+          lastSeenCreatedAt: ''
         }
       };
     }
@@ -3568,14 +3643,14 @@
           ...donatepay,
           accessToken: donatepay.accessToken || donatepay.apiKey || '',
           region: donatepay.region === 'eu' ? 'eu' : 'ru',
-          status: 'disconnected'
+          lastSeenId: Number(donatepay.lastSeenId || 0) || 0
         },
         donationalerts: {
           ...defaults.donationalerts,
           ...donationalerts,
-          mode: donationalerts.mode === 'websocket_later' ? 'websocket_later' : 'polling',
+          mode: 'polling',
           pollingIntervalSec: Math.min(3600, Math.max(3, parseInt(donationalerts.pollingIntervalSec, 10) || 10)),
-          status: 'disconnected'
+          lastSeenId: Number(donationalerts.lastSeenId || 0) || 0
         }
       };
     }
@@ -3680,16 +3755,44 @@
       return Math.max(0, Number(entry?.price) || 0);
     }
 
-    function getEliminationPickWeight(entry) {
-      return 1 / Math.max(Number(entry?.price) || 0, 1);
-      // Если текущая формула окажется слишком резкой, заменить на:
-      // return 1 / Math.sqrt(Math.max(Number(entry?.price) || 0, 1));
+    function getPointaucClassicReverseWeight(entry, activeEntries) {
+      const candidates = Array.isArray(activeEntries)
+        ? activeEntries.filter(item => item && !item.eliminated)
+        : entries.filter(item => item && !item.eliminated);
+
+      if (!entry || candidates.length === 0) return 0;
+
+      const totalAmount = candidates.reduce((sum, item) => {
+        return sum + Math.max(0, Number(item.price) || 0);
+      }, 0);
+
+      const safeLength = Math.max(candidates.length, 2);
+
+      if (totalAmount <= 0) {
+        return 1;
+      }
+
+      const amount = Math.max(0, Number(entry.price) || 0);
+      const reverseWeight = (1 - amount / totalAmount) / (safeLength - 1);
+
+      return Number.isFinite(reverseWeight) && reverseWeight > 0
+        ? reverseWeight
+        : 1;
     }
 
-    function getCurrentWheelWeight(entry) {
-      return wheelMode === 'winner'
-        ? getWinnerPickWeight(entry)
-        : getEliminationPickWeight(entry);
+    function getEliminationPickWeight(entry, activeEntries) {
+      return getPointaucClassicReverseWeight(entry, activeEntries);
+    }
+
+    function getCurrentWheelWeight(entry, activeEntries = null) {
+      if (wheelMode === 'winner') {
+        return getWinnerPickWeight(entry);
+      }
+
+      return getEliminationPickWeight(
+        entry,
+        Array.isArray(activeEntries) ? activeEntries : entries.filter(item => item && !item.eliminated)
+      );
     }
 
     function calculateEliminationWinChances(activeEntries) {
@@ -3704,18 +3807,21 @@
 
       const exactLimit = 16;
       const byId = new Map();
-      const weights = new Map();
-      candidates.forEach((entry) => {
-        byId.set(entry.id, entry);
-        weights.set(entry.id, Math.max(0, Number(getEliminationPickWeight(entry)) || 0));
-      });
+      candidates.forEach(entry => byId.set(entry.id, entry));
 
       if (candidates.length > exactLimit) {
-        const survivalWeights = candidates.map(entry => Math.max(Number(entry.price) || 0, 1));
-        const totalSurvivalWeight = survivalWeights.reduce((sum, weight) => sum + weight, 0);
-        candidates.forEach((entry, index) => {
-          result.set(entry.id, totalSurvivalWeight > 0 ? survivalWeights[index] / totalSurvivalWeight : 1 / candidates.length);
+        const totalAmount = candidates.reduce((sum, entry) => {
+          return sum + Math.max(0, Number(entry.price) || 0);
+        }, 0);
+
+        candidates.forEach((entry) => {
+          const amount = Math.max(0, Number(entry.price) || 0);
+          result.set(
+            entry.id,
+            totalAmount > 0 ? amount / totalAmount : 1 / candidates.length
+          );
         });
+
         return result;
       }
 
@@ -3732,7 +3838,22 @@
           return stateResult;
         }
 
-        const totalWeight = ids.reduce((sum, id) => sum + (weights.get(id) || 0), 0);
+        const stateEntries = ids
+          .map(id => byId.get(id))
+          .filter(Boolean);
+
+        const stateWeights = new Map();
+        stateEntries.forEach((entry) => {
+          stateWeights.set(
+            entry.id,
+            Math.max(0, Number(getEliminationPickWeight(entry, stateEntries)) || 0)
+          );
+        });
+
+        const totalWeight = ids.reduce((sum, id) => {
+          return sum + (stateWeights.get(id) || 0);
+        }, 0);
+
         if (totalWeight <= 0) {
           const equalChance = 1 / ids.length;
           ids.forEach(id => stateResult.set(id, equalChance));
@@ -3741,7 +3862,7 @@
         }
 
         ids.forEach((victimId) => {
-          const eliminationChance = (weights.get(victimId) || 0) / totalWeight;
+          const eliminationChance = (stateWeights.get(victimId) || 0) / totalWeight;
           if (eliminationChance <= 0) return;
           const nextIds = ids.filter(id => id !== victimId);
           const nextResult = solve(nextIds);
@@ -4013,6 +4134,7 @@
                 .filter(Boolean)
             : [];
           donationIntegrations = normalizeStoredDonationIntegrations(parsed.donationIntegrations);
+          donationRuntimeStatus = createDefaultDonationRuntimeStatus();
           persistedActiveMainTab = ['auction', 'wheel', 'settings'].includes(parsed.activeMainTab)
             ? parsed.activeMainTab
             : 'auction';
@@ -4064,6 +4186,7 @@
           donationsPending = [];
           donationsAdded = [];
           donationIntegrations = createDefaultDonationIntegrations();
+          donationRuntimeStatus = createDefaultDonationRuntimeStatus();
           activeMainTab = 'auction';
           persistedActiveMainTab = 'auction';
           activeDonationsTab = 'pending';
@@ -4133,8 +4256,43 @@
       modal.setAttribute('aria-hidden', 'true');
     }
 
-    function resetAllSiteData() {
+    function broadcastResetAllData() {
+      if (!appChannel) return;
+      try {
+        appChannel.postMessage({
+          type: 'RESET_ALL_DATA',
+          createdAt: Date.now()
+        });
+      } catch (error) {
+        console.warn('Не удалось отправить RESET_ALL_DATA', error);
+      }
+    }
+
+    function clearProjectStorageKeys() {
+      const keys = [
+        STORAGE_KEY,
+        TIMER_STORAGE_RESET_MS,
+        DONATION_RUNTIME_STATUS_KEY,
+        'pointauc_timer_step_minutes'
+      ];
+      keys.forEach((key) => {
+        try {
+          localStorage.removeItem(key);
+        } catch (error) {
+          console.warn(`Не удалось удалить ${key}`, error);
+        }
+      });
+      try {
+        sessionStorage.clear();
+      } catch (error) {
+        console.warn('Не удалось очистить sessionStorage', error);
+      }
+    }
+
+    function resetRuntimeStateAfterDataClear() {
       suppressPersistence = true;
+      stopServerCollectorBridge();
+      serverCollectorStatus = null;
 
       timerRunning = false;
       timerLastFrameTs = 0;
@@ -4147,8 +4305,7 @@
       if (timerRaf) cancelAnimationFrame(timerRaf);
       timerRaf = null;
 
-      disconnectDonationAlerts(false);
-      disconnectDonatePay(false);
+      clearDonationRuntimeStatus();
 
       entries = [];
       donationsPending = [];
@@ -4165,17 +4322,37 @@
       rightColWidth = 380;
       auctionLeftWidth = 0;
       listItemHeight = 55;
+      wheelMode = 'elimination';
+      spinHistory = [];
+      lastEliminatedId = null;
+      resetWinner();
+      seenDonationKeys.clear();
+      donationAlertsBaselineReady = false;
+      donationAlertsMaxSeenId = 0;
+      document.body.classList.remove('show-result', 'is-spinning');
+      document.getElementById('top-winner-text').innerHTML = '';
+      document.getElementById('center-text-overlay').innerHTML = '';
+    }
 
-      try {
-        localStorage.clear();
-      } catch (error) {
-        console.warn('Не удалось очистить localStorage', error);
-      }
-      try {
-        sessionStorage.clear();
-      } catch (error) {
-        console.warn('Не удалось очистить sessionStorage', error);
-      }
+    function handleRemoteResetAllData() {
+      resetRuntimeStateAfterDataClear();
+      closeResetSiteDataModal();
+      clearProjectStorageKeys();
+      renderList();
+      renderWheelReadonlyEntriesList();
+      renderDonationsPanel();
+      renderIntegrationCards();
+      drawWheel();
+      setTimeout(() => {
+        window.location.reload();
+      }, 50);
+    }
+
+    async function resetAllSiteData() {
+      broadcastResetAllData();
+      await stopServerCollectorForReset();
+      resetRuntimeStateAfterDataClear();
+      clearProjectStorageKeys();
 
       window.location.reload();
     }
@@ -4230,13 +4407,17 @@
     }
 
     function applyViewMode() {
+      appViewMode = getAppViewMode();
       document.body.classList.toggle('app-view-wheel', appViewMode === 'wheel');
       document.body.classList.toggle('app-view-admin', appViewMode === 'admin');
 
       if (appViewMode === 'wheel') {
+        stopServerCollectorBridge();
+        disconnectDonatePayRealtime({ keepStatus: true });
         setActiveMainTab('wheel', false);
       } else {
         setActiveMainTab(persistedActiveMainTab || activeMainTab || 'auction', false);
+        startServerCollectorBridge();
       }
     }
 
@@ -4316,6 +4497,8 @@
 
       const key = getDonationKey(source, externalId);
       const numericId = getNumericDonationId(externalId);
+      const cfg = donationIntegrations.donationalerts;
+      const lastSeenId = Number(cfg.lastSeenId || 0) || 0;
 
       if (seenDonationKeys.has(key)) return false;
 
@@ -4327,7 +4510,13 @@
         return false;
       }
 
-      if (!donationAlertsBaselineReady) {
+      if (lastSeenId > 0 && numericId > 0 && numericId <= lastSeenId) {
+        seenDonationKeys.add(key);
+        if (numericId > donationAlertsMaxSeenId) donationAlertsMaxSeenId = numericId;
+        return false;
+      }
+
+      if (!donationAlertsBaselineReady && lastSeenId <= 0) {
         seenDonationKeys.add(key);
         if (numericId > donationAlertsMaxSeenId) {
           donationAlertsMaxSeenId = numericId;
@@ -4340,19 +4529,94 @@
       if (numericId > donationAlertsMaxSeenId) {
         donationAlertsMaxSeenId = numericId;
       }
+      if (numericId > Number(cfg.lastSeenId || 0)) {
+        cfg.lastSeenId = numericId;
+        cfg.lastSeenCreatedAt = donation.createdAt || cfg.lastSeenCreatedAt || '';
+      }
       console.info('[DonationAlerts] new donation accepted:', key);
       return true;
     }
 
-    function parseDonationCreatedAt(value) {
+    function shouldAcceptDonatePayDonation(donation, options = {}) {
+      const source = 'donatepay';
+      const externalId = donation?.externalId;
+      if (!externalId) return false;
+
+      const key = getDonationKey(source, externalId);
+      const numericId = getNumericDonationId(externalId);
+      const cfg = donationIntegrations.donatepay;
+      const lastSeenId = Number(cfg.lastSeenId || 0) || 0;
+      const realtime = options.realtime === true;
+
+      if (seenDonationKeys.has(key)) return false;
+
+      if (isDonationKnown(source, externalId)) {
+        seenDonationKeys.add(key);
+        if (numericId > Number(cfg.lastSeenId || 0)) cfg.lastSeenId = numericId;
+        return false;
+      }
+
+      if (lastSeenId > 0 && numericId > 0 && numericId <= lastSeenId) {
+        seenDonationKeys.add(key);
+        return false;
+      }
+
+      if (!realtime && lastSeenId <= 0) {
+        seenDonationKeys.add(key);
+        if (numericId > Number(cfg.lastSeenId || 0)) {
+          cfg.lastSeenId = numericId;
+          cfg.lastSeenCreatedAt = donation.createdAt || cfg.lastSeenCreatedAt || '';
+        }
+        console.info('[DonatePay] baseline donation skipped:', key);
+        return false;
+      }
+
+      seenDonationKeys.add(key);
+      if (numericId > Number(cfg.lastSeenId || 0)) {
+        cfg.lastSeenId = numericId;
+        cfg.lastSeenCreatedAt = donation.createdAt || cfg.lastSeenCreatedAt || '';
+      }
+      console.info('[DonatePay] new donation accepted:', key);
+      return true;
+    }
+
+    function parseDonationDateMs(value, source = '') {
       if (!value) return 0;
       if (typeof value === 'number') {
-        if (value < 10000000000) return value * 1000;
-        return value;
+        return value < 10000000000 ? value * 1000 : value;
       }
-      const parsed = Date.parse(value);
-      if (Number.isNaN(parsed)) return 0;
-      return parsed;
+
+      const text = String(value).trim();
+      if (!text) return 0;
+
+      if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(text)) {
+        const parsed = Date.parse(text);
+        return Number.isNaN(parsed) ? 0 : parsed;
+      }
+
+      if (
+        source === 'donationalerts'
+        && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(text)
+      ) {
+        const parsed = Date.parse(text.replace(' ', 'T') + 'Z');
+        return Number.isNaN(parsed) ? 0 : parsed;
+      }
+
+      const parsed = Date.parse(text.replace(' ', 'T'));
+      return Number.isNaN(parsed) ? 0 : parsed;
+    }
+
+    function normalizeDonationCreatedAt(value, source = '') {
+      const ms = parseDonationDateMs(value, source);
+      return ms ? new Date(ms).toISOString() : new Date().toISOString();
+    }
+
+    function parseDonationCreatedAt(value) {
+      return parseDonationDateMs(value);
+    }
+
+    function getDonationCreatedAtMs(donation) {
+      return parseDonationDateMs(donation?.createdAt, donation?.source);
     }
 
     function shouldAcceptDonationForCurrentSession(donation, options = {}) {
@@ -4367,7 +4631,7 @@
 
       if (isDonationKnown(source, externalId)) return false;
 
-      const createdAtMs = parseDonationCreatedAt(donation.createdAt);
+      const createdAtMs = getDonationCreatedAtMs(donation);
       if (!createdAtMs && realtime) {
         console.info('[Donations] new donation accepted:', key);
         return true;
@@ -4401,7 +4665,7 @@
         amount,
         currency: String(donation.currency || 'RUB'),
         message: String(donation.message || ''),
-        createdAt: donation.createdAt || new Date().toISOString(),
+        createdAt: normalizeDonationCreatedAt(donation.createdAt, source),
         assignedEntryId: donation.assignedEntryId || null,
         assignedEntryName: donation.assignedEntryName || null,
         status: donation.status === 'added' || donation.status === 'ignored' ? donation.status : 'pending',
@@ -4413,7 +4677,7 @@
       const normalized = normalizeDonationForStorage({ ...donation, status: 'pending' });
       if (!normalized || isDonationKnown(normalized.source, normalized.externalId)) return false;
       donationsPending.push(normalized);
-      donationsPending.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      donationsPending.sort((a, b) => getDonationCreatedAtMs(a) - getDonationCreatedAtMs(b));
       saveData();
       renderDonationsPanel();
       return true;
@@ -4493,10 +4757,17 @@
       return 'Тест';
     }
 
-    function formatDonationDate(value) {
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return 'Дата неизвестна';
-      return date.toLocaleString('ru-RU');
+    function formatDonationDate(value, source = '') {
+      const ms = parseDonationDateMs(value, source);
+      if (!ms) return 'Дата неизвестна';
+      return new Date(ms).toLocaleString('ru-RU', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
     }
 
     function createDonationCard(donation, options = {}) {
@@ -4526,7 +4797,7 @@
       const meta = document.createElement('div');
       meta.className = 'donation-card-meta';
       const date = document.createElement('span');
-      date.textContent = formatDonationDate(donation.createdAt);
+      date.textContent = formatDonationDate(donation.createdAt, donation.source);
       const source = document.createElement('span');
       source.className = 'donation-source-inline';
       source.textContent = formatDonationSource(donation.source);
@@ -4573,7 +4844,7 @@
       const pending = donationsPending
         .filter(donation => donation.status === 'pending')
         .slice()
-        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        .sort((a, b) => getDonationCreatedAtMs(a) - getDonationCreatedAtMs(b));
       if (pending.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'donation-empty';
@@ -4632,35 +4903,412 @@
     function normalizeDonatePayEvent(raw) {
       const notification = raw?.data?.notification
         || raw?.notification
-        || raw?.data?.data?.notification;
+        || raw?.data?.data?.notification
+        || (raw?.type === 'donation' ? raw : null);
       if (!notification || notification.type !== 'donation' || notification.id == null) return null;
+      const externalId = String(notification.id);
+      const createdAt = normalizeDonationCreatedAt(notification.created_at || '', 'donatepay');
       const donation = normalizeDonationForStorage({
-        id: `donatepay-${notification.id}`,
+        id: `donatepay-${externalId}`,
         source: 'donatepay',
-        externalId: String(notification.id),
+        externalId: String(externalId),
         username: notification.vars?.name || 'Anonymous',
         amount: Number(notification.vars?.sum),
         currency: notification.vars?.currency || 'RUB',
         message: notification.vars?.comment || '',
-        createdAt: notification.created_at || new Date().toISOString(),
+        createdAt,
         assignedEntryId: null,
         assignedEntryName: null,
         status: 'pending',
         raw: notification
       });
-      if (donation) donation.createdAt = notification.created_at || '';
+      if (donation) donation.createdAt = createdAt;
       return donation;
+    }
+
+    function normalizeDonatePayTransactionEvent(raw) {
+      if (!raw || raw.id == null) return null;
+      const rawCreatedAt = raw.created_at || raw.createdAt || raw.date || '';
+      const createdAt = normalizeDonationCreatedAt(rawCreatedAt, 'donatepay');
+      const donation = normalizeDonationForStorage({
+        id: `donatepay-${raw.id}`,
+        source: 'donatepay',
+        externalId: String(raw.id),
+        username: raw.what || raw.name || raw.username || raw.vars?.name || 'Anonymous',
+        amount: Number(raw.sum || raw.amount || raw.vars?.sum),
+        currency: raw.currency || raw.vars?.currency || 'RUB',
+        message: raw.comment || raw.vars?.comment || raw.text || '',
+        createdAt,
+        assignedEntryId: null,
+        assignedEntryName: null,
+        status: 'pending',
+        raw
+      });
+      if (donation) donation.createdAt = createdAt;
+      return donation;
+    }
+
+    function getDonatePayHost(region = 'ru') {
+      return region === 'eu' ? 'donatepay.eu' : 'donatepay.ru';
+    }
+
+    function getDonatePayCentrifugoUrl(region = 'ru') {
+      return `wss://centrifugo.${getDonatePayHost(region)}:443/connection/websocket`;
+    }
+
+    function getDonatePaySocketTokenUrl(region = 'ru') {
+      return `https://${getDonatePayHost(region)}/api/v2/socket/token`;
+    }
+
+    function ensureDonatePayCentrifugeLoaded() {
+      if (window.Centrifuge) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const existing = document.querySelector('script[data-donatepay-centrifuge]');
+        if (existing) {
+          existing.addEventListener('load', () => resolve(), { once: true });
+          existing.addEventListener('error', () => reject(new Error('centrifuge_load_failed')), { once: true });
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = DONATEPAY_CENTRIFUGE_SCRIPT_URL;
+        script.async = true;
+        script.dataset.donatepayCentrifuge = 'true';
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('centrifuge_load_failed'));
+        document.head.appendChild(script);
+      });
+    }
+
+    async function fetchDonatePaySocketToken(settings) {
+      const response = await fetch(getDonatePaySocketTokenUrl(settings.region), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ access_token: settings.accessToken })
+      });
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (error) {}
+      if (!response.ok || !payload?.token) {
+        const error = new Error(response.status === 429
+          ? 'Слишком много запросов к DonatePay. Повторная попытка позже.'
+          : 'Не удалось получить socket token DonatePay.');
+        error.status = response.status;
+        throw error;
+      }
+      return payload.token;
+    }
+
+    async function ensureDonatePayUserId(settings) {
+      if (settings.userId) return settings.userId;
+      const payload = await fetchLocalApi('/api/dp/user', {
+        region: settings.region || 'ru',
+        access_token: settings.accessToken
+      });
+      const userId = payload?.data?.id
+        || payload?.id
+        || payload?.user_id
+        || payload?.data?.user_id
+        || payload?.user?.id;
+      if (!userId) {
+        throw Object.assign(new Error('DonatePay user id not found'), { code: 'MISSING_USER_ID' });
+      }
+      settings.userId = String(userId);
+      saveData();
+      return settings.userId;
+    }
+
+    function clearDonatePayRecoveryTimer() {
+      if (donatePayRecoveryTimer) {
+        clearTimeout(donatePayRecoveryTimer);
+        donatePayRecoveryTimer = null;
+      }
+    }
+
+    function clearDonatePayRecoveryRetryTimer() {
+      if (donatePayRecoveryRetryTimer) {
+        clearTimeout(donatePayRecoveryRetryTimer);
+        donatePayRecoveryRetryTimer = null;
+      }
+    }
+
+    function disconnectDonatePayRealtime(options = {}) {
+      clearDonatePayRecoveryTimer();
+      clearDonatePayRecoveryRetryTimer();
+      donatePayManualDisconnect = true;
+      if (donatePaySocket) {
+        try { donatePaySocket.disconnect(); } catch (error) {}
+      }
+      donatePaySocket = null;
+      donatePaySocketConnected = false;
+      donatePaySocketSubscribed = false;
+      donatePayConnectingPromise = null;
+      donatePayManualDisconnect = false;
+      if (!options.keepStatus && donationIntegrations.donatepay?.enabled) {
+        setIntegrationStatus('donatepay', 'disconnected', '');
+      }
+    }
+
+    function handleDonatePayPublication(message) {
+      const donation = normalizeDonatePayEvent(message?.data || message);
+      if (!donation) return;
+      if (!shouldAcceptDonatePayDonation(donation, { realtime: true })) return;
+      if (addDonationToPending(donation)) {
+        const settings = donationIntegrations.donatepay;
+        settings.status = 'connected';
+        settings.lastError = '';
+        settings.lastEventAt = new Date().toISOString();
+        const numericId = getNumericDonationId(donation.externalId);
+        if (numericId > Number(settings.lastSeenId || 0)) {
+          settings.lastSeenId = numericId;
+          settings.lastSeenCreatedAt = donation.createdAt || settings.lastSeenCreatedAt || '';
+        }
+        saveData();
+        renderIntegrationCards();
+      }
+    }
+
+    function scheduleDonatePayRecovery(reason = 'websocket-reconnected') {
+      clearDonatePayRecoveryTimer();
+      if (
+        appViewMode !== 'admin'
+        || !donationIntegrations.donatepay?.enabled
+        || !donationIntegrations.donatepay?.accessToken
+      ) {
+        return;
+      }
+      donatePayRecoveryTimer = setTimeout(() => {
+        donatePayRecoveryTimer = null;
+        runDonatePayRecovery(reason);
+      }, DONATEPAY_RECOVERY_DELAY_MS);
+    }
+
+    function scheduleDonatePayRecoveryRetry(reason = 'recovery-retry') {
+      clearDonatePayRecoveryRetryTimer();
+      if (
+        appViewMode !== 'admin'
+        || !donationIntegrations.donatepay?.enabled
+        || !donationIntegrations.donatepay?.accessToken
+        || Date.now() < donatePayRecoveryBackoffUntil
+      ) {
+        return;
+      }
+      donatePayRecoveryRetryTimer = setTimeout(() => {
+        donatePayRecoveryRetryTimer = null;
+        runDonatePayRecovery(reason);
+      }, DONATEPAY_RECOVERY_RETRY_MS);
+    }
+
+    async function runDonatePayRecovery(reason = 'websocket-reconnected') {
+      const settings = donationIntegrations.donatepay;
+      if (
+        appViewMode !== 'admin'
+        || donatePayRecoveryInFlight
+        || !settings?.enabled
+        || !settings.accessToken
+        || Date.now() < donatePayRecoveryBackoffUntil
+      ) {
+        return false;
+      }
+      donatePayRecoveryInFlight = true;
+      try {
+        const payload = await fetchLocalApi('/api/dp/recovery-transactions', {
+          region: settings.region || 'ru',
+          access_token: settings.accessToken,
+          after: Number(settings.lastSeenId || 0) || 0,
+          limit: 100
+        });
+        donatePayLastRecoveryAt = Date.now();
+        if (Number(payload?.lastSeenId || 0) > Number(settings.lastSeenId || 0)) {
+          settings.lastSeenId = Number(payload.lastSeenId);
+          saveData();
+        }
+        if (Number(payload?.added || 0) > 0 || Number(payload?.received || 0) > 0) {
+          console.info(`[DonatePay] recovery ${reason}: получено ${payload.received || 0}, новых ${payload.added || 0}`);
+        }
+        if (Number(payload?.added || 0) > 0) {
+          pollServerCollectorStatus();
+        }
+        return true;
+      } catch (error) {
+        const status = Number(error?.upstreamStatus || error?.status || 0);
+        if (status === 429) {
+          donatePayRecoveryBackoffUntil = Date.now() + DONATEPAY_RECOVERY_BACKOFF_429_MS;
+          clearDonatePayRecoveryRetryTimer();
+          console.warn('[DonatePay] recovery rate limited, retry paused for 5 minutes');
+          return false;
+        }
+        console.warn('[DonatePay] recovery skipped:', getFriendlyIntegrationError('donatepay', error));
+        scheduleDonatePayRecoveryRetry(`${reason}-retry`);
+        return false;
+      } finally {
+        donatePayRecoveryInFlight = false;
+      }
+    }
+
+    async function connectDonatePayRealtime(options = {}) {
+      const settings = donationIntegrations.donatepay;
+      if (appViewMode !== 'admin' || !settings?.enabled || !settings.accessToken) return false;
+      if (donatePayConnectingPromise) return donatePayConnectingPromise;
+      if (!options.force && donatePaySocket && donatePaySocketSubscribed) return true;
+
+      donatePayConnectingPromise = (async () => {
+        if (donatePaySocket) {
+          disconnectDonatePayRealtime({ keepStatus: true });
+        }
+
+        settings.status = 'connecting';
+        settings.lastError = '';
+        saveData();
+        renderIntegrationCards();
+
+        await ensureDonatePayUserId(settings);
+        await ensureDonatePayCentrifugeLoaded();
+        const token = await fetchDonatePaySocketToken(settings);
+        console.info('[DonatePay] socket token received');
+
+        return await new Promise((resolve, reject) => {
+          let settled = false;
+          let subscribeAckFallbackTimer = null;
+          const channel = `$public:${settings.userId}`;
+          const clearSubscribeAckFallbackTimer = () => {
+            if (subscribeAckFallbackTimer) {
+              clearTimeout(subscribeAckFallbackTimer);
+              subscribeAckFallbackTimer = null;
+            }
+          };
+          const timeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            clearSubscribeAckFallbackTimer();
+            reject(Object.assign(new Error('DonatePay subscription timeout'), { code: 'TIMEOUT' }));
+          }, 15000);
+
+          const markSubscribed = () => {
+            donatePaySocketSubscribed = true;
+            settings.status = 'connected';
+            settings.lastError = '';
+            settings.lastEventAt = new Date().toISOString();
+            saveData();
+            renderIntegrationCards();
+            console.info('[DonatePay] subscribed');
+            const reason = donatePayWasDisconnected
+              ? 'after-websocket-reconnect'
+              : 'after-websocket-connect';
+            donatePayWasDisconnected = false;
+            scheduleDonatePayRecovery(reason);
+          };
+
+          const finishSubscribed = () => {
+            if (settled) return;
+            settled = true;
+            clearSubscribeAckFallbackTimer();
+            clearTimeout(timeout);
+            markSubscribed();
+            resolve(true);
+          };
+
+          const socket = new window.Centrifuge(getDonatePayCentrifugoUrl(settings.region), {
+            subscribeEndpoint: getDonatePaySocketTokenUrl(settings.region),
+            subscribeParams: {
+              access_token: settings.accessToken
+            },
+            disableWithCredentials: true
+          });
+
+          donatePaySocket = socket;
+          donatePayManualDisconnect = false;
+          donatePaySocketConnected = false;
+          donatePaySocketSubscribed = false;
+
+          try { socket.setToken(token); } catch (error) {}
+
+          socket.subscribe(channel, handleDonatePayPublication);
+
+          socket.on('connect', () => {
+            if (socket !== donatePaySocket) return;
+            donatePaySocketConnected = true;
+            console.info('[DonatePay] websocket connected');
+            clearSubscribeAckFallbackTimer();
+            subscribeAckFallbackTimer = setTimeout(() => {
+              subscribeAckFallbackTimer = null;
+              if (socket !== donatePaySocket) return;
+              if (settled) return;
+              if (!donatePaySocketConnected) return;
+              if (donatePaySocketSubscribed) return;
+              console.info('[DonatePay] subscribe ack fallback accepted');
+              finishSubscribed();
+            }, 1200);
+          });
+          socket.on('subscribe', (event) => {
+            if (socket !== donatePaySocket) return;
+            if (!event?.channel || event.channel === channel) {
+              clearSubscribeAckFallbackTimer();
+              finishSubscribed();
+            }
+          });
+          socket.on('disconnect', () => {
+            if (socket !== donatePaySocket) return;
+            clearSubscribeAckFallbackTimer();
+            donatePaySocketConnected = false;
+            donatePaySocketSubscribed = false;
+            if (!donatePayManualDisconnect && donationIntegrations.donatepay.enabled) {
+              donatePayWasDisconnected = true;
+              donationIntegrations.donatepay.status = 'connecting';
+              donationIntegrations.donatepay.lastError = '';
+              saveData();
+              renderIntegrationCards();
+            }
+          });
+          socket.on('error', (event) => {
+            if (socket !== donatePaySocket) return;
+            clearSubscribeAckFallbackTimer();
+            if (!settled) {
+              settled = true;
+              clearTimeout(timeout);
+              reject(new Error(event?.error || event?.message || 'DonatePay websocket error'));
+              return;
+            }
+            console.warn('[DonatePay] websocket error:', event?.error || event?.message || event);
+          });
+
+          console.info('[DonatePay] connecting...');
+          socket.connect();
+        });
+      })();
+
+      try {
+        return await donatePayConnectingPromise;
+      } catch (error) {
+        settings.status = 'error';
+        settings.lastError = getFriendlyIntegrationError('donatepay', error);
+        saveData();
+        renderIntegrationCards();
+        throw error;
+      } finally {
+        donatePayConnectingPromise = null;
+      }
+    }
+
+    function startDonatePayRealtimeIfNeeded() {
+      if (appViewMode !== 'admin') return;
+      const settings = donationIntegrations.donatepay;
+      if (!settings?.enabled || !settings.accessToken) return;
+      connectDonatePayRealtime().catch((error) => {
+        console.warn('[DonatePay] websocket connect failed:', getFriendlyIntegrationError('donatepay', error));
+      });
     }
 
     function normalizeDonationAlertsEvent(raw) {
       if (!raw || raw.id == null) return null;
-      const createdAt =
+      const rawCreatedAt =
         raw.created_at
         || raw.createdAt
         || raw.date
         || raw.message?.created_at
         || raw.data?.created_at
-        || new Date().toISOString();
+        || '';
+      const createdAt = normalizeDonationCreatedAt(rawCreatedAt, 'donationalerts');
       const donation = normalizeDonationForStorage({
         id: `donationalerts-${raw.id}`,
         source: 'donationalerts',
@@ -4692,6 +5340,17 @@
       const raw = error?.message || String(error || '');
       const text = raw.toLowerCase();
       const status = Number(error?.upstreamStatus || error?.status || raw.match(/\b(401|403)\b/)?.[1]);
+      const proxyPayload = error?.proxyPayload;
+      const proxyDetails = proxyPayload && service === 'donationalerts'
+        ? [
+            proxyPayload.endpoint ? `endpoint: ${proxyPayload.endpoint}` : '',
+            proxyPayload.upstreamStatus ? `HTTP ${proxyPayload.upstreamStatus}` : '',
+            proxyPayload.upstreamUrl ? `url: ${proxyPayload.upstreamUrl}` : '',
+            proxyPayload.upstreamBody ? `body: ${String(proxyPayload.upstreamBody).slice(0, 500)}` : '',
+            proxyPayload.exceptionMessage ? `exception: ${String(proxyPayload.exceptionMessage).slice(0, 300)}` : ''
+          ].filter(Boolean).join(' · ')
+        : '';
+      const withProxyDetails = (message) => proxyDetails ? `${message} ${proxyDetails}` : message;
       if (error?.code === 'EMPTY_TOKEN') {
         return service === 'donatepay'
           ? 'Введите API ключ.'
@@ -4706,25 +5365,25 @@
         return 'Введите ID приложения DonationAlerts.';
       }
       if (error?.code === 'EMPTY_CLIENT_SECRET') {
-        return 'Введите API Key приложения DonationAlerts.';
+        return 'API Key больше не нужен. Подключите DonationAlerts через App ID.';
       }
       if (error?.code === 'LOCAL_SERVER_UNAVAILABLE') {
         return 'Локальный сервер не запущен. Запустите start_koleso.bat.';
       }
       if (text.includes('profile_request_failed') || text.includes('user_id_not_found')) {
-        return 'Не удалось получить данные аккаунта DonationAlerts. Проверьте ID приложения и URL перенаправления.';
+        return withProxyDetails('Не удалось получить данные аккаунта DonationAlerts. Проверьте ID приложения и URL перенаправления.');
       }
       if (error?.code === 'PROFILE_REQUEST_FAILED') {
-        return 'Не удалось получить данные аккаунта DonationAlerts. Проверьте ID приложения и URL перенаправления.';
+        return withProxyDetails('Не удалось получить данные аккаунта DonationAlerts. Проверьте ID приложения и URL перенаправления.');
       }
       if (status === 401 || status === 403 || /\b(401|403)\b/.test(text)) {
-        return 'Ключ неверный или у него нет доступа.';
+        return withProxyDetails('Ключ неверный или у него нет доступа.');
+      }
+      if (service === 'donatepay' && (status === 429 || /\b429\b/.test(text))) {
+        return 'Слишком много запросов к DonatePay. Повторная попытка позже.';
       }
       if (service === 'donationalerts' && (error instanceof TypeError || text.includes('failed to fetch'))) {
         return 'Локальный сервер не запущен. Запустите start_koleso.bat.';
-      }
-      if (text.includes('websocket') || text.includes('centrifuge') || error?.code === 'WEBSOCKET_ERROR') {
-        return 'Не удалось открыть realtime-подключение.';
       }
       if (error instanceof TypeError || text.includes('network') || text.includes('failed to fetch')) {
         return 'Не удалось подключиться. Проверьте интернет или доступность сервиса.';
@@ -4732,7 +5391,7 @@
       if (text.includes('timeout') || error?.code === 'TIMEOUT') {
         return 'Сервис не ответил вовремя. Попробуйте ещё раз.';
       }
-      return 'Не удалось подключить сервис. Проверьте введённые данные и повторите попытку.';
+      return withProxyDetails('Не удалось подключить сервис. Проверьте введённые данные и повторите попытку.');
     }
 
     function formatIntegrationEventTime(value) {
@@ -4741,49 +5400,121 @@
       return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
 
+    function hasIntegrationCredentials(service, settings) {
+      if (service === 'donatepay') {
+        return !!settings?.accessToken;
+      }
+      return !!settings?.accessToken;
+    }
+
+    function getEffectiveIntegrationState(service) {
+      const settings = donationIntegrations[service] || {};
+      const credentials = hasIntegrationCredentials(service, settings);
+      const configured = !!settings.enabled && credentials;
+
+      if (!configured) {
+        return {
+          status: 'disconnected',
+          label: 'Не подключено',
+          message: service === 'donationalerts' && !window.settings?.localServerAvailable
+            ? 'Локальный сервер недоступен. Запустите через start_koleso.bat.'
+            : `Последнее событие: ${formatIntegrationEventTime(settings.lastEventAt)}`
+        };
+      }
+
+      if (service === 'donatepay') {
+        if (settings.status === 'connected') {
+          return {
+            status: 'connected',
+            label: 'Подключено — WebSocket DonatePay',
+            message: `Последнее событие: ${formatIntegrationEventTime(settings.lastEventAt)}`
+          };
+        }
+        if (settings.status === 'connecting') {
+          return {
+            status: 'connecting',
+            label: 'Подключается — WebSocket DonatePay',
+            message: 'Подключение к Centrifugo DonatePay.'
+          };
+        }
+      }
+
+      const serverService = service === 'donationalerts'
+        ? serverCollectorStatus?.services?.[service]
+        : null;
+      if (serverService) {
+        if (serverService.status === 'connected') {
+          return {
+            status: 'connected',
+            label: 'Подключено — собирает local_server.ps1',
+            message: `Последнее событие: ${formatIntegrationEventTime(serverService.lastEventAt || settings.lastEventAt)}`
+          };
+        }
+        if (serverService.status === 'error') {
+          return {
+            status: 'error',
+            label: 'Ошибка',
+            message: serverService.lastError || settings.lastError || 'Ошибка серверного collector.'
+          };
+        }
+        if (serverService.status === 'connecting') {
+          return {
+            status: 'connecting',
+            label: 'Подключается — выполняет local_server.ps1',
+            message: serverService.baselineReady
+              ? `Последнее событие: ${formatIntegrationEventTime(serverService.lastEventAt || settings.lastEventAt)}`
+              : 'Сервер готовит baseline и начнёт принимать только новые донаты.'
+          };
+        }
+      }
+
+      if (settings.status === 'error') {
+        return {
+          status: 'error',
+          label: 'Ошибка',
+          message: settings.lastError || 'Ошибка подключения.'
+        };
+      }
+
+      return {
+        status: 'connecting',
+        label: 'Подключается — local_server.ps1',
+        message: 'Ожидание статуса серверного collector.'
+      };
+    }
+
     function renderIntegrationState() {
       ['donatepay', 'donationalerts'].forEach((service) => {
         const settings = donationIntegrations[service];
+        const effective = getEffectiveIntegrationState(service);
         const card = document.getElementById(`${service}-card`);
         const status = document.getElementById(`${service}-status`);
         const message = document.getElementById(`${service}-card-message`);
         const primary = document.getElementById(`${service}-primary-action`);
         const unlink = document.getElementById(`${service}-unlink-action`);
         const title = document.getElementById(`${service}-title`);
-        const statusLabels = {
-          disconnected: 'Не подключено',
-          connecting: 'Подключается',
-          connected: 'Подключено',
-          error: 'Ошибка'
-        };
         if (card) {
           card.classList.remove('disconnected', 'connecting', 'connected', 'error');
-          card.classList.add(settings.status);
+          card.classList.add(effective.status);
         }
         if (status) {
-          status.className = `integration-status ${settings.status}`;
-          status.textContent = statusLabels[settings.status] || statusLabels.disconnected;
+          status.className = `integration-status ${effective.status}`;
+          status.textContent = effective.label;
         }
         if (title) {
-          title.textContent = service === 'donatepay' && settings.status === 'connected'
+          title.textContent = service === 'donatepay' && hasIntegrationCredentials(service, settings)
             ? `DonatePay (${settings.region.toUpperCase()})`
             : (service === 'donatepay' ? 'DonatePay' : 'DonationAlerts');
         }
         if (message) {
-          if (service === 'donationalerts' && !window.settings?.localServerAvailable && settings.status === 'disconnected') {
-            message.textContent = 'Локальный сервер недоступен. Запустите через start_koleso.bat.';
-          } else {
-            message.textContent = settings.status === 'error' && settings.lastError
-              ? settings.lastError
-              : `Последнее событие: ${formatIntegrationEventTime(settings.lastEventAt)}`;
-          }
+          message.textContent = effective.message;
         }
         if (primary) {
-          primary.classList.toggle('hidden', settings.status === 'connected');
-          primary.disabled = settings.status === 'connecting';
-          primary.textContent = settings.status === 'connecting'
+          primary.classList.toggle('hidden', effective.status === 'connected');
+          primary.disabled = effective.status === 'connecting';
+          primary.textContent = effective.status === 'connecting'
             ? 'Подключается…'
-            : (settings.status === 'error' ? 'Повторить' : 'Подключить');
+            : (effective.status === 'error' ? 'Повторить' : 'Подключить');
         }
         if (unlink) {
           const canUnlink = settings.status === 'connected'
@@ -4812,6 +5543,7 @@
 
     function closeIntegrationConnectModal() {
       integrationModalService = null;
+      donationAlertsConnectMode = null;
       const modal = document.getElementById('integration-connect-modal');
       modal.classList.remove('active');
       modal.setAttribute('aria-hidden', 'true');
@@ -4848,14 +5580,13 @@
         resetDonatePayWizard();
       } else {
         const settings = donationIntegrations.donationalerts;
-        const redirectUrl = location.href.split('#')[0].split('?')[0];
-        const isFileProtocol = location.protocol === 'file:';
-        document.getElementById('donationalerts-app-step').classList.remove('hidden');
-        document.getElementById('donationalerts-id-step').classList.add('hidden');
-        document.getElementById('donationalerts-redirect-url').value = redirectUrl;
-        document.getElementById('donationalerts-file-warning').classList.toggle('hidden', !isFileProtocol);
+        donationAlertsConnectMode = null;
+        document.getElementById('donationalerts-mode-step').classList.remove('hidden');
+        document.getElementById('donationalerts-custom-app-step').classList.add('hidden');
+        document.getElementById('donationalerts-custom-id-step').classList.add('hidden');
+        document.getElementById('donationalerts-redirect-url').value = DONATIONALERTS_REDIRECT_URL;
+        document.getElementById('donationalerts-file-warning').classList.toggle('hidden', isDonationAlertsQuickConnectAvailable());
         document.getElementById('donationalerts-modal-app-id').value = settings.appId || '';
-        document.getElementById('donationalerts-modal-client-secret').value = settings.clientSecret || '';
         document.getElementById('donationalerts-modal-interval').value = String(settings.pollingIntervalSec || 10);
         setIntegrationModalError('donationalerts');
       }
@@ -4866,294 +5597,6 @@
       const show = input.type === 'password';
       input.type = show ? 'text' : 'password';
       button.textContent = show ? 'Скрыть' : 'Показать';
-    }
-
-    function decodeJwtPayload(token) {
-      if (typeof token !== 'string' || token.split('.').length < 2) return null;
-      try {
-        const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-        const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
-        return JSON.parse(decodeURIComponent(Array.from(atob(padded))
-          .map(char => `%${char.charCodeAt(0).toString(16).padStart(2, '0')}`)
-          .join('')));
-      } catch (error) {
-        console.warn('Не удалось декодировать JWT payload', error);
-        return null;
-      }
-    }
-
-    function extractDonatePayUserId(...sources) {
-      const keys = ['user_id', 'userId', 'sub', 'id'];
-      const queue = [...sources];
-      const visited = new Set();
-      while (queue.length > 0) {
-        const value = queue.shift();
-        if (!value || typeof value !== 'object' || visited.has(value)) continue;
-        visited.add(value);
-        for (const key of keys) {
-          const candidate = value[key];
-          if (candidate != null && /^\d+$/.test(String(candidate))) return String(candidate);
-        }
-        Object.values(value).forEach(child => {
-          if (child && typeof child === 'object') queue.push(child);
-        });
-      }
-      return '';
-    }
-
-    function handleDonatePayPublication(raw) {
-      console.info('DonatePay event', raw);
-      const donation = normalizeDonatePayEvent(raw);
-      donationIntegrations.donatepay.lastEventAt = new Date().toISOString();
-      donationIntegrations.donatepay.lastError = '';
-      if (donation && shouldAcceptDonationForCurrentSession(donation, { realtime: true })) {
-        addDonationToPending(donation);
-      }
-      saveData();
-      renderIntegrationState();
-    }
-
-    function waitForCentrifuge(timeoutMs = 5000) {
-      return new Promise((resolve, reject) => {
-        if (typeof window.Centrifuge === 'function') {
-          resolve(window.Centrifuge);
-          return;
-        }
-        const startedAt = Date.now();
-        const timer = setInterval(() => {
-          if (typeof window.Centrifuge === 'function') {
-            clearInterval(timer);
-            resolve(window.Centrifuge);
-            return;
-          }
-          if (Date.now() - startedAt > timeoutMs) {
-            clearInterval(timer);
-            reject(new Error('centrifuge_not_loaded'));
-          }
-        }, 100);
-      });
-    }
-
-    async function connectDonatePay(options = {}) {
-      if (donatePayConnecting) {
-        return { ok: false, connecting: true };
-      }
-      if (donatePayConnection) {
-        const previousConnection = donatePayConnection;
-        donatePayConnection = null;
-        try {
-          previousConnection.disconnect();
-        } catch (error) {
-          console.warn('[DonatePay] previous connection cleanup failed:', error);
-        }
-      }
-
-      donatePayConnecting = true;
-      const settings = donationIntegrations.donatepay;
-      const wasEnabled = !!settings.enabled;
-      try {
-        if (options.region) settings.region = options.region === 'eu' ? 'eu' : 'ru';
-        if (options.accessToken !== undefined) settings.accessToken = String(options.accessToken).trim();
-        if (options.userId !== undefined) settings.userId = String(options.userId).trim();
-        settings.lastError = '';
-        if (!settings.accessToken) {
-          throw Object.assign(new Error('Empty token'), { code: 'EMPTY_TOKEN' });
-        }
-
-        console.info('[DonatePay] connecting...');
-        settings.status = 'connecting';
-        saveData();
-        renderIntegrationCards();
-
-        const Centrifuge = await waitForCentrifuge();
-        const host = settings.region === 'eu' ? 'donatepay.eu' : 'donatepay.ru';
-        // Для публичного сайта токены нельзя хранить во frontend. Для продакшена нужен backend.
-        const response = await fetch(`https://${host}/api/v2/socket/token`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ access_token: settings.accessToken })
-        });
-        if (!response.ok) {
-          throw Object.assign(new Error(`Token endpoint: HTTP ${response.status}`), { status: response.status });
-        }
-        const payload = await response.json();
-        const socketToken = payload?.token || payload?.data?.token;
-        if (!socketToken) throw new Error('Token endpoint не вернул token');
-        console.info('[DonatePay] socket token received');
-
-        const automaticUserId = extractDonatePayUserId(
-          payload,
-          decodeJwtPayload(socketToken),
-          decodeJwtPayload(settings.accessToken)
-        );
-        if (!settings.userId && automaticUserId) settings.userId = automaticUserId;
-        if (!settings.userId) {
-          throw Object.assign(new Error('DonatePay User ID unavailable'), { code: 'MISSING_USER_ID' });
-        }
-
-        const channel = `$public:${settings.userId}`;
-        const client = new Centrifuge(
-          `wss://centrifugo.${host}:443/connection/websocket`,
-          {
-            subscribeEndpoint: `https://${host}/api/v2/socket/token`,
-            subscribeParams: {
-              access_token: settings.accessToken
-            },
-            disableWithCredentials: true
-          }
-        );
-        donatePayConnection = client;
-        client.setToken(socketToken);
-        await new Promise((resolve, reject) => {
-          let settled = false;
-          let subscribed = false;
-          let websocketConnected = false;
-          let subscription = null;
-          let subscriptionProbe = null;
-          const timeout = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            if (subscriptionProbe) clearInterval(subscriptionProbe);
-            reject(Object.assign(
-              new Error(websocketConnected ? 'DonatePay subscription timeout' : 'WebSocket connection timeout'),
-              { code: websocketConnected ? 'SUBSCRIPTION_FAILED' : 'TIMEOUT' }
-            ));
-          }, 15000);
-
-          const rejectConnection = (error) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeout);
-            if (subscriptionProbe) clearInterval(subscriptionProbe);
-            reject(error);
-          };
-
-          const finishSubscribed = (context = {}) => {
-            if (donatePayConnection !== client) return;
-            if (context?.channel && context.channel !== channel) return;
-            subscribed = true;
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeout);
-            if (subscriptionProbe) clearInterval(subscriptionProbe);
-            console.info('[DonatePay] channel token received');
-            console.info('[DonatePay] subscribed');
-            resolve(context);
-          };
-
-          const isSubscriptionConfirmed = () => {
-            const state = String(subscription?.state || subscription?._state || '').toLowerCase();
-            const internal = client?._subs?.[channel] || client?._subscriptions?.[channel];
-            const internalState = String(internal?.state || internal?._state || '').toLowerCase();
-            return state === 'subscribed'
-              || subscription?.subscribed === true
-              || subscription?._isSubscribed === true
-              || internalState === 'subscribed'
-              || internal?.subscribed === true
-              || internal?.success === true;
-          };
-
-          client.on('connect', () => {
-            if (donatePayConnection !== client) return;
-            websocketConnected = true;
-            console.info('[DonatePay] websocket connected');
-          });
-          client.on('subscribe', finishSubscribed);
-          client.on('subscribed', finishSubscribed);
-          client.on('disconnect', (context) => {
-            if (donatePayConnection !== client) return;
-            const error = Object.assign(
-              new Error(context?.reason || 'WebSocket disconnected'),
-              { code: 'WEBSOCKET_ERROR' }
-            );
-            if (!settled) {
-              rejectConnection(error);
-            } else {
-              settings.status = 'error';
-              settings.lastError = getFriendlyIntegrationError('donatepay', error);
-              saveData();
-              renderIntegrationCards();
-            }
-          });
-          client.on('error', (context) => {
-            const subscriptionFailed = websocketConnected && !subscribed;
-            const error = Object.assign(new Error(
-              context?.error?.message
-                || context?.message
-                || (subscriptionFailed ? 'DonatePay subscription failed' : 'WebSocket error')
-            ), {
-              code: subscriptionFailed ? 'SUBSCRIPTION_FAILED' : 'WEBSOCKET_ERROR'
-            });
-            if (!settled) {
-              rejectConnection(error);
-            } else {
-              settings.status = 'error';
-              settings.lastError = error.code === 'SUBSCRIPTION_FAILED'
-                ? 'Не удалось подтвердить подписку DonatePay.'
-                : getFriendlyIntegrationError('donatepay', error);
-              saveData();
-              renderIntegrationCards();
-            }
-          });
-          subscription = client.subscribe(channel, handleDonatePayPublication);
-          if (subscription && typeof subscription.on === 'function') {
-            subscription.on('subscribe', finishSubscribed);
-            subscription.on('subscribed', finishSubscribed);
-            subscription.on('error', (context) => {
-              const error = Object.assign(new Error(
-                context?.error?.message || context?.message || 'DonatePay subscription failed'
-              ), { code: 'SUBSCRIPTION_FAILED' });
-              rejectConnection(error);
-            });
-          }
-          subscriptionProbe = setInterval(() => {
-            if (isSubscriptionConfirmed()) finishSubscribed({ channel });
-          }, 100);
-          client.connect();
-        });
-        settings.enabled = true;
-        settings.status = 'connected';
-        settings.lastError = '';
-        console.info('[DonatePay] connected');
-        saveData();
-        renderIntegrationCards();
-        return { ok: true, userId: settings.userId };
-      } catch (error) {
-        if (error?.code === 'SUBSCRIPTION_FAILED') {
-          console.warn('[DonatePay] subscription failed:', error);
-        } else {
-          console.warn('[DonatePay] connection failed:', error);
-        }
-        if (donatePayConnection) {
-          try { donatePayConnection.disconnect(); } catch (disconnectError) {}
-        }
-        donatePayConnection = null;
-        settings.enabled = wasEnabled;
-        settings.status = 'error';
-        const friendly = error?.code === 'SUBSCRIPTION_FAILED'
-          ? 'Не удалось подтвердить подписку DonatePay.'
-          : getFriendlyIntegrationError('donatepay', error);
-        settings.lastError = friendly;
-        saveData();
-        renderIntegrationCards();
-        return { ok: false, error, friendly, needsUserId: error?.code === 'MISSING_USER_ID' };
-      } finally {
-        donatePayConnecting = false;
-      }
-    }
-
-    function disconnectDonatePay(updateState = true) {
-      const client = donatePayConnection;
-      donatePayConnection = null;
-      donatePayConnecting = false;
-      if (client) {
-        try {
-          client.disconnect();
-        } catch (error) {
-          console.warn('DonatePay disconnect error', error);
-        }
-      }
-      if (updateState) setIntegrationStatus('donatepay', 'disconnected');
     }
 
     async function fetchLocalApi(path, body, options = {}) {
@@ -5180,11 +5623,178 @@
       if (!response.ok) {
         const proxyError = new Error(payload?.error || `Local proxy HTTP ${response.status}`);
         proxyError.status = response.status;
-        proxyError.upstreamStatus = Number(payload?.upstream_status || 0) || null;
+        proxyError.upstreamStatus = Number(payload?.upstreamStatus || payload?.upstream_status || 0) || null;
+        proxyError.upstreamBody = payload?.upstreamBody || '';
+        proxyError.endpoint = payload?.endpoint || path;
+        proxyError.exceptionMessage = payload?.exceptionMessage || '';
         proxyError.proxyPayload = payload;
         throw proxyError;
       }
       return payload;
+    }
+
+    function buildServerCollectorConfig() {
+      const donatepay = donationIntegrations.donatepay || {};
+      const donationalerts = donationIntegrations.donationalerts || {};
+      return {
+        donatepay: {
+          enabled: false,
+          region: donatepay.region || 'ru',
+          accessToken: '',
+          userId: donatepay.userId || ''
+        },
+        donationalerts: {
+          enabled: !!donationalerts.enabled && !!donationalerts.accessToken,
+          appId: donationalerts.appId || '',
+          accessToken: donationalerts.accessToken || '',
+          tokenType: donationalerts.tokenType || 'Bearer',
+          userId: donationalerts.userId || '',
+          pollingIntervalSec: donationalerts.pollingIntervalSec || 10
+        }
+      };
+    }
+
+    function applyServerCollectorStatus(status) {
+      if (!status?.ok) return;
+      serverCollectorStatus = status;
+      const services = status.services || {};
+      ['donatepay', 'donationalerts'].forEach((service) => {
+        const runtime = services[service];
+        if (!runtime) return;
+        donationRuntimeStatus.services[service] = {
+          ...(donationRuntimeStatus.services?.[service] || {}),
+          status: runtime.status || 'disconnected',
+          lastError: runtime.lastError || '',
+          lastEventAt: runtime.lastEventAt || ''
+        };
+      });
+      donationRuntimeStatus.collectorTabId = 'local_server';
+      donationRuntimeStatus.collectorView = 'server';
+      donationRuntimeStatus.updatedAt = Date.now();
+      renderIntegrationCards();
+    }
+
+    async function syncServerCollectorConfig() {
+      if (appViewMode !== 'admin') return false;
+      if (serverCollectorConfigInFlight || location.protocol === 'file:') return false;
+      const config = buildServerCollectorConfig();
+      serverCollectorConfigInFlight = true;
+      try {
+        const status = await fetchLocalApi('/api/collector/config', config);
+        applyServerCollectorStatus(status);
+        return true;
+      } catch (error) {
+        console.warn('[Collector] config sync failed', error);
+        return false;
+      } finally {
+        serverCollectorConfigInFlight = false;
+      }
+    }
+
+    async function pollServerCollectorStatus() {
+      if (appViewMode !== 'admin') return false;
+      if (serverCollectorStatusInFlight || location.protocol === 'file:') return false;
+      serverCollectorStatusInFlight = true;
+      try {
+        const status = await fetchLocalApi('/api/collector/status');
+        applyServerCollectorStatus(status);
+        const pendingCount = Number(status?.pendingServerDonations || 0);
+        if (pendingCount > 0) {
+          await pollServerCollectorDonations();
+        }
+        return true;
+      } catch (error) {
+        return false;
+      } finally {
+        serverCollectorStatusInFlight = false;
+      }
+    }
+
+    async function ackServerCollectorDonations(ids) {
+      if (appViewMode !== 'admin') return;
+      if (!ids?.length || location.protocol === 'file:') return;
+      try {
+        await fetchLocalApi('/api/collector/donations/ack', { ids });
+      } catch (error) {
+        console.warn('[Collector] donations ack failed', error);
+      }
+    }
+
+    async function pollServerCollectorDonations() {
+      if (appViewMode !== 'admin') return false;
+      if (serverCollectorDonationsInFlight || location.protocol === 'file:') return false;
+      serverCollectorDonationsInFlight = true;
+      try {
+        const payload = await fetchLocalApi('/api/collector/donations');
+        const pending = Array.isArray(payload?.pending) ? payload.pending : [];
+        if (pending.length === 0) return true;
+
+        const ackIds = [];
+        pending.forEach((donation) => {
+          if (!donation?.id) return;
+          const amount = Number(donation.amount);
+          if (
+            !donation.source
+            || !donation.externalId
+            || !Number.isFinite(amount)
+            || amount <= 0
+          ) {
+            console.warn('[Collector] invalid donation skipped:', donation);
+            ackIds.push(donation.id);
+            return;
+          }
+          if (isDonationKnown(donation.source, donation.externalId)) {
+            ackIds.push(donation.id);
+            return;
+          }
+          if (addDonationToPending(donation)) {
+            ackIds.push(donation.id);
+          } else {
+            ackIds.push(donation.id);
+          }
+        });
+        await ackServerCollectorDonations(ackIds);
+        return true;
+      } catch (error) {
+        return false;
+      } finally {
+        serverCollectorDonationsInFlight = false;
+      }
+    }
+
+    function startServerCollectorBridge() {
+      if (appViewMode !== 'admin') {
+        return;
+      }
+      startDonatePayRealtimeIfNeeded();
+
+      if (!serverCollectorStatusTimer) {
+        syncServerCollectorConfig();
+        pollServerCollectorStatus();
+        serverCollectorStatusTimer = setInterval(
+          pollServerCollectorStatus,
+          SERVER_COLLECTOR_POLL_INTERVAL_MS
+        );
+      }
+    }
+
+    function stopServerCollectorBridge() {
+      if (serverCollectorStatusTimer) clearInterval(serverCollectorStatusTimer);
+      clearDonatePayRecoveryRetryTimer();
+      serverCollectorStatusTimer = null;
+      serverCollectorConfigInFlight = false;
+      serverCollectorStatusInFlight = false;
+      serverCollectorDonationsInFlight = false;
+    }
+
+    async function stopServerCollectorForReset() {
+      if (location.protocol === 'file:') return;
+      try {
+        await Promise.allSettled([
+          fetch('/api/collector/stop', { method: 'POST', keepalive: true }),
+          fetch('/api/collector/donations/clear', { method: 'POST', keepalive: true })
+        ]);
+      } catch (error) {}
     }
 
     async function checkLocalServer() {
@@ -5201,167 +5811,6 @@
       }
       renderIntegrationCards();
       return window.settings.localServerAvailable;
-    }
-
-    async function refreshDonationAlertsToken() {
-      const integration = donationIntegrations.donationalerts;
-      if (!integration.appId || !integration.clientSecret || !integration.refreshToken) return false;
-      const payload = await fetchLocalApi('/api/da/refresh', {
-        client_id: integration.appId,
-        client_secret: integration.clientSecret,
-        refresh_token: integration.refreshToken
-      });
-      if (!payload?.access_token) return false;
-      integration.accessToken = payload.access_token;
-      integration.refreshToken = payload.refresh_token || integration.refreshToken;
-      integration.tokenType = payload.token_type || 'Bearer';
-      integration.expiresIn = payload.expires_in || '';
-      saveData();
-      return true;
-    }
-
-    async function pollDonationAlerts(allowRefresh = true) {
-      const settings = donationIntegrations.donationalerts;
-      if (donationAlertsPollInFlight || settings.status === 'disconnected') return false;
-      donationAlertsPollInFlight = true;
-      donationAlertsAbortController = new AbortController();
-      try {
-        const payload = await fetchLocalApi('/api/da/donations', {
-          access_token: settings.accessToken
-        }, {
-          signal: donationAlertsAbortController.signal
-        });
-        const rows = Array.isArray(payload) ? payload : (Array.isArray(payload?.data) ? payload.data : []);
-        let added = 0;
-        rows
-          .slice()
-          .sort((a, b) => {
-            const aId = getNumericDonationId(a?.id);
-            const bId = getNumericDonationId(b?.id);
-            if (aId && bId) return aId - bId;
-            return new Date(a?.created_at || a?.date || 0).getTime()
-              - new Date(b?.created_at || b?.date || 0).getTime();
-          })
-          .forEach((raw) => {
-            const donation = normalizeDonationAlertsEvent(raw);
-            if (!donation) return;
-            if (!shouldAcceptDonationAlertsDonation(donation)) return;
-            if (addDonationToPending(donation)) {
-              added += 1;
-            }
-          });
-        if (!donationAlertsBaselineReady) {
-          donationAlertsBaselineReady = true;
-          console.info('[DonationAlerts] baseline ready, max id:', donationAlertsMaxSeenId);
-        }
-        settings.status = 'connected';
-        settings.lastError = '';
-        settings.lastEventAt = new Date().toISOString();
-        console.info(`DonationAlerts polling: получено ${rows.length}, новых ${added}`);
-        saveData();
-        renderIntegrationCards();
-        return true;
-      } catch (error) {
-        if (error?.name !== 'AbortError') {
-          console.error('DonationAlerts polling error', error);
-          if (allowRefresh && settings.refreshToken) {
-            try {
-              donationAlertsPollInFlight = false;
-              if (await refreshDonationAlertsToken()) {
-                return pollDonationAlerts(false);
-              }
-            } catch (refreshError) {
-              console.error('DonationAlerts token refresh error', refreshError);
-            }
-          }
-          const friendly = getFriendlyIntegrationError('donationalerts', error);
-          setIntegrationStatus('donationalerts', 'error', friendly);
-        }
-        return false;
-      } finally {
-        donationAlertsPollInFlight = false;
-        donationAlertsAbortController = null;
-      }
-    }
-
-    async function connectDonationAlerts(options = {}) {
-      disconnectDonationAlerts(false);
-      const settings = donationIntegrations.donationalerts;
-      if (options.accessToken !== undefined) settings.accessToken = String(options.accessToken).trim();
-      if (options.userId !== undefined) settings.userId = String(options.userId).trim();
-      if (options.pollingIntervalSec !== undefined) {
-        settings.pollingIntervalSec = Math.min(3600, Math.max(3, parseInt(options.pollingIntervalSec, 10) || 10));
-      }
-      settings.mode = 'polling';
-      settings.enabled = false;
-      settings.lastError = '';
-      if (!settings.accessToken) {
-        const error = Object.assign(new Error('Empty token'), { code: 'EMPTY_TOKEN' });
-        const friendly = getFriendlyIntegrationError('donationalerts', error);
-        setIntegrationStatus('donationalerts', 'error', friendly);
-        return { ok: false, error, friendly };
-      }
-      if (!settings.userId) {
-        const error = Object.assign(new Error('Missing user ID'), { code: 'MISSING_USER_ID' });
-        const friendly = getFriendlyIntegrationError('donationalerts', error);
-        setIntegrationStatus('donationalerts', 'error', friendly);
-        return { ok: false, error, friendly };
-      }
-      setIntegrationStatus('donationalerts', 'connecting');
-      const ok = await pollDonationAlerts();
-      if (!ok) {
-        return { ok: false, friendly: settings.lastError };
-      }
-      settings.enabled = true;
-      settings.status = 'connected';
-      settings.lastError = '';
-      saveData();
-      renderIntegrationState();
-      donationAlertsTimer = setInterval(pollDonationAlerts, settings.pollingIntervalSec * 1000);
-      return { ok: true };
-    }
-
-    function disconnectDonationAlerts(updateState = true) {
-      if (donationAlertsTimer) clearInterval(donationAlertsTimer);
-      donationAlertsTimer = null;
-      if (donationAlertsAbortController) donationAlertsAbortController.abort();
-      donationAlertsAbortController = null;
-      donationAlertsPollInFlight = false;
-      if (updateState) setIntegrationStatus('donationalerts', 'disconnected');
-    }
-
-    async function restoreDonatePayConnection() {
-      const cfg = donationIntegrations?.donatepay;
-      if (!cfg) return false;
-
-      const hasToken = Boolean(cfg.accessToken || cfg.apiKey);
-      const hasRegion = Boolean(cfg.region);
-      if (!cfg.enabled || !hasToken || !hasRegion) {
-        cfg.status = 'disconnected';
-        renderIntegrationCards();
-        return false;
-      }
-
-      console.info('[DonatePay] restore connection requested');
-      cfg.status = 'connecting';
-      cfg.lastError = '';
-      saveData();
-      renderIntegrationCards();
-      const result = await connectDonatePay();
-      return !!result?.ok;
-    }
-
-    async function restoreDonationAlertsConnection(oauthHandled = false) {
-      if (oauthHandled) return true;
-      const cfg = donationIntegrations?.donationalerts;
-      if (!cfg?.enabled || !cfg.accessToken) return false;
-      await finishDonationAlertsConnection();
-      return cfg.status === 'connected';
-    }
-
-    function restoreDonationIntegrations(options = {}) {
-      restoreDonatePayConnection();
-      restoreDonationAlertsConnection(!!options.donationAlertsOAuthHandled);
     }
 
     function setModalButtonLoading(button, loading, loadingText) {
@@ -5391,72 +5840,73 @@
         return;
       }
       setModalButtonLoading(button, true, 'Подключаем…');
-      const result = await connectDonatePay({
-        region: donatePayWizardRegion,
-        accessToken,
-        userId
-      });
-      setModalButtonLoading(button, false, '');
-      if (result.ok) {
+      const settings = donationIntegrations.donatepay;
+      settings.enabled = true;
+      settings.region = donatePayWizardRegion === 'eu' ? 'eu' : 'ru';
+      settings.accessToken = accessToken;
+      settings.userId = userId;
+      settings.status = 'connecting';
+      settings.lastError = '';
+      saveData();
+      try {
+        await syncServerCollectorConfig();
+        await connectDonatePayRealtime({ force: true });
+        setModalButtonLoading(button, false, '');
         closeIntegrationConnectModal();
         return;
+      } catch (error) {
+        setModalButtonLoading(button, false, '');
+        setIntegrationModalError('donatepay', getFriendlyIntegrationError('donatepay', error));
       }
-      if (result.needsUserId) {
-        document.getElementById('donatepay-user-id-notice').classList.remove('hidden');
-        document.getElementById('donatepay-advanced').open = true;
-        document.getElementById('donatepay-modal-user-id').focus();
-      }
-      setIntegrationModalError('donatepay', result.friendly || donationIntegrations.donatepay.lastError);
     }
 
-    function buildDonationAlertsAuthUrl(appId, redirectUrl) {
-      return 'https://www.donationalerts.com/oauth/authorize'
-        + '?client_id=' + encodeURIComponent(appId)
-        + '&redirect_uri=' + encodeURIComponent(redirectUrl)
-        + '&response_type=code'
-        + '&scope=' + encodeURIComponent('oauth-user-show oauth-donation-index');
+    function isDonationAlertsQuickConnectAvailable() {
+      return location.protocol === 'http:'
+        && location.hostname === '127.0.0.1'
+        && location.port === '5500';
     }
 
-    async function startDonationAlertsOAuth() {
-      const appId = document.getElementById('donationalerts-modal-app-id').value.trim();
-      const clientSecret = document.getElementById('donationalerts-modal-client-secret').value.trim();
+    function buildDonationAlertsImplicitOAuthUrl(appId) {
+      const url = new URL('https://www.donationalerts.com/oauth/authorize');
+      url.searchParams.set('client_id', appId);
+      url.searchParams.set('redirect_uri', DONATIONALERTS_REDIRECT_URL);
+      url.searchParams.set('response_type', 'token');
+      url.searchParams.set('scope', DONATIONALERTS_SCOPES);
+      return url.toString();
+    }
+
+    function startDonationAlertsImplicitOAuth(appId) {
+      const cleanAppId = String(appId || '').trim();
       const pollingIntervalSec = Math.min(
         3600,
         Math.max(3, parseInt(document.getElementById('donationalerts-modal-interval').value, 10) || 10)
       );
       setIntegrationModalError('donationalerts');
-      if (location.protocol === 'file:') {
-        setIntegrationModalError(
-          'donationalerts',
-          'Для DonationAlerts запустите сайт через start_koleso.bat.'
-        );
-        return;
-      }
-      if (!await checkLocalServer()) {
-        setIntegrationModalError(
-          'donationalerts',
-          'Локальный сервер не запущен. Запустите start_koleso.bat.'
-        );
-        return;
-      }
-      if (!appId) {
+      if (!cleanAppId) {
         setIntegrationModalError('donationalerts', 'Введите ID приложения DonationAlerts.');
         return;
       }
-      if (!clientSecret) {
-        setIntegrationModalError('donationalerts', 'Введите API Key приложения DonationAlerts.');
+      if (!isDonationAlertsQuickConnectAvailable()) {
+        setIntegrationModalError('donationalerts', 'Быстрое подключение доступно только на 127.0.0.1:5500');
         return;
       }
-      const redirectUrl = location.href.split('#')[0].split('?')[0];
       const settings = donationIntegrations.donationalerts;
-      settings.appId = appId;
-      settings.clientSecret = clientSecret;
+      settings.appId = cleanAppId;
       settings.pollingIntervalSec = pollingIntervalSec;
       settings.mode = 'polling';
+      settings.status = 'connecting';
       settings.lastError = '';
       saveData();
 
-      location.href = buildDonationAlertsAuthUrl(appId, redirectUrl);
+      location.href = buildDonationAlertsImplicitOAuthUrl(settings.appId);
+    }
+
+    function startDonationAlertsCustomOAuth() {
+      startDonationAlertsImplicitOAuth(document.getElementById('donationalerts-modal-app-id').value);
+    }
+
+    function startDonationAlertsQuickOAuth() {
+      startDonationAlertsImplicitOAuth(DONATIONALERTS_BUILTIN_APP_ID);
     }
 
     async function copyDonationAlertsRedirectUrl() {
@@ -5478,11 +5928,20 @@
       }
     }
 
+    function getOAuthHashParams() {
+      const raw = location.hash.startsWith('#') ? location.hash.slice(1) : location.hash;
+      return new URLSearchParams(raw);
+    }
+
     function handleDonationAlertsOAuthCallback() {
-      const params = new URLSearchParams(location.search);
-      const code = params.get('code');
-      if (!code) return false;
+      const hashParams = getOAuthHashParams();
+      const accessToken = hashParams.get('access_token');
+      if (!accessToken) return false;
       const settings = donationIntegrations.donationalerts;
+      settings.accessToken = accessToken;
+      settings.tokenType = hashParams.get('token_type') || 'Bearer';
+      settings.expiresIn = hashParams.get('expires_in') || '';
+      settings.scope = hashParams.get('scope') || '';
       settings.enabled = true;
       settings.status = 'connecting';
       settings.lastError = '';
@@ -5490,53 +5949,18 @@
 
       try {
         if (history.replaceState) {
-          const cleanUrl = location.href.split('?')[0].split('#')[0];
-          history.replaceState(null, document.title, cleanUrl);
+          const cleanUrl = new URL(location.href);
+          cleanUrl.hash = '';
+          cleanUrl.searchParams.set('view', 'admin');
+          history.replaceState(null, document.title, cleanUrl.toString());
+          appViewMode = getAppViewMode();
         }
       } catch (error) {
-        console.warn('Не удалось очистить OAuth code из адресной строки', error);
+        console.warn('Не удалось очистить OAuth token из адресной строки', error);
       }
 
-      exchangeDonationAlertsCode(code);
+      finishDonationAlertsConnection();
       return true;
-    }
-
-    async function exchangeDonationAlertsCode(code) {
-      const settings = donationIntegrations.donationalerts;
-      try {
-        if (!settings.appId) throw Object.assign(new Error('Missing app ID'), { code: 'EMPTY_APP_ID' });
-        if (!settings.clientSecret) {
-          throw Object.assign(new Error('Missing client secret'), { code: 'EMPTY_CLIENT_SECRET' });
-        }
-        if (!await checkLocalServer()) {
-          throw Object.assign(new Error('Local server unavailable'), { code: 'LOCAL_SERVER_UNAVAILABLE' });
-        }
-        const redirectUrl = location.href.split('#')[0].split('?')[0];
-        const tokenPayload = await fetchLocalApi('/api/da/token', {
-          client_id: settings.appId,
-          client_secret: settings.clientSecret,
-          redirect_uri: redirectUrl,
-          code
-        });
-        if (!tokenPayload?.access_token) throw new Error('token_exchange_failed');
-
-        settings.accessToken = tokenPayload.access_token;
-        settings.refreshToken = tokenPayload.refresh_token || '';
-        settings.tokenType = tokenPayload.token_type || 'Bearer';
-        settings.expiresIn = tokenPayload.expires_in || '';
-        settings.enabled = true;
-        settings.status = 'connecting';
-        settings.lastError = '';
-        saveData();
-        await finishDonationAlertsConnection();
-      } catch (error) {
-        console.error('DonationAlerts token exchange error', error);
-        settings.enabled = false;
-        settings.status = 'error';
-        settings.lastError = getFriendlyIntegrationError('donationalerts', error);
-        saveData();
-        renderIntegrationCards();
-      }
     }
 
     async function finishDonationAlertsConnection() {
@@ -5569,13 +5993,12 @@
 
         settings.userId = String(userId);
         settings.enabled = true;
-        settings.status = 'connected';
+        settings.status = 'connecting';
         settings.lastError = '';
         saveData();
+        await syncServerCollectorConfig();
+        await pollServerCollectorStatus();
         renderIntegrationCards();
-
-        const result = await connectDonationAlerts();
-        if (!result.ok) throw new Error(result.friendly || 'donation_polling_failed');
       } catch (error) {
         console.error('DonationAlerts OAuth completion error', error);
         settings.enabled = false;
@@ -5604,13 +6027,12 @@
 
     function unlinkIntegration(service) {
       if (service === 'donatepay') {
-        disconnectDonatePay(false);
+        disconnectDonatePayRealtime({ keepStatus: true });
         donationIntegrations.donatepay = {
           ...createDefaultDonationIntegrations().donatepay,
           region: 'ru'
         };
       } else if (service === 'donationalerts') {
-        disconnectDonationAlerts(false);
         donationIntegrations.donationalerts = {
           ...createDefaultDonationIntegrations().donationalerts
         };
@@ -5618,6 +6040,7 @@
         return;
       }
       saveData();
+      syncServerCollectorConfig();
       renderIntegrationState();
       closeIntegrationUnlinkModal();
     }
@@ -5675,21 +6098,33 @@
       document.getElementById('donatepay-toggle-token').addEventListener('click', (event) => {
         togglePasswordInput('donatepay-modal-token', event.currentTarget);
       });
-      document.getElementById('donationalerts-app-next').addEventListener('click', () => {
-        document.getElementById('donationalerts-app-step').classList.add('hidden');
-        document.getElementById('donationalerts-id-step').classList.remove('hidden');
+      document.getElementById('donationalerts-quick-connect').addEventListener('click', () => {
+        donationAlertsConnectMode = 'quick';
+        startDonationAlertsQuickOAuth();
+      });
+      document.getElementById('donationalerts-custom-connect').addEventListener('click', () => {
+        donationAlertsConnectMode = 'custom';
+        document.getElementById('donationalerts-mode-step').classList.add('hidden');
+        document.getElementById('donationalerts-custom-app-step').classList.remove('hidden');
+        document.getElementById('donationalerts-custom-id-step').classList.add('hidden');
+      });
+      document.getElementById('donationalerts-custom-back').addEventListener('click', () => {
+        document.getElementById('donationalerts-mode-step').classList.remove('hidden');
+        document.getElementById('donationalerts-custom-app-step').classList.add('hidden');
+        document.getElementById('donationalerts-custom-id-step').classList.add('hidden');
+      });
+      document.getElementById('donationalerts-custom-next').addEventListener('click', () => {
+        document.getElementById('donationalerts-custom-app-step').classList.add('hidden');
+        document.getElementById('donationalerts-custom-id-step').classList.remove('hidden');
       });
       document.getElementById('donationalerts-id-back').addEventListener('click', () => {
-        document.getElementById('donationalerts-app-step').classList.remove('hidden');
-        document.getElementById('donationalerts-id-step').classList.add('hidden');
+        document.getElementById('donationalerts-custom-app-step').classList.remove('hidden');
+        document.getElementById('donationalerts-custom-id-step').classList.add('hidden');
       });
       document.getElementById('donationalerts-copy-redirect').addEventListener('click', copyDonationAlertsRedirectUrl);
-      document.getElementById('donationalerts-modal-authorize').addEventListener('click', startDonationAlertsOAuth);
-      document.getElementById('donationalerts-toggle-client-secret').addEventListener('click', (event) => {
-        togglePasswordInput('donationalerts-modal-client-secret', event.currentTarget);
-      });
+      document.getElementById('donationalerts-authorize-custom').addEventListener('click', startDonationAlertsCustomOAuth);
 
-      ['integration-modal-close', 'donatepay-region-cancel', 'donatepay-token-cancel', 'donationalerts-app-cancel', 'donationalerts-id-cancel']
+      ['integration-modal-close', 'donatepay-region-cancel', 'donatepay-token-cancel', 'donationalerts-mode-cancel', 'donationalerts-custom-cancel', 'donationalerts-id-cancel']
         .forEach((id) => document.getElementById(id).addEventListener('click', closeIntegrationConnectModal));
       document.getElementById('integration-unlink-cancel').addEventListener('click', closeIntegrationUnlinkModal);
       document.getElementById('integration-unlink-confirm').addEventListener('click', () => {
@@ -6202,7 +6637,7 @@
         const activeEntries = entries.filter(e => !e.eliminated);
         if(activeEntries.length === 0) return null;
         
-        let totalW = activeEntries.reduce((s, e) => s + getCurrentWheelWeight(e), 0);
+        let totalW = activeEntries.reduce((s, e) => s + getCurrentWheelWeight(e, activeEntries), 0);
         
         let normalizedAngle = angle % (Math.PI * 2);
         if (normalizedAngle < 0) normalizedAngle += Math.PI * 2;
@@ -6211,7 +6646,7 @@
         
         let accum = 0;
         for(let entry of activeEntries) {
-            const sliceAngle = (getCurrentWheelWeight(entry) / totalW) * Math.PI * 2;
+            const sliceAngle = (getCurrentWheelWeight(entry, activeEntries) / totalW) * Math.PI * 2;
             accum += sliceAngle;
             if (pointerOffset <= accum) {
                 return entry;
@@ -6345,7 +6780,7 @@
       let totalWeight = 0;
 
       activeEntries.forEach(entry => {
-          let w = getCurrentWheelWeight(entry);
+          let w = getCurrentWheelWeight(entry, activeEntries);
           // Если лот находится в стадии исчезновения - искусственно уменьшаем его вес
           if (shrinkingTarget && entry.id === shrinkingTarget.id) {
               w *= (1 - shrinkingProgress);
@@ -6525,15 +6960,15 @@
         document.body.classList.add('is-spinning');
         document.body.classList.remove('show-result');
 
-        const totalWheelWeight = activeEntries.reduce((s, e) => s + getCurrentWheelWeight(e), 0);
+        const totalWheelWeight = activeEntries.reduce((s, e) => s + getCurrentWheelWeight(e, activeEntries), 0);
         let winnerStartAngle = 0;
         let winnerSliceSize = 0;
         if (totalWheelWeight > 0) {
           for (let i = 0; i < activeEntries.length; i++) {
             if (activeEntries[i].id === winner.id) break;
-            winnerStartAngle += (getCurrentWheelWeight(activeEntries[i]) / totalWheelWeight) * Math.PI * 2;
+            winnerStartAngle += (getCurrentWheelWeight(activeEntries[i], activeEntries) / totalWheelWeight) * Math.PI * 2;
           }
-          winnerSliceSize = (getCurrentWheelWeight(winner) / totalWheelWeight) * Math.PI * 2;
+          winnerSliceSize = (getCurrentWheelWeight(winner, activeEntries) / totalWheelWeight) * Math.PI * 2;
         } else {
           const winnerIndex = Math.max(0, activeEntries.findIndex(entry => entry.id === winner.id));
           winnerSliceSize = (Math.PI * 2) / activeEntries.length;
@@ -6603,10 +7038,13 @@
         id: e.id,
         name: e.name,
         amount: Number(e.price) || 0,
-        weight: getEliminationPickWeight(e)
+        weight: getEliminationPickWeight(e, activeEntries)
       }));
 
-      const picked = pickWeightedEntry(activeEntries, getEliminationPickWeight);
+      const picked = pickWeightedEntry(
+        activeEntries,
+        entry => getEliminationPickWeight(entry, activeEntries)
+      );
       const victim = picked?.entry;
       if (!victim) {
         isSpinning = false;
@@ -6614,14 +7052,16 @@
         return;
       }
 
-      const totalWheelWeight = activeEntries.reduce((s, e) => s + getCurrentWheelWeight(e), 0);
+      const totalWheelWeight = activeEntries.reduce((s, e) => {
+        return s + getCurrentWheelWeight(e, activeEntries);
+      }, 0);
       let victimStartAngle = 0;
       
       for (let i = 0; i < activeEntries.length; i++) {
           if (activeEntries[i].id === victim.id) break;
-          victimStartAngle += (getCurrentWheelWeight(activeEntries[i]) / totalWheelWeight) * Math.PI * 2;
+          victimStartAngle += (getCurrentWheelWeight(activeEntries[i], activeEntries) / totalWheelWeight) * Math.PI * 2;
       }
-      const victimSliceSize = (getCurrentWheelWeight(victim) / totalWheelWeight) * Math.PI * 2;
+      const victimSliceSize = (getCurrentWheelWeight(victim, activeEntries) / totalWheelWeight) * Math.PI * 2;
       
       const pointInsideVictim = cryptoRandomFloat(); 
       const targetAngleOnWheel = victimStartAngle + (pointInsideVictim * victimSliceSize);
@@ -6878,12 +7318,9 @@
     setupColumnResizers();
     setupAuctionResizer();
     setupTabsAndDonations();
+    const donationAlertsOAuthHandled = handleDonationAlertsOAuthCallback();
     applyViewMode();
-    if (appViewMode === 'admin') {
-      checkLocalServer();
-      const donationAlertsOAuthHandled = handleDonationAlertsOAuthCallback();
-      restoreDonationIntegrations({ donationAlertsOAuthHandled });
-    }
+    checkLocalServer();
     resizeWheel();
     renderList();
   </script>
