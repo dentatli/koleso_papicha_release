@@ -144,6 +144,7 @@
     }
 
     body.app-view-wheel .app-tabs,
+    body.app-view-wheel #version-update-notice,
     body.app-view-wheel #tab-auction,
     body.app-view-wheel #tab-settings,
     body.app-view-wheel #resizer-right {
@@ -198,6 +199,22 @@
       height: 2px;
       border-radius: 2px 2px 0 0;
       background: var(--primary);
+    }
+    .version-update-notice {
+      align-self: center;
+      border: 1px solid rgba(255, 212, 59, 0.55);
+      border-radius: 999px;
+      background: rgba(255, 212, 59, 0.12);
+      color: #ffe066;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .version-update-notice:hover {
+      border-color: #ffe066;
+      color: #fff3bf;
     }
 
     .app-tab-panel {
@@ -1010,6 +1027,24 @@
       font-size: 12px;
       text-align: right;
     }
+    .test-donation-accordion > summary {
+      cursor: pointer;
+      list-style: none;
+    }
+    .test-donation-accordion > summary::-webkit-details-marker {
+      display: none;
+    }
+    .test-donation-accordion > summary .settings-card-header {
+      margin-bottom: 0;
+    }
+    .test-donation-accordion[open] > summary .settings-card-header {
+      margin-bottom: 16px;
+    }
+    .test-donation-content {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+      gap: 18px;
+    }
     .help-card {
       color: var(--text-dimmed);
       font-size: 13px;
@@ -1260,6 +1295,9 @@
         grid-template-columns: 1fr;
       }
       .settings-top-grid {
+        grid-template-columns: 1fr;
+      }
+      .test-donation-content {
         grid-template-columns: 1fr;
       }
       .settings-danger-zone {
@@ -1644,6 +1682,10 @@
       transition: background 0.15s, color 0.15s, filter 0.15s;
       flex-shrink: 0;
     }
+    .plus-wrapper .minus-btn {
+      border-right: none;
+      border-left: 1px solid var(--border);
+    }
     .plus-wrapper .plus-btn:hover {
       background: linear-gradient(180deg, #5a5a5a 0%, #454545 100%);
       color: var(--primary);
@@ -1666,9 +1708,67 @@
       flex: 0 0 auto;
       min-height: 0;
       align-self: stretch;
+      text-align: right;
     }
     .plus-wrapper input:focus { border: none; box-shadow: none; }
     .plus-wrapper input:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+    .app-version-badge {
+      position: fixed;
+      right: 12px;
+      bottom: 10px;
+      z-index: 200;
+      padding: 5px 9px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.35);
+      color: rgba(255, 255, 255, 0.52);
+      font-size: 11px;
+      line-height: 1;
+      text-decoration: none;
+      backdrop-filter: blur(4px);
+    }
+    .app-version-badge:hover {
+      color: rgba(255, 255, 255, 0.86);
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+    .app-version-badge.outdated {
+      border-color: rgba(255, 212, 59, 0.55);
+      color: #ffe066;
+      background: rgba(120, 88, 0, 0.35);
+    }
+    .app-author-badge {
+      position: fixed;
+      left: 12px;
+      bottom: 10px;
+      z-index: 1000;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(30, 30, 30, 0.82);
+      color: var(--text-dimmed);
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1;
+      text-decoration: none;
+      backdrop-filter: blur(8px);
+      transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+    .app-author-badge:hover {
+      color: var(--text);
+      border-color: var(--primary);
+      background: rgba(40, 40, 40, 0.92);
+    }
+    @media (max-width: 720px) {
+      .app-author-badge,
+      .app-version-badge {
+        font-size: 11px;
+        padding: 4px 7px;
+      }
+    }
 
     .percents-wrapper {
       display: flex;
@@ -2720,6 +2820,13 @@
       <button type="button" class="app-tab-button" data-main-tab="wheel">Колесо</button>
       <button type="button" class="app-tab-button" data-main-tab="settings">Настройки</button>
     </nav>
+    <a
+      id="version-update-notice"
+      class="version-update-notice hidden"
+      href="https://github.com/dentatli/koleso_papicha_release/releases/latest"
+      target="_blank"
+      rel="noopener noreferrer"
+    >Доступна новая версия</a>
     <button type="button" class="view-open-button open-admin-button" id="open-admin-view">Открыть админку</button>
     <button type="button" class="view-open-button open-wheel-button" id="open-wheel-view">Открыть колесо в отдельной вкладке</button>
   </header>
@@ -2789,37 +2896,6 @@
         Не выкладывайте этот файл публично с заполненными токенами. Для надёжной публичной версии нужен backend.
       </div>
 
-      <div class="settings-top-grid">
-        <section class="settings-card">
-          <div class="settings-card-header">
-            <h2>Тестовый донат</h2>
-            <span>Позволяет проверить очередь донатов без реального платежа</span>
-          </div>
-          <div class="dev-donation-form">
-            <div class="dev-donation-grid">
-              <input type="text" id="test-donation-username" value="Тестовый зритель" placeholder="Ник">
-              <input type="number" id="test-donation-amount" value="500" min="0" step="0.01" placeholder="Сумма">
-            </div>
-            <input type="text" id="test-donation-message" value="тест" placeholder="Сообщение">
-            <input type="hidden" id="test-donation-source" value="manual_test">
-            <div class="test-donation-source-label">Источник: Тестовый источник</div>
-            <button type="button" class="btn-primary" id="btn-add-test-donation">Добавить в ожидание</button>
-          </div>
-        </section>
-
-        <aside class="help-card">
-          <h2>Как проверить</h2>
-          <ol>
-            <li>Добавьте лоты во вкладке «Аукцион».</li>
-            <li>Создайте тестовый донат здесь.</li>
-            <li>Вернитесь в «Аукцион» → «Донаты» → «В ожидании».</li>
-            <li>Назначьте донат нужному лоту одним кликом.</li>
-          </ol>
-          <p>Настройки сервисов и история донатов сохраняются вместе с остальным состоянием приложения.</p>
-          <a href="https://github.com/Pointauc/pointauc_frontend" target="_blank" rel="noopener noreferrer">Референс интерфейса интеграций Pointauc</a>
-        </aside>
-      </div>
-
       <section class="settings-card settings-card-wide">
         <div class="settings-card-header">
           <h2>Настройки отображения</h2>
@@ -2866,7 +2942,7 @@
             </div>
             <details class="integration-card-help">
               <summary>Как подключить?</summary>
-              <p>Выберите регион, откройте страницу API DonatePay и вставьте API ключ. ID аккаунта приложение постарается определить автоматически.</p>
+              <p>Нажмите «Подключить», выберите регион и вставьте API Key из DonatePay.</p>
             </details>
           </section>
 
@@ -2885,11 +2961,46 @@
             </div>
             <details class="integration-card-help">
               <summary>Как подключить?</summary>
-              <p>Создайте OAuth-приложение DonationAlerts, вставьте его ID и разрешите доступ. Токен и ID пользователя приложение получит автоматически.</p>
+              <p>Нажмите «Подключить» → «Быстрое подключение» → разрешите доступ на сайте DonationAlerts.</p>
             </details>
           </section>
         </div>
         <p class="integration-warning">Локальная версия хранит токены в браузере. Не показывайте настройки на стриме.</p>
+      </section>
+
+      <section class="settings-card settings-card-wide">
+        <details class="test-donation-accordion">
+          <summary>
+            <div class="settings-card-header">
+              <h2>Тестовый донат</h2>
+              <span>Позволяет проверить очередь донатов без реального платежа</span>
+            </div>
+          </summary>
+          <div class="test-donation-content">
+            <div class="dev-donation-form">
+              <div class="dev-donation-grid">
+                <input type="text" id="test-donation-username" value="Тестовый зритель" placeholder="Ник">
+                <input type="number" id="test-donation-amount" value="500" min="0" step="0.01" placeholder="Сумма">
+              </div>
+              <input type="text" id="test-donation-message" value="тест" placeholder="Сообщение">
+              <input type="hidden" id="test-donation-source" value="manual_test">
+              <div class="test-donation-source-label">Источник: Тестовый источник</div>
+              <button type="button" class="btn-primary" id="btn-add-test-donation">Добавить в ожидание</button>
+            </div>
+
+            <aside class="help-card">
+              <h2>Как проверить</h2>
+              <ol>
+                <li>Добавьте лоты во вкладке «Аукцион».</li>
+                <li>Создайте тестовый донат здесь.</li>
+                <li>Вернитесь в «Аукцион» → «Донаты» → «В ожидании».</li>
+                <li>Назначьте донат нужному лоту одним кликом.</li>
+              </ol>
+              <p>Настройки сервисов и история донатов сохраняются вместе с остальным состоянием приложения.</p>
+              <a href="https://github.com/Pointauc/pointauc_frontend" target="_blank" rel="noopener noreferrer">Референс интерфейса интеграций Pointauc</a>
+            </aside>
+          </div>
+        </details>
       </section>
 
       <section class="settings-card settings-card-wide settings-danger-zone">
@@ -2912,7 +3023,7 @@
           </div>
           <div class="wheel-readonly-metrics">
             <strong id="wheel-readonly-total">0 ₽</strong>
-            <span class="wheel-readonly-percent-label" title="Шанс победы в текущем розыгрыше">Шанс победы</span>
+            <span class="wheel-readonly-percent-label" title="В списке показан финальный шанс победы. Размер сектора на колесе в режиме выбывания показывает шанс вылета на текущем прокруте.">Шанс победы</span>
           </div>
         </div>
         <div class="wheel-readonly-list" id="wheel-readonly-list"></div>
@@ -3022,7 +3133,27 @@
     </div>
   </section>
 
+  <a
+    id="app-version-badge"
+    class="app-version-badge"
+    href="https://github.com/dentatli/koleso_papicha_release/releases/latest"
+    target="_blank"
+    rel="noopener noreferrer"
+  >Версия: dev</a>
+  <a
+    id="app-author-badge"
+    class="app-author-badge"
+    href="https://github.com/dentatli"
+    target="_blank"
+    rel="noopener noreferrer"
+    title="Автор проекта"
+  >Powered by dentatli</a>
+
   <script>
+    window.APP_BUILD_SHA = "__APP_BUILD_SHA__";
+    window.APP_BUILD_VERSION = "__APP_BUILD_VERSION__";
+    const APP_RELEASE_URL = 'https://github.com/dentatli/koleso_papicha_release/releases/latest';
+
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     /** Логическая система координат отрисовки (как при бывшем фиксированном bitmap 1000×1000). */
@@ -3701,16 +3832,13 @@
       span.textContent = s + ' px';
     }
 
-    let ultimateWinnerId = null;
-    let needsNewWinner = true;
     let isDelaying = false; 
 
-    let wheelMode = 'elimination';
-    let spinHistory = [];
-    let lastEliminatedId = null;
     let pendingDeleteEntryId = null;
     let confirmModalOnConfirm = null;
     let confirmModalOnCancel = null;
+    let spinSeriesInitialWinChances = new Map();
+    let spinSeriesActive = false;
 
     // Глобальные переменные для анимации сужения (удаления) сектора
     let shrinkingTarget = null;
@@ -3718,9 +3846,27 @@
     let shrinkAnimFrame = null; // <--- НОВАЯ ПЕРЕМЕННАЯ
     let spinResultClearTimeout = null;
 
-    function resetWinner() {
-      ultimateWinnerId = null;
-      needsNewWinner = true;
+    function resetSpinSeriesSnapshot() {
+      spinSeriesInitialWinChances = new Map();
+      spinSeriesActive = false;
+    }
+
+    function resetSpinState() {
+      resetSpinSeriesSnapshot();
+    }
+
+    function ensureSpinSeriesSnapshot(activeEntries) {
+      const candidates = Array.isArray(activeEntries)
+        ? activeEntries.filter(entry => entry && !entry.eliminated)
+        : entries.filter(entry => entry && !entry.eliminated);
+      if (!candidates.length) return;
+
+      const eliminatedCount = entries.filter(entry => entry && entry.eliminated).length;
+      const shouldStartNewSeries = eliminatedCount === 0 || !spinSeriesActive;
+      if (!shouldStartNewSeries) return;
+
+      spinSeriesInitialWinChances = calculateEliminationWinChances(candidates);
+      spinSeriesActive = true;
     }
 
     function cancelScheduledSpinResultClear() {
@@ -3749,10 +3895,6 @@
         spinResultClearTimeout = null;
         clearSpinResultOverlay();
       }, delayMs);
-    }
-
-    function getWinnerPickWeight(entry) {
-      return Math.max(0, Number(entry?.price) || 0);
     }
 
     function getPointaucClassicReverseWeight(entry, activeEntries) {
@@ -3785,10 +3927,6 @@
     }
 
     function getCurrentWheelWeight(entry, activeEntries = null) {
-      if (wheelMode === 'winner') {
-        return getWinnerPickWeight(entry);
-      }
-
       return getEliminationPickWeight(
         entry,
         Array.isArray(activeEntries) ? activeEntries : entries.filter(item => item && !item.eliminated)
@@ -3882,31 +4020,30 @@
       return result;
     }
 
-    function calculateWinnerModeWinChances(activeEntries) {
-      const candidates = activeEntries.filter(entry => entry && !entry.eliminated);
-      const result = new Map();
-      if (!candidates.length) return result;
-      if (candidates.length === 1) {
-        result.set(candidates[0].id, 1);
-        return result;
+    function getWinChanceTooltip() {
+      return 'В списке показан финальный шанс победы. Размер сектора на колесе в режиме выбывания показывает шанс вылета на текущем прокруте.';
+    }
+
+    function formatEntryWinChancePercent(entry, activeEntries, winChances) {
+      if (!entry || entry.eliminated) return '0.0';
+      if (activeEntries.length === 1) return '100.0';
+      const chance = Math.max(0, Math.min(1, Number(winChances.get(entry.id)) || 0));
+      return (chance * 100).toFixed(1);
+    }
+
+    function formatInitialSeriesWinChancePercent(winner, fallbackActiveEntries) {
+      if (!winner) return '0.00';
+
+      const snapshotChance = Number(spinSeriesInitialWinChances.get(winner.id));
+      if (Number.isFinite(snapshotChance)) {
+        return (Math.max(0, Math.min(1, snapshotChance)) * 100).toFixed(2);
       }
-      const totalWeight = candidates.reduce((sum, entry) => sum + getWinnerPickWeight(entry), 0);
-      candidates.forEach((entry) => {
-        result.set(entry.id, totalWeight > 0 ? getWinnerPickWeight(entry) / totalWeight : 1 / candidates.length);
-      });
-      return result;
-    }
 
-    function calculateCurrentWinChances(activeEntries) {
-      return wheelMode === 'winner'
-        ? calculateWinnerModeWinChances(activeEntries)
-        : calculateEliminationWinChances(activeEntries);
-    }
-
-    function getEntryWinChance(entry, activeEntries) {
-      if (!entry || entry.eliminated) return 0;
-      const chances = calculateCurrentWinChances(activeEntries);
-      return Math.max(0, Math.min(1, Number(chances.get(entry.id)) || 0));
+      const fallbackChances = calculateEliminationWinChances(fallbackActiveEntries);
+      const fallbackChance = Number(fallbackChances.get(winner.id));
+      return Number.isFinite(fallbackChance)
+        ? (Math.max(0, Math.min(1, fallbackChance)) * 100).toFixed(2)
+        : '0.00';
     }
 
     function pickWeightedEntry(activeEntries, weightFn) {
@@ -3918,8 +4055,7 @@
 
       if (totalWeight <= 0) {
         return {
-          entry: candidates[cryptoRandomInt(0, candidates.length)],
-          randomSource: 'crypto'
+          entry: candidates[cryptoRandomInt(0, candidates.length)]
         };
       }
 
@@ -3929,15 +4065,13 @@
         accumulated += weights[i];
         if (randomValue <= accumulated) {
           return {
-            entry: candidates[i],
-            randomSource: 'crypto'
+            entry: candidates[i]
           };
         }
       }
 
       return {
-        entry: candidates[candidates.length - 1],
-        randomSource: 'crypto'
+        entry: candidates[candidates.length - 1]
       };
     }
 
@@ -3981,7 +4115,7 @@
       if (activeDonationAssignmentId && !entries.some(entry => !entry.eliminated)) {
         activeDonationAssignmentId = null;
       }
-      resetWinner();
+      resetSpinState();
       saveData();
       renderList();
       renderWheelReadonlyEntriesList();
@@ -4020,9 +4154,7 @@
         onConfirm: () => {
           entries = [];
           pendingDeleteEntryId = null;
-          spinHistory = [];
-          lastEliminatedId = null;
-          resetWinner();
+          resetSpinState();
           cancelScheduledSpinResultClear();
           document.getElementById('search-filter').value = '';
           saveData();
@@ -4040,9 +4172,7 @@
     document.getElementById('btn-reset-all').onclick = () => {
       if (entries.length === 0) return;
       entries.forEach(e => e.eliminated = false);
-      spinHistory = [];
-      lastEliminatedId = null;
-      resetWinner();
+      resetSpinState();
       cancelScheduledSpinResultClear();
       saveData();
       renderList();
@@ -4079,10 +4209,6 @@
           cancelAnimationFrame(shrinkAnimFrame);
           shrinkingTarget.eliminated = true;
           const remainingAfterInterrupt = entries.filter(e => !e.eliminated);
-          if (remainingAfterInterrupt.length === 1) {
-            ultimateWinnerId = remainingAfterInterrupt[0].id;
-            needsNewWinner = false;
-          }
           shrinkingTarget = null;
           shrinkingProgress = 0;
           isDelaying = false;
@@ -4121,7 +4247,7 @@
               entry.id = `${Date.now()}-${idx}-${cryptoRandomUint32().toString(16)}`;
             }
           });
-          resetWinner();
+          resetSpinState();
 
           donationsPending = Array.isArray(parsed.donationsPending)
             ? parsed.donationsPending
@@ -4140,9 +4266,6 @@
             : 'auction';
           activeMainTab = persistedActiveMainTab;
           activeDonationsTab = parsed.activeDonationsTab === 'added' ? 'added' : 'pending';
-          wheelMode = parsed.wheelMode === 'winner' ? 'winner' : 'elimination';
-          spinHistory = Array.isArray(parsed.spinHistory) ? parsed.spinHistory : [];
-          lastEliminatedId = typeof parsed.lastEliminatedId === 'string' ? parsed.lastEliminatedId : null;
           loadedTimerState = parsed.timerState && typeof parsed.timerState === 'object'
             ? parsed.timerState
             : null;
@@ -4190,9 +4313,6 @@
           activeMainTab = 'auction';
           persistedActiveMainTab = 'auction';
           activeDonationsTab = 'pending';
-          wheelMode = 'elimination';
-          spinHistory = [];
-          lastEliminatedId = null;
           loadedTimerState = null;
         }
       } catch(e) { console.error("Ошибка загрузки", e); }
@@ -4235,9 +4355,6 @@
         donationIntegrations,
         activeMainTab: appViewMode === 'admin' ? activeMainTab : persistedActiveMainTab,
         activeDonationsTab,
-        wheelMode,
-        spinHistory,
-        lastEliminatedId,
         timerState: getTimerStateSnapshot()
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
@@ -4322,10 +4439,7 @@
       rightColWidth = 380;
       auctionLeftWidth = 0;
       listItemHeight = 55;
-      wheelMode = 'elimination';
-      spinHistory = [];
-      lastEliminatedId = null;
-      resetWinner();
+      resetSpinState();
       seenDonationKeys.clear();
       donationAlertsBaselineReady = false;
       donationAlertsMaxSeenId = 0;
@@ -4465,7 +4579,7 @@
       const numericAmount = Number(amount);
       if (!entry || !Number.isFinite(numericAmount)) return false;
       entry.price += numericAmount;
-      resetWinner();
+      resetSpinState();
       if (!deferRefresh) {
         saveData();
         renderList();
@@ -5126,9 +5240,6 @@
         if (Number(payload?.added || 0) > 0 || Number(payload?.received || 0) > 0) {
           console.info(`[DonatePay] recovery ${reason}: получено ${payload.received || 0}, новых ${payload.added || 0}`);
         }
-        if (Number(payload?.added || 0) > 0) {
-          pollServerCollectorStatus();
-        }
         return true;
       } catch (error) {
         const status = Number(error?.upstreamStatus || error?.status || 0);
@@ -5769,8 +5880,6 @@
       startDonatePayRealtimeIfNeeded();
 
       if (!serverCollectorStatusTimer) {
-        syncServerCollectorConfig();
-        pollServerCollectorStatus();
         serverCollectorStatusTimer = setInterval(
           pollServerCollectorStatus,
           SERVER_COLLECTOR_POLL_INTERVAL_MS
@@ -5811,6 +5920,92 @@
       }
       renderIntegrationCards();
       return window.settings.localServerAvailable;
+    }
+
+    function getBuildVersionLabel(sha) {
+      const clean = String(sha || '').trim();
+      if (!clean || clean === '__APP_BUILD_SHA__' || clean === '__APP_BUILD_VERSION__') return 'dev';
+      return clean.slice(0, 7);
+    }
+
+    function applyAppVersionInfo(info = null) {
+      const badge = document.getElementById('app-version-badge');
+      const notice = document.getElementById('version-update-notice');
+      const embeddedVersion = getBuildVersionLabel(window.APP_BUILD_VERSION || window.APP_BUILD_SHA);
+      const currentVersion = info?.currentVersion || embeddedVersion;
+      const latestVersion = info?.latestVersion || getBuildVersionLabel(info?.latestSha);
+      const releaseUrl = info?.releaseUrl || APP_RELEASE_URL;
+      const updateAvailable = Boolean(info?.updateAvailable);
+
+      if (badge) {
+        badge.textContent = `Версия: ${currentVersion}`;
+        badge.href = releaseUrl;
+        badge.classList.toggle('outdated', updateAvailable);
+        badge.title = updateAvailable && latestVersion
+          ? `Текущая версия: ${currentVersion}. Новая версия: ${latestVersion}.`
+          : `Версия: ${currentVersion}`;
+      }
+
+      if (notice) {
+        notice.href = releaseUrl;
+        notice.classList.toggle('hidden', !updateAvailable);
+        notice.title = updateAvailable && latestVersion
+          ? `Текущая версия: ${currentVersion}. Новая версия: ${latestVersion}.`
+          : '';
+      }
+    }
+
+    async function checkAppVersion() {
+      applyAppVersionInfo();
+      if (location.protocol === 'file:') return false;
+      try {
+        const info = await fetchLocalApi('/api/app/version');
+        applyAppVersionInfo(info);
+        return true;
+      } catch (error) {
+        applyAppVersionInfo();
+        return false;
+      }
+    }
+
+    async function bootstrapLocalApp() {
+      applyAppVersionInfo();
+      if (location.protocol === 'file:') {
+        window.settings.localServerAvailable = false;
+        renderIntegrationCards();
+        return false;
+      }
+
+      try {
+        const payload = {
+          collector: appViewMode === 'admin' ? buildServerCollectorConfig() : null
+        };
+        const bootstrap = await fetchLocalApi('/api/app/bootstrap', payload);
+        const health = bootstrap?.health || {};
+        window.settings.localServerAvailable = health?.ok === true && health?.server === 'papich-wheel-local';
+        if (bootstrap?.version) {
+          applyAppVersionInfo(bootstrap.version);
+        } else {
+          applyAppVersionInfo();
+        }
+        if (appViewMode === 'admin' && bootstrap?.collector) {
+          applyServerCollectorStatus(bootstrap.collector);
+          const pendingCount = Number(bootstrap.collector?.pendingServerDonations || 0);
+          if (pendingCount > 0) {
+            await pollServerCollectorDonations();
+          }
+        }
+        renderIntegrationCards();
+        return true;
+      } catch (error) {
+        const healthOk = await checkLocalServer();
+        await checkAppVersion();
+        if (appViewMode === 'admin') {
+          await syncServerCollectorConfig();
+          await pollServerCollectorStatus();
+        }
+        return healthOk;
+      }
     }
 
     function setModalButtonLoading(button, loading, loadingText) {
@@ -6440,9 +6635,12 @@
       const totalLabel = document.getElementById('wheel-readonly-total');
       if (!list || !summary || !totalLabel) return;
 
-      const activeEntries = entries.filter(entry => !entry.eliminated);
-      const totalAmount = activeEntries.reduce((sum, entry) => sum + Math.max(0, Number(entry.price) || 0), 0);
-      const winChances = calculateCurrentWinChances(activeEntries);
+      const activeEntries = entries.filter(entry => entry && !entry.eliminated);
+      const totalAmount = entries.reduce((sum, entry) => {
+        return sum + Math.max(0, Number(entry?.price) || 0);
+      }, 0);
+      const winChances = calculateEliminationWinChances(activeEntries);
+      const chanceTooltip = getWinChanceTooltip();
       summary.textContent = `${activeEntries.length} активных из ${entries.length}`;
       totalLabel.textContent = `${totalAmount.toLocaleString('ru-RU')} ₽`;
       list.replaceChildren();
@@ -6454,11 +6652,12 @@
         list.appendChild(empty);
         return;
       }
-
       const rows = entries
         .map((entry, index) => ({ entry, index }))
         .sort((a, b) => {
-          if (a.entry.eliminated !== b.entry.eliminated) return a.entry.eliminated ? 1 : -1;
+          if (a.entry.eliminated !== b.entry.eliminated) {
+            return a.entry.eliminated ? 1 : -1;
+          }
           const priceDiff = b.entry.price - a.entry.price;
           if (priceDiff !== 0) return priceDiff;
           return a.entry.name.localeCompare(b.entry.name, 'ru', { sensitivity: 'base' });
@@ -6484,16 +6683,9 @@
 
         const chance = document.createElement('span');
         chance.className = 'wheel-readonly-chance';
-        chance.title = 'Шанс победы в текущем розыгрыше';
+        chance.title = chanceTooltip;
         chance.setAttribute('aria-label', chance.title);
-        if (entry.eliminated) {
-          chance.textContent = '0.0%';
-        } else if (activeEntries.length === 1) {
-          chance.textContent = '100.0%';
-        } else {
-          const winChance = Math.max(0, Math.min(1, Number(winChances.get(entry.id)) || 0));
-          chance.textContent = `${(winChance * 100).toFixed(1)}%`;
-        }
+        chance.textContent = `${formatEntryWinChancePercent(entry, activeEntries, winChances)}%`;
 
         item.append(number, name, amount, chance);
         list.appendChild(item);
@@ -6504,7 +6696,9 @@
       const list = document.getElementById('entries-list');
       list.innerHTML = '';
       
-      const totalPriceAll = entries.reduce((s, e) => s + e.price, 0);
+      const activeEntries = entries.filter(entry => entry && !entry.eliminated);
+      const winChances = calculateEliminationWinChances(activeEntries);
+      const chanceTooltip = getWinChanceTooltip();
       const filterText = document.getElementById('search-filter').value.toLowerCase().trim();
       const isAssigningDonation = Boolean(activeDonationAssignmentId);
 
@@ -6522,7 +6716,7 @@
         });
 
       rows.forEach(({ entry, idx }, displayIdx) => {
-        let pctAbs = totalPriceAll > 0 ? ((entry.price / totalPriceAll) * 100).toFixed(1) : "0.0";
+        const pctAbs = formatEntryWinChancePercent(entry, activeEntries, winChances);
         const addedOrder = Number.isFinite(entry.addedOrder) ? entry.addedOrder : (idx + 1);
 
         let probHtml = entry.eliminated 
@@ -6550,11 +6744,12 @@
           <div class="edit-inputs">
             <input type="number" class="val-input" value="${entry.price}" onkeydown="if(event.key==='Enter') updatePrice(${idx}, this.value)" onblur="updatePrice(${idx}, this.value)">
             <div class="plus-wrapper">
-              <button type="button" class="plus-btn" title="Добавить" onclick="const inp = this.nextElementSibling; if(inp.value){ addPrice(${idx}, inp.value); inp.value=''; }">+</button>
-              <input type="number" onkeydown="if(event.key==='Enter') { addPrice(${idx}, this.value); this.value=''; }">
+              <button type="button" class="plus-btn" title="Добавить" onclick="const inp = this.nextElementSibling; adjustPrice(${idx}, inp.value, 1); inp.value='';">+</button>
+              <input type="number" min="0" step="0.01" onkeydown="if(event.key==='Enter') { adjustPrice(${idx}, this.value, 1); this.value=''; }">
+              <button type="button" class="plus-btn minus-btn" title="Вычесть" onclick="const inp = this.previousElementSibling; adjustPrice(${idx}, inp.value, -1); inp.value='';">−</button>
             </div>
           </div>
-          <div class="percents-wrapper" title="Изначальный шанс">${probHtml}</div>
+          <div class="percents-wrapper" title="${chanceTooltip}">${probHtml}</div>
           ${deleteButtonHtml}
         `;
         const deleteButton = el.querySelector('.entry-delete-button');
@@ -6582,19 +6777,27 @@
       const trimmed = String(val).trim();
       if (!trimmed) return;
       entries[index].name = trimmed;
+      resetSpinState();
       saveData(); renderList(); drawWheel();
     };
 
     window.updatePrice = function(index, val) {
       entries[index].price = Math.max(0, parseFloat(val) || 0);
-      resetWinner();
+      resetSpinState();
       saveData(); renderList(); drawWheel();
     };
 
     window.addPrice = function(index, val) {
-      if(!val) return;
-      entries[index].price += parseFloat(val) || 0;
-      resetWinner();
+      window.adjustPrice(index, val, 1);
+    };
+
+    window.adjustPrice = function(index, val, direction = 1) {
+      if (!entries[index]) return;
+      const amount = parseFloat(val);
+      if (!Number.isFinite(amount) || amount <= 0) return;
+      const sign = Number(direction) < 0 ? -1 : 1;
+      entries[index].price = Math.max(0, (Number(entries[index].price) || 0) + sign * amount);
+      resetSpinState();
       saveData(); renderList(); drawWheel();
     };
 
@@ -6623,7 +6826,7 @@
         
         document.getElementById('new-name').value = '';
         document.getElementById('new-price').value = '0';
-        resetWinner();
+        resetSpinState();
         saveData(); renderList(); drawWheel();
       }
     };
@@ -6886,13 +7089,12 @@
           alert("Список пуст!");
           return;
       }
+      ensureSpinSeriesSnapshot(activeEntries);
 
       document.getElementById('top-winner-text').innerHTML = '';
       document.getElementById('center-text-overlay').innerHTML = '';
 
       if (activeEntries.length === 1) {
-          ultimateWinnerId = activeEntries[0].id;
-          needsNewWinner = false;
           document.getElementById('search-filter').value = '';
           renderList();
           
@@ -6924,7 +7126,7 @@
                   drawWheel(); 
                   
                   const winner = activeEntries[0];
-                  const winChance = (getEntryWinChance(winner, activeEntries) * 100).toFixed(2);
+                  const winChance = formatInitialSeriesWinChancePercent(winner, activeEntries);
                   
                   document.getElementById('top-winner-text').innerHTML = ''; // Скрываем верхний
                   document.getElementById('center-text-overlay').innerHTML = `
@@ -6933,7 +7135,7 @@
                           <div class="chance-badge">
                              <svg width="22" height="22" viewBox="0 0 24 24" fill="#e6a822"><circle cx="12" cy="12" r="10"/></svg>
                              <div class="chance-col">
-                               <span class="chance-label">ШАНС ЛОТА</span>
+                               <span class="chance-label">ИЗНАЧАЛЬНЫЙ ШАНС</span>
                                <span class="chance-val">${winChance}%</span>
                              </div>
                           </div>
@@ -6948,85 +7150,6 @@
           return;
       }
 
-      if (wheelMode === 'winner') {
-        document.getElementById('search-filter').value = '';
-        renderList();
-
-        const pickedWinner = pickWeightedEntry(activeEntries, getWinnerPickWeight);
-        const winner = pickedWinner?.entry;
-        if (!winner) return;
-
-        isSpinning = true;
-        document.body.classList.add('is-spinning');
-        document.body.classList.remove('show-result');
-
-        const totalWheelWeight = activeEntries.reduce((s, e) => s + getCurrentWheelWeight(e, activeEntries), 0);
-        let winnerStartAngle = 0;
-        let winnerSliceSize = 0;
-        if (totalWheelWeight > 0) {
-          for (let i = 0; i < activeEntries.length; i++) {
-            if (activeEntries[i].id === winner.id) break;
-            winnerStartAngle += (getCurrentWheelWeight(activeEntries[i], activeEntries) / totalWheelWeight) * Math.PI * 2;
-          }
-          winnerSliceSize = (getCurrentWheelWeight(winner, activeEntries) / totalWheelWeight) * Math.PI * 2;
-        } else {
-          const winnerIndex = Math.max(0, activeEntries.findIndex(entry => entry.id === winner.id));
-          winnerSliceSize = (Math.PI * 2) / activeEntries.length;
-          winnerStartAngle = winnerIndex * winnerSliceSize;
-        }
-        const targetAngleOnWheel = winnerStartAngle + cryptoRandomFloat() * winnerSliceSize;
-        const baseTarget = (Math.PI * 2) - targetAngleOnWheel;
-        const currentMod = currentAngle % (Math.PI * 2);
-        let rotationNeeded = baseTarget - currentMod;
-        if (rotationNeeded < 0) rotationNeeded += Math.PI * 2;
-
-        const extraSpins = Math.PI * 2 * 10;
-        const targetAngle = currentAngle + rotationNeeded + extraSpins;
-        const initialAngle = currentAngle;
-        const duration = (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000;
-        const start = performance.now();
-
-        spinHistory.push({
-          mode: 'winner',
-          winnerId: winner.id,
-          winnerName: winner.name,
-          activeBefore: activeEntries.map(e => ({
-            id: e.id,
-            name: e.name,
-            amount: Number(e.price) || 0,
-            weight: getWinnerPickWeight(e)
-          })),
-          randomSource: pickedWinner.randomSource || 'crypto',
-          createdAt: new Date().toISOString()
-        });
-
-        function easeOutQuart(x) { return 1 - Math.pow(1 - x, 4); }
-
-        function animateWinner(timestamp) {
-          const progress = Math.min((timestamp - start) / duration, 1);
-          currentAngle = initialAngle + (targetAngle - initialAngle) * easeOutQuart(progress);
-          const currentSeg = getCurrentSegment(currentAngle);
-          if (currentSeg) document.getElementById('top-winner-text').innerHTML = currentSeg.name;
-          drawWheel();
-
-          if (progress < 1) {
-            requestAnimationFrame(animateWinner);
-          } else {
-            currentAngle = currentAngle % (Math.PI * 2);
-            ultimateWinnerId = winner.id;
-            needsNewWinner = false;
-            document.getElementById('top-winner-text').innerHTML = '';
-            document.getElementById('center-text-overlay').innerHTML = `<div class="final-winner-layout"><div class="winner-name" style="margin-top:20px;">${winner.name}</div></div>`;
-            document.body.classList.add('show-result');
-            isSpinning = false;
-            saveData();
-            drawWheel();
-          }
-        }
-        requestAnimationFrame(animateWinner);
-        return;
-      }
-
       document.getElementById('search-filter').value = '';
       renderList();
 
@@ -7034,13 +7157,6 @@
       document.body.classList.add('is-spinning');
       document.body.classList.remove('show-result');
       
-      const activeBefore = activeEntries.map(e => ({
-        id: e.id,
-        name: e.name,
-        amount: Number(e.price) || 0,
-        weight: getEliminationPickWeight(e, activeEntries)
-      }));
-
       const picked = pickWeightedEntry(
         activeEntries,
         entry => getEliminationPickWeight(entry, activeEntries)
@@ -7065,16 +7181,6 @@
       
       const pointInsideVictim = cryptoRandomFloat(); 
       const targetAngleOnWheel = victimStartAngle + (pointInsideVictim * victimSliceSize);
-
-      spinHistory.push({
-        mode: 'elimination',
-        eliminatedId: victim.id,
-        eliminatedName: victim.name,
-        activeBefore,
-        randomSource: picked.randomSource || 'crypto',
-        createdAt: new Date().toISOString()
-      });
-      lastEliminatedId = victim.id;
 
       const baseTarget = (Math.PI * 2) - targetAngleOnWheel;
       const currentMod = currentAngle % (Math.PI * 2);
@@ -7130,7 +7236,7 @@
       // ЕСЛИ ЭТО ПОСЛЕДНЕЕ УДАЛЕНИЕ (ФИНАЛ)
       if (isFinal) {
           const winner = activeEntries.find(e => e.id !== victimRef.id);
-          const winChance = winner ? (getEntryWinChance(winner, activeEntries) * 100).toFixed(2) : "100.00";
+          const winChance = formatInitialSeriesWinChancePercent(winner, activeEntries);
           
           topText.innerHTML = ''; // Убираем верхний, всё будет посередине
           overlay.innerHTML = `
@@ -7142,7 +7248,7 @@
                 <div class="chance-badge">
                    <svg width="22" height="22" viewBox="0 0 24 24" fill="#e6a822"><circle cx="12" cy="12" r="10"/></svg>
                    <div class="chance-col">
-                     <span class="chance-label">ШАНС ЛОТА</span>
+                     <span class="chance-label">ИЗНАЧАЛЬНЫЙ ШАНС</span>
                      <span class="chance-val">${winChance}%</span>
                    </div>
                 </div>
@@ -7189,10 +7295,6 @@
               shrinkingProgress = 0;
               victimRef.eliminated = true;
               const remainingAfterElimination = entries.filter(e => !e.eliminated);
-              if (remainingAfterElimination.length === 1) {
-                ultimateWinnerId = remainingAfterElimination[0].id;
-                needsNewWinner = false;
-              }
               isDelaying = false;
               isSpinning = false; 
               
@@ -7320,7 +7422,7 @@
     setupTabsAndDonations();
     const donationAlertsOAuthHandled = handleDonationAlertsOAuthCallback();
     applyViewMode();
-    checkLocalServer();
+    bootstrapLocalApp();
     resizeWheel();
     renderList();
   </script>

@@ -2,6 +2,9 @@ param(
     [string]$Root = $PSScriptRoot
 )
 
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$OutputEncoding = [System.Text.UTF8Encoding]::new()
+
 $ErrorActionPreference = "Stop"
 $HostAddress = "127.0.0.1"
 $Ports = @(5500)
@@ -80,6 +83,43 @@ if ([string]::IsNullOrWhiteSpace($Root)) {
 }
 $RootPath = [System.IO.Path]::GetFullPath($Root)
 $SiteUrl = "http://${HostAddress}:${SelectedPort}/koleso_papich.html?view=admin"
+$script:AppBuildSha = "__APP_BUILD_SHA__"
+$script:AppBuildVersion = "__APP_BUILD_VERSION__"
+$script:AppReleaseUrl = "https://github.com/dentatli/koleso_papicha_release/releases/latest"
+$InitialBuildSha = ([string]$script:AppBuildSha).Trim()
+$InitialBuildVersion = ([string]$script:AppBuildVersion).Trim()
+
+if (
+    [string]::IsNullOrWhiteSpace($InitialBuildSha) -or
+    $InitialBuildSha -eq "__APP_BUILD_SHA__" -or
+    $InitialBuildSha -eq "dev"
+) {
+    $InitialBuildSha = ""
+    $InitialBuildVersion = "dev"
+}
+elseif (
+    [string]::IsNullOrWhiteSpace($InitialBuildVersion) -or
+    $InitialBuildVersion -eq "__APP_BUILD_VERSION__"
+) {
+    $InitialBuildVersion = if ($InitialBuildSha.Length -le 7) {
+        $InitialBuildSha
+    }
+    else {
+        $InitialBuildSha.Substring(0, 7)
+    }
+}
+
+$script:AppVersionStatus = [pscustomobject]@{
+    ok = $true
+    currentSha = $InitialBuildSha
+    currentVersion = $InitialBuildVersion
+    latestSha = ""
+    latestVersion = ""
+    updateAvailable = $false
+    checkedAt = ""
+    releaseUrl = $script:AppReleaseUrl
+    error = ""
+}
 
 function Get-ContentType {
     param([string]$Path)
@@ -150,6 +190,130 @@ function Send-Json {
     $Json = if ($null -eq $Data) { "" } else { $Data | ConvertTo-Json -Depth 20 -Compress }
     $Body = [System.Text.Encoding]::UTF8.GetBytes($Json)
     Send-Response $Stream $StatusCode $StatusText "application/json; charset=utf-8" $Body $HeadOnly
+}
+
+function Get-ShortSha {
+    param([string]$Sha)
+
+    $Clean = ([string]$Sha).Trim()
+    if ([string]::IsNullOrWhiteSpace($Clean) -or $Clean -eq "__APP_BUILD_SHA__" -or $Clean -eq "__APP_BUILD_VERSION__") {
+        return "dev"
+    }
+    if ($Clean.Length -le 7) {
+        return $Clean
+    }
+    return $Clean.Substring(0, 7)
+}
+
+function Test-AppVersion {
+    $Now = (Get-Date).ToUniversalTime().ToString("o")
+
+    $CurrentSha = ([string]$script:AppBuildSha).Trim()
+    $CurrentVersion = ([string]$script:AppBuildVersion).Trim()
+
+    $IsDevBuild = (
+        [string]::IsNullOrWhiteSpace($CurrentSha) -or
+        $CurrentSha -eq "__APP_BUILD_SHA__" -or
+        $CurrentSha -eq "dev"
+    )
+
+    if ($IsDevBuild) {
+        $CurrentSha = ""
+        $CurrentVersion = "dev"
+    }
+    elseif (
+        [string]::IsNullOrWhiteSpace($CurrentVersion) -or
+        $CurrentVersion -eq "__APP_BUILD_VERSION__"
+    ) {
+        $CurrentVersion = Get-ShortSha $CurrentSha
+    }
+
+    $script:AppVersionStatus = [pscustomobject]@{
+        ok = $true
+        currentSha = $CurrentSha
+        currentVersion = $CurrentVersion
+        latestSha = ""
+        latestVersion = ""
+        updateAvailable = $false
+        checkedAt = $Now
+        releaseUrl = $script:AppReleaseUrl
+        error = ""
+    }
+
+    if ($IsDevBuild) {
+        return
+    }
+
+    try {
+        $RefData = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/dentatli/koleso_papicha_release/git/ref/tags/latest" `
+            -Headers @{ "User-Agent" = "PapichWheelLocalServer" } `
+            -TimeoutSec 5
+
+        $RefType = [string]$RefData.object.type
+        $RefSha = [string]$RefData.object.sha
+        $LatestSha = ""
+
+        if ([string]::IsNullOrWhiteSpace($RefSha)) {
+            throw "GitHub latest ref returned empty sha"
+        }
+
+        if ($RefType -eq "commit") {
+            $LatestSha = $RefSha
+        }
+        elseif ($RefType -eq "tag") {
+            $TagData = Invoke-RestMethod `
+                -Uri "https://api.github.com/repos/dentatli/koleso_papicha_release/git/tags/$RefSha" `
+                -Headers @{ "User-Agent" = "PapichWheelLocalServer" } `
+                -TimeoutSec 5
+
+            $LatestSha = [string]$TagData.object.sha
+            if ([string]::IsNullOrWhiteSpace($LatestSha)) {
+                throw "GitHub annotated latest tag returned empty commit sha"
+            }
+        }
+        else {
+            throw "GitHub latest ref unsupported object type: $RefType"
+        }
+
+        $script:AppVersionStatus = [pscustomobject]@{
+            ok = $true
+            currentSha = $CurrentSha
+            currentVersion = $CurrentVersion
+            latestSha = $LatestSha
+            latestVersion = (Get-ShortSha $LatestSha)
+            updateAvailable = ($LatestSha -ne $CurrentSha)
+            checkedAt = $Now
+            releaseUrl = $script:AppReleaseUrl
+            error = ""
+        }
+    }
+    catch {
+        $script:AppVersionStatus = [pscustomobject]@{
+            ok = $true
+            currentSha = $CurrentSha
+            currentVersion = $CurrentVersion
+            latestSha = ""
+            latestVersion = ""
+            updateAvailable = $false
+            checkedAt = $Now
+            releaseUrl = $script:AppReleaseUrl
+            error = $_.Exception.Message
+        }
+    }
+}
+
+function Write-AppVersionLog {
+    Write-Host "Version current: $($script:AppVersionStatus.currentVersion) $($script:AppVersionStatus.currentSha)" -ForegroundColor Yellow
+    Write-Host "Version latest: $($script:AppVersionStatus.latestVersion) $($script:AppVersionStatus.latestSha)" -ForegroundColor Yellow
+    Write-Host "Version updateAvailable: $($script:AppVersionStatus.updateAvailable)" -ForegroundColor Yellow
+    if ($script:AppVersionStatus.error) {
+        Write-Host "Version error: $($script:AppVersionStatus.error)" -ForegroundColor Yellow
+    }
+}
+
+function Get-AppVersionStatus {
+    return $script:AppVersionStatus
 }
 
 function Read-JsonBody {
@@ -1102,6 +1266,9 @@ function Clear-CollectorDonations {
     }
 }
 
+Test-AppVersion
+Write-AppVersionLog
+
 Write-Host ""
 Write-Host "Papich Wheel is running:" -ForegroundColor Green
 Write-Host $SiteUrl -ForegroundColor Cyan
@@ -1181,6 +1348,38 @@ try {
                 }
                 else {
                     Send-Json $Stream 200 @{ ok = $true; server = "papich-wheel-local" } $HeadOnly
+                }
+                continue
+            }
+
+            if ($DecodedTarget -eq "/api/app/bootstrap") {
+                if ($Method -ne "POST") {
+                    Send-Json $Stream 405 @{ ok = $false; error = "Method not allowed."; status = 405 }
+                }
+                else {
+                    $InputData = Read-JsonBody $Reader $ContentLength
+                    if ($InputData -and $InputData.collector) {
+                        Update-CollectorConfig $InputData.collector
+                    }
+                    Send-Json $Stream 200 ([pscustomobject]@{
+                        ok = $true
+                        health = [pscustomobject]@{
+                            ok = $true
+                            server = "papich-wheel-local"
+                        }
+                        version = Get-AppVersionStatus
+                        collector = Get-CollectorStatus
+                    }) $HeadOnly
+                }
+                continue
+            }
+
+            if ($DecodedTarget -eq "/api/app/version") {
+                if ($Method -ne "GET") {
+                    Send-Json $Stream 405 @{ ok = $false; error = "Method not allowed."; status = 405 }
+                }
+                else {
+                    Send-Json $Stream 200 (Get-AppVersionStatus) $HeadOnly
                 }
                 continue
             }

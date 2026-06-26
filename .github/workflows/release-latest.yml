@@ -60,8 +60,15 @@ jobs:
 
           Коммит: $env:GITHUB_SHA
 
-          Скачайте PapichWheel_Setup.bat, положите его в нужную папку и запустите.
-          После распаковки запустите start_koleso.bat.
+          Как запустить:
+            1. Скачайте PapichWheel_Setup.bat
+            2. Положите его в нужную папку и запустите.
+            3. После распаковки запустите start_koleso.bat.
+            4. Пока работает колесо не закрывайте окно с командной строкой.
+            
+          Как обновить:
+            1. Скачайте PapichWheel_Setup.bat
+            2. Положите рядом с файлом start_koleso.bat и запустить            
           "@ | Set-Content -LiteralPath "release-notes.md" -Encoding utf8
 
           gh release create latest `
