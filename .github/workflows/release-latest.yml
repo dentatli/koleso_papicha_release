@@ -1,0 +1,71 @@
+name: Build latest release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-latest
+  cancel-in-progress: true
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build setup BAT
+        shell: pwsh
+        run: |
+          ./build_release_single_bat.ps1
+
+      - name: Check build output
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/PapichWheel_Setup.bat")) {
+            throw "dist/PapichWheel_Setup.bat not found"
+          }
+
+          $size = (Get-Item "dist/PapichWheel_Setup.bat").Length
+          if ($size -le 0) {
+            throw "dist/PapichWheel_Setup.bat is empty"
+          }
+
+          Write-Host "PapichWheel_Setup.bat size: $size bytes"
+
+      - name: Recreate latest release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete latest --yes --cleanup-tag
+          } else {
+            Write-Host "No existing latest release. Creating new one."
+          }
+
+          git tag -f latest $env:GITHUB_SHA
+          git push origin refs/tags/latest --force
+
+          $notes = @"
+          Автоматическая сборка PapichWheel.
+
+          Коммит: $env:GITHUB_SHA
+
+          Скачайте PapichWheel_Setup.bat, положите его в нужную папку и запустите.
+          После распаковки запустите start_koleso.bat.
+          "@
+
+          gh release create latest `
+            "dist/PapichWheel_Setup.bat" `
+            --target $env:GITHUB_SHA `
+            --title "PapichWheel latest" `
+            --notes $notes
