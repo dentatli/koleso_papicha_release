@@ -1,15 +1,270 @@
 param(
-    [string]$Root = $PSScriptRoot
+    [string]$Root = $PSScriptRoot,
+    [switch]$ServerOnly,
+    [hashtable]$TrayState = $null
 )
 
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 $ErrorActionPreference = "Stop"
+$Root = $Root.Trim().Trim('"')
+if ([string]::IsNullOrWhiteSpace($Root)) {
+    $Root = $PSScriptRoot
+}
+$RootPath = [System.IO.Path]::GetFullPath($Root)
+$TrayIconPath = Join-Path $RootPath "tray.ico"
+$TrayErrorIconPath = Join-Path $RootPath "tray-error.ico"
+$LogPath = Join-Path $RootPath "server.log"
+
+function Initialize-AppLog {
+    try {
+        if (-not [System.IO.Directory]::Exists($RootPath)) {
+            [System.IO.Directory]::CreateDirectory($RootPath) | Out-Null
+        }
+        if ([System.IO.File]::Exists($LogPath)) {
+            $Info = [System.IO.FileInfo]::new($LogPath)
+            if ($Info.Length -gt 1MB) {
+                [System.IO.File]::Delete($LogPath)
+            }
+        }
+        if (-not [System.IO.File]::Exists($LogPath)) {
+            [System.IO.File]::WriteAllText($LogPath, "", [System.Text.UTF8Encoding]::new($true))
+        }
+    }
+    catch {
+        Write-Host "Log init failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+function Write-AppLog {
+    param(
+        [string]$Level = "INFO",
+        [string]$Message = ""
+    )
+
+    try {
+        $Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        $Line = "[$Timestamp] [$Level] $Message"
+        [System.IO.File]::AppendAllText($LogPath, $Line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($true))
+    }
+    catch {
+        Write-Host "Log write failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+function Set-CriticalServerError {
+    param([string]$Message)
+
+    Write-AppLog -Level "ERROR" -Message $Message
+    if ($TrayState) {
+        try {
+            $TrayState.HasCriticalError = $true
+            $TrayState.ErrorMessage = $Message
+        } catch {}
+    }
+}
+
+function Test-ServerStopRequested {
+    if (-not $TrayState) { return $false }
+    try { return [bool]$TrayState.StopRequested } catch { return $false }
+}
+
+Initialize-AppLog
+
 $HostAddress = "127.0.0.1"
 $Ports = @(5500)
 $Listener = $null
-$SelectedPort = $null
+$SelectedPort = 5500
+$SiteUrl = "http://${HostAddress}:${SelectedPort}/koleso_papich.html?view=admin"
+$script:AppBuildSha = "__APP_BUILD_SHA__"
+$script:AppBuildVersion = "__APP_BUILD_VERSION__"
+$script:AppReleaseUrl = "https://github.com/dentatli/koleso_papicha_release/releases/latest"
+$InitialBuildSha = ([string]$script:AppBuildSha).Trim()
+$InitialBuildVersion = ([string]$script:AppBuildVersion).Trim()
+
+if (
+    [string]::IsNullOrWhiteSpace($InitialBuildSha) -or
+    $InitialBuildSha -eq "__APP_BUILD_SHA__" -or
+    $InitialBuildSha -eq "dev"
+) {
+    $InitialBuildSha = ""
+    $InitialBuildVersion = "dev"
+}
+elseif (
+    [string]::IsNullOrWhiteSpace($InitialBuildVersion) -or
+    $InitialBuildVersion -eq "__APP_BUILD_VERSION__"
+) {
+    $InitialBuildVersion = if ($InitialBuildSha.Length -le 7) {
+        $InitialBuildSha
+    }
+    else {
+        $InitialBuildSha.Substring(0, 7)
+    }
+}
+
+$script:AppVersionStatus = [pscustomobject]@{
+    ok = $true
+    currentSha = $InitialBuildSha
+    currentVersion = $InitialBuildVersion
+    latestSha = ""
+    latestVersion = ""
+    updateAvailable = $false
+    checkedAt = ""
+    releaseUrl = $script:AppReleaseUrl
+    error = ""
+}
+
+function Open-AppSite {
+    try {
+        Start-Process $SiteUrl
+        Write-AppLog -Level "INFO" -Message "Open site requested: $SiteUrl"
+    }
+    catch {
+        Write-AppLog -Level "ERROR" -Message "Could not open site: $($_.Exception.Message)"
+    }
+}
+
+function Open-AppLog {
+    try {
+        if (-not [System.IO.File]::Exists($LogPath)) {
+            [System.IO.File]::WriteAllText($LogPath, "", [System.Text.UTF8Encoding]::new($true))
+        }
+        Start-Process "notepad.exe" -ArgumentList "`"$LogPath`""
+    }
+    catch {
+        Write-AppLog -Level "ERROR" -Message "Could not open log: $($_.Exception.Message)"
+    }
+}
+
+function Get-TrayIcon {
+    param(
+        [string]$Path,
+        [System.Drawing.Icon]$Fallback
+    )
+
+    try {
+        if ([System.IO.File]::Exists($Path)) {
+            return [System.Drawing.Icon]::new($Path)
+        }
+        Write-AppLog -Level "WARN" -Message "Tray icon not found: $Path"
+    }
+    catch {
+        Write-AppLog -Level "WARN" -Message "Tray icon load failed: $Path; $($_.Exception.Message)"
+    }
+    return $Fallback
+}
+
+function Start-TrayApplication {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    Write-AppLog -Level "INFO" -Message "Application start"
+    Write-AppLog -Level "INFO" -Message "Root: $Root"
+    Write-AppLog -Level "INFO" -Message "RootPath: $RootPath"
+    Write-AppLog -Level "INFO" -Message "LogPath: $LogPath"
+    Write-AppLog -Level "INFO" -Message "TrayIconPath: $TrayIconPath"
+    Write-AppLog -Level "INFO" -Message "TrayErrorIconPath: $TrayErrorIconPath"
+
+    $State = [hashtable]::Synchronized(@{
+        StopRequested = $false
+        HasCriticalError = $false
+        ErrorMessage = ""
+        Started = $false
+    })
+
+    $DefaultIcon = [System.Drawing.SystemIcons]::Application
+    $NormalIcon = Get-TrayIcon -Path $TrayIconPath -Fallback $DefaultIcon
+    $ErrorIcon = Get-TrayIcon -Path $TrayErrorIconPath -Fallback $NormalIcon
+    if (-not [System.IO.File]::Exists($TrayErrorIconPath)) {
+        Write-AppLog -Level "WARN" -Message "Tray error icon not found: $TrayErrorIconPath"
+    }
+    $TooltipDash = [string][char]0x2014
+
+    $NotifyIcon = [System.Windows.Forms.NotifyIcon]::new()
+    $NotifyIcon.Icon = $NormalIcon
+    $NotifyIcon.Text = "Papich Wheel $TooltipDash сервер работает"
+    $NotifyIcon.Visible = $true
+
+    $Menu = [System.Windows.Forms.ContextMenuStrip]::new()
+    $OpenSiteItem = [System.Windows.Forms.ToolStripMenuItem]::new("Открыть сайт")
+    $OpenLogItem = [System.Windows.Forms.ToolStripMenuItem]::new("Открыть лог")
+    $ExitItem = [System.Windows.Forms.ToolStripMenuItem]::new("Выйти")
+    [void]$Menu.Items.Add($OpenSiteItem)
+    [void]$Menu.Items.Add($OpenLogItem)
+    [void]$Menu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
+    [void]$Menu.Items.Add($ExitItem)
+    $NotifyIcon.ContextMenuStrip = $Menu
+
+    $OpenSiteItem.add_Click({ Open-AppSite })
+    $OpenLogItem.add_Click({ Open-AppLog })
+    $NotifyIcon.add_DoubleClick({ Open-AppSite })
+    $ExitItem.add_Click({
+        Write-AppLog -Level "INFO" -Message "Exit requested from tray menu"
+        $State.StopRequested = $true
+        [System.Windows.Forms.Application]::ExitThread()
+    })
+
+    $Runspace = [runspacefactory]::CreateRunspace()
+    $Runspace.ApartmentState = "MTA"
+    $Runspace.Open()
+    $PowerShell = [powershell]::Create()
+    $PowerShell.Runspace = $Runspace
+    [void]$PowerShell.AddCommand($PSCommandPath)
+    [void]$PowerShell.AddParameter("Root", $RootPath)
+    [void]$PowerShell.AddParameter("ServerOnly", $true)
+    [void]$PowerShell.AddParameter("TrayState", $State)
+    $AsyncResult = $PowerShell.BeginInvoke()
+
+    $UiTimer = [System.Windows.Forms.Timer]::new()
+    $UiTimer.Interval = 1000
+    $UiTimer.add_Tick({
+        try {
+            if ([bool]$State.HasCriticalError) {
+                $NotifyIcon.Icon = $ErrorIcon
+                $NotifyIcon.Text = "Papich Wheel $TooltipDash ошибка, откройте лог"
+            }
+            else {
+                $NotifyIcon.Icon = $NormalIcon
+                $NotifyIcon.Text = "Papich Wheel $TooltipDash сервер работает"
+            }
+        } catch {}
+    })
+    $UiTimer.Start()
+
+    try {
+        Open-AppSite
+        [System.Windows.Forms.Application]::Run()
+    }
+    finally {
+        Write-AppLog -Level "INFO" -Message "Tray application stopping"
+        try { $State.StopRequested = $true } catch {}
+        try { $UiTimer.Stop(); $UiTimer.Dispose() } catch {}
+        try {
+            if ($AsyncResult -and -not $AsyncResult.IsCompleted) {
+                $WaitHandle = $AsyncResult.AsyncWaitHandle
+                [void]$WaitHandle.WaitOne(5000)
+            }
+            if ($AsyncResult -and $AsyncResult.IsCompleted) {
+                $PowerShell.EndInvoke($AsyncResult)
+            }
+        } catch {
+            Write-AppLog -Level "ERROR" -Message "Server runspace stop error: $($_.Exception.Message)"
+        }
+        try { $PowerShell.Dispose() } catch {}
+        try { $Runspace.Close(); $Runspace.Dispose() } catch {}
+        try { $NotifyIcon.Visible = $false; $NotifyIcon.Dispose() } catch {}
+        try { if ($NormalIcon -and -not [object]::ReferenceEquals($NormalIcon, $DefaultIcon)) { $NormalIcon.Dispose() } } catch {}
+        try { if ($ErrorIcon -and -not [object]::ReferenceEquals($ErrorIcon, $NormalIcon) -and -not [object]::ReferenceEquals($ErrorIcon, $DefaultIcon)) { $ErrorIcon.Dispose() } } catch {}
+        Write-AppLog -Level "INFO" -Message "Application stopped"
+    }
+}
+
+if (-not $ServerOnly) {
+    Start-TrayApplication
+    return
+}
+
 $script:StateLock = [object]::new()
 $script:CollectorEnabled = $false
 $script:NextCollectorTickAt = Get-Date
@@ -50,75 +305,6 @@ $script:ServerState = @{
             PollingIntervalSec = 10
         }
     }
-}
-
-foreach ($Port in $Ports) {
-    $Candidate = $null
-    try {
-        $Candidate = [System.Net.Sockets.TcpListener]::new(
-            [System.Net.IPAddress]::Parse($HostAddress),
-            $Port
-        )
-        $Candidate.Start()
-        $Listener = $Candidate
-        $SelectedPort = $Port
-        break
-    }
-    catch {
-        if ($Candidate) {
-            try { $Candidate.Stop() } catch {}
-        }
-    }
-}
-
-if (-not $Listener) {
-    Write-Host "Порт 5500 занят. Закройте другую копию приложения или освободите порт 5500." -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-$Root = $Root.Trim().Trim('"')
-if ([string]::IsNullOrWhiteSpace($Root)) {
-    $Root = $PSScriptRoot
-}
-$RootPath = [System.IO.Path]::GetFullPath($Root)
-$SiteUrl = "http://${HostAddress}:${SelectedPort}/koleso_papich.html?view=admin"
-$script:AppBuildSha = "__APP_BUILD_SHA__"
-$script:AppBuildVersion = "__APP_BUILD_VERSION__"
-$script:AppReleaseUrl = "https://github.com/dentatli/koleso_papicha_release/releases/latest"
-$InitialBuildSha = ([string]$script:AppBuildSha).Trim()
-$InitialBuildVersion = ([string]$script:AppBuildVersion).Trim()
-
-if (
-    [string]::IsNullOrWhiteSpace($InitialBuildSha) -or
-    $InitialBuildSha -eq "__APP_BUILD_SHA__" -or
-    $InitialBuildSha -eq "dev"
-) {
-    $InitialBuildSha = ""
-    $InitialBuildVersion = "dev"
-}
-elseif (
-    [string]::IsNullOrWhiteSpace($InitialBuildVersion) -or
-    $InitialBuildVersion -eq "__APP_BUILD_VERSION__"
-) {
-    $InitialBuildVersion = if ($InitialBuildSha.Length -le 7) {
-        $InitialBuildSha
-    }
-    else {
-        $InitialBuildSha.Substring(0, 7)
-    }
-}
-
-$script:AppVersionStatus = [pscustomobject]@{
-    ok = $true
-    currentSha = $InitialBuildSha
-    currentVersion = $InitialBuildVersion
-    latestSha = ""
-    latestVersion = ""
-    updateAvailable = $false
-    checkedAt = ""
-    releaseUrl = $script:AppReleaseUrl
-    error = ""
 }
 
 function Get-ContentType {
@@ -307,8 +493,12 @@ function Write-AppVersionLog {
     Write-Host "Version current: $($script:AppVersionStatus.currentVersion) $($script:AppVersionStatus.currentSha)" -ForegroundColor Yellow
     Write-Host "Version latest: $($script:AppVersionStatus.latestVersion) $($script:AppVersionStatus.latestSha)" -ForegroundColor Yellow
     Write-Host "Version updateAvailable: $($script:AppVersionStatus.updateAvailable)" -ForegroundColor Yellow
+    Write-AppLog -Level "INFO" -Message "Version current: $($script:AppVersionStatus.currentVersion) $($script:AppVersionStatus.currentSha)"
+    Write-AppLog -Level "INFO" -Message "Version latest: $($script:AppVersionStatus.latestVersion) $($script:AppVersionStatus.latestSha)"
+    Write-AppLog -Level "INFO" -Message "Version updateAvailable: $($script:AppVersionStatus.updateAvailable)"
     if ($script:AppVersionStatus.error) {
         Write-Host "Version error: $($script:AppVersionStatus.error)" -ForegroundColor Yellow
+        Write-AppLog -Level "WARN" -Message "Version error: $($script:AppVersionStatus.error)"
     }
 }
 
@@ -489,11 +679,17 @@ function Write-UpstreamErrorLog {
     )
 
     Write-Host "$Service proxy request failed." -ForegroundColor Yellow
+    Write-AppLog -Level "ERROR" -Message "$Service proxy request failed."
     if ($ErrorData.endpoint) { Write-Host "  endpoint: $($ErrorData.endpoint)" -ForegroundColor Yellow }
     if ($ErrorData.upstreamStatus) { Write-Host "  upstream status: $($ErrorData.upstreamStatus)" -ForegroundColor Yellow }
     if ($ErrorData.upstreamUrl) { Write-Host "  upstream url: $($ErrorData.upstreamUrl)" -ForegroundColor Yellow }
     if ($ErrorData.upstreamBody) { Write-Host "  upstream body: $($ErrorData.upstreamBody)" -ForegroundColor Yellow }
     if ($ErrorData.exceptionMessage) { Write-Host "  exception: $($ErrorData.exceptionMessage)" -ForegroundColor Yellow }
+    if ($ErrorData.endpoint) { Write-AppLog -Level "ERROR" -Message "  endpoint: $($ErrorData.endpoint)" }
+    if ($ErrorData.upstreamStatus) { Write-AppLog -Level "ERROR" -Message "  upstream status: $($ErrorData.upstreamStatus)" }
+    if ($ErrorData.upstreamUrl) { Write-AppLog -Level "ERROR" -Message "  upstream url: $($ErrorData.upstreamUrl)" }
+    if ($ErrorData.upstreamBody) { Write-AppLog -Level "ERROR" -Message "  upstream body: $($ErrorData.upstreamBody)" }
+    if ($ErrorData.exceptionMessage) { Write-AppLog -Level "ERROR" -Message "  exception: $($ErrorData.exceptionMessage)" }
 }
 
 function Invoke-DonatePayApi {
@@ -761,10 +957,12 @@ function Add-ServerDonation {
         $script:ServerState.SeenDonationKeys[$Key] = $true
         if ([double]::IsNaN($Amount) -or $Amount -le 0 -or -not $DateValid) {
             Write-Host "[Collector] invalid donation skipped: $Key" -ForegroundColor Yellow
+            Write-AppLog -Level "WARN" -Message "[Collector] invalid donation skipped: $Key"
             return $false
         }
         [void]$script:ServerState.DonationsPending.Add([pscustomobject]$Donation)
         Write-Host "[Collector] pending donations: $($script:ServerState.DonationsPending.Count)" -ForegroundColor DarkCyan
+        Write-AppLog -Level "INFO" -Message "[Collector] pending donations: $($script:ServerState.DonationsPending.Count)"
         return $true
     }
     finally {
@@ -918,6 +1116,7 @@ function Invoke-DonationAlertsCollectorPoll {
         $Service.LastEventAt = (Get-Date).ToUniversalTime().ToString("o")
         Clear-CollectorBackoff $Service
         Write-Host "[DonationAlerts] baseline ready, lastSeenId=$MaxId" -ForegroundColor Green
+        Write-AppLog -Level "INFO" -Message "[DonationAlerts] baseline ready, lastSeenId=$MaxId"
         return
     }
 
@@ -939,6 +1138,7 @@ function Invoke-DonationAlertsCollectorPoll {
     Clear-CollectorBackoff $Service
     if ($Added -gt 0) {
         Write-Host "[DonationAlerts] received $($Rows.Count), new $Added" -ForegroundColor DarkCyan
+        Write-AppLog -Level "INFO" -Message "[DonationAlerts] received $($Rows.Count), new $Added"
     }
 }
 
@@ -1060,6 +1260,7 @@ function Invoke-CollectorTickIfDue {
     }
     catch {
         Write-Host "[Collector] tick error: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-AppLog -Level "ERROR" -Message "[Collector] tick error: $($_.Exception.Message)"
     }
 }
 
@@ -1154,8 +1355,11 @@ function Update-CollectorConfig {
 
     if ($AnyConfigChanged) {
         Write-Host "[Collector] config updated" -ForegroundColor Green
+        Write-AppLog -Level "INFO" -Message "[Collector] config updated"
         if ($script:ServerState.Integrations.DonatePay.Enabled) { Write-Host "[Collector] DonatePay enabled" -ForegroundColor Green }
         if ($script:ServerState.Integrations.DonationAlerts.Enabled) { Write-Host "[Collector] DonationAlerts enabled" -ForegroundColor Green }
+        if ($script:ServerState.Integrations.DonatePay.Enabled) { Write-AppLog -Level "INFO" -Message "[Collector] DonatePay enabled" }
+        if ($script:ServerState.Integrations.DonationAlerts.Enabled) { Write-AppLog -Level "INFO" -Message "[Collector] DonationAlerts enabled" }
     }
 }
 
@@ -1266,24 +1470,53 @@ function Clear-CollectorDonations {
     }
 }
 
+foreach ($Port in $Ports) {
+    $Candidate = $null
+    try {
+        $Candidate = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Parse($HostAddress),
+            $Port
+        )
+        $Candidate.Start()
+        $Listener = $Candidate
+        $SelectedPort = $Port
+        $SiteUrl = "http://${HostAddress}:${SelectedPort}/koleso_papich.html?view=admin"
+        break
+    }
+    catch {
+        Write-AppLog -Level "ERROR" -Message "HTTP listener start failed on port ${Port}: $($_.Exception.Message)"
+        if ($Candidate) {
+            try { $Candidate.Stop() } catch {}
+        }
+    }
+}
+
+if (-not $Listener) {
+    Set-CriticalServerError "Порт 5500 занят. Закройте другую копию приложения или освободите порт 5500."
+    while (-not (Test-ServerStopRequested)) {
+        Start-Sleep -Milliseconds 300
+    }
+    exit 1
+}
+
+Write-AppLog -Level "INFO" -Message "Server runtime start"
+Write-AppLog -Level "INFO" -Message "Root: $Root"
+Write-AppLog -Level "INFO" -Message "RootPath: $RootPath"
+Write-AppLog -Level "INFO" -Message "LogPath: $LogPath"
+Write-AppLog -Level "INFO" -Message "TrayIconPath: $TrayIconPath"
+Write-AppLog -Level "INFO" -Message "TrayErrorIconPath: $TrayErrorIconPath"
+Write-AppLog -Level "INFO" -Message "Port: $SelectedPort"
+Write-AppLog -Level "INFO" -Message "SiteUrl: $SiteUrl"
+Write-AppLog -Level "INFO" -Message "HTTP listener started"
+if ($TrayState) {
+    try { $TrayState.Started = $true } catch {}
+}
+
 Test-AppVersion
 Write-AppVersionLog
 
-Write-Host ""
-Write-Host "Papich Wheel is running:" -ForegroundColor Green
-Write-Host $SiteUrl -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Close this window or press Ctrl+C to stop the server."
-
 try {
-    Start-Process $SiteUrl
-}
-catch {
-    Write-Host "Could not open the browser automatically. Open the URL manually." -ForegroundColor Yellow
-}
-
-try {
-    while ($true) {
+    while (-not (Test-ServerStopRequested)) {
         try {
             Invoke-CollectorTickIfDue
 
@@ -1440,6 +1673,7 @@ try {
                 }
                 catch {
                     Write-Host "[Collector] request error: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-AppLog -Level "ERROR" -Message "[Collector] request error: $($_.Exception.Message)"
                     Send-Json $Stream 500 @{
                         ok = $false
                         error = "Collector request failed."
@@ -1547,6 +1781,7 @@ try {
                     if ($ApiFound) {
                         if ($Result -and $Result.ok -eq $false) {
                             Write-Host "DonatePay proxy request failed." -ForegroundColor Yellow
+                            Write-AppLog -Level "ERROR" -Message "DonatePay proxy request failed."
                             Send-Json $Stream 500 $Result
                         }
                         else {
@@ -1564,6 +1799,7 @@ try {
                         Get-FriendlyDonatePayProxyError $_.Exception
                     }
                     Write-Host "DonatePay proxy request failed." -ForegroundColor Yellow
+                    Write-AppLog -Level "ERROR" -Message "DonatePay proxy request failed: $FriendlyError"
                     Send-Json $Stream 500 @{
                         ok = $false
                         endpoint = $DecodedTarget
@@ -1615,6 +1851,7 @@ try {
         }
             catch {
                 Write-Host "Request error: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-AppLog -Level "ERROR" -Message "Request error: $($_.Exception.Message)"
                 if ($Stream) {
                     try {
                         Send-Json $Stream 500 @{ ok = $false; error = "Local server request failed."; status = 500 }
@@ -1629,13 +1866,17 @@ try {
         }
         catch {
             Write-Host "Server loop error: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-AppLog -Level "ERROR" -Message "Server loop error: $($_.Exception.Message)"
             Start-Sleep -Milliseconds 300
             continue
         }
     }
 }
 finally {
+    Write-AppLog -Level "INFO" -Message "Server runtime stopping"
     if ($Listener) {
-        try { $Listener.Stop() } catch {}
+        try { $Listener.Stop(); Write-AppLog -Level "INFO" -Message "HTTP listener stopped" } catch {
+            Write-AppLog -Level "ERROR" -Message "HTTP listener stop error: $($_.Exception.Message)"
+        }
     }
 }

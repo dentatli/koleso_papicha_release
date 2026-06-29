@@ -72,6 +72,8 @@ else {
 $ReleaseFiles = @(
     @{ Source = "koleso_papich.html"; Target = "assets/koleso_papich.html"; InjectBuildSha = $true },
     @{ Source = "local_server.ps1"; Target = "assets/local_server.ps1"; InjectBuildSha = $true },
+    @{ Source = "tray.ico"; Target = "assets/tray.ico"; InjectBuildSha = $false },
+    @{ Source = "tray-error.ico"; Target = "assets/tray-error.ico"; InjectBuildSha = $false },
     @{ Source = "start_koleso.bat"; Target = "start_koleso.bat"; InjectBuildSha = $false }
 )
 
