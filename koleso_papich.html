@@ -455,12 +455,6 @@
     .donation-card-actions {
       margin-top: 10px;
     }
-    .donation-entry-buttons {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 10px;
-    }
     .donation-entry-button {
       border: 1px solid var(--primary);
       background: transparent;
@@ -561,22 +555,9 @@
       border-radius: 7px;
       background: #282828;
     }
-    .integration-card-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 12px;
-    }
     .integration-card h3 {
       margin: 0;
       font-size: 15px;
-    }
-    .integration-field {
-      display: grid;
-      gap: 5px;
-      color: var(--text-dimmed);
-      font-size: 12px;
     }
     .integration-checkbox {
       display: flex;
@@ -597,14 +578,6 @@
     .integration-actions button {
       padding: 7px 9px;
       font-size: 12px;
-    }
-    .integration-details {
-      display: grid;
-      gap: 4px;
-      margin-top: 10px;
-      color: var(--text-dimmed);
-      font-size: 11px;
-      overflow-wrap: anywhere;
     }
     .integration-warning {
       margin: 12px 0 0;
@@ -1847,10 +1820,6 @@
     }
 
     /* --- Таймер под «Крутить» --- */
-    .settings-block-primary {
-      container-type: inline-size;
-      container-name: settingsprimary;
-    }
     .panel-timer {
       display: flex;
       flex-direction: column;
@@ -3023,7 +2992,7 @@
           </div>
           <div class="wheel-readonly-metrics">
             <strong id="wheel-readonly-total">0 ₽</strong>
-            <span class="wheel-readonly-percent-label" title="В списке показан финальный шанс победы. Размер сектора на колесе в режиме выбывания показывает шанс вылета на текущем прокруте.">Шанс победы</span>
+            <span class="wheel-readonly-percent-label" title="Текущий шанс победы среди оставшихся. Размер сектора — визуальный риск выбывания Pointauc New.">Шанс победы</span>
           </div>
         </div>
         <div class="wheel-readonly-list" id="wheel-readonly-list"></div>
@@ -3613,14 +3582,13 @@
     const DONATEPAY_RECOVERY_DELAY_MS = 7000;
     const DONATEPAY_RECOVERY_RETRY_MS = 30000;
     const DONATEPAY_RECOVERY_BACKOFF_429_MS = 5 * 60 * 1000;
-    const ELIMINATION_POWER_EXPONENT = 0.6;
-    const ELIMINATION_MIN_AMOUNT = 1;
     const WIN_CHANCE_DECIMALS = 2;
-    const WIN_CHANCE_FORMULA_VERSION = `power-${ELIMINATION_POWER_EXPONENT}`;
+    const SPIN_SERIES_MODE_POINTAUC_NEW = 'pointauc_new_dropout';
+    const POINTAUC_VISUAL_MIN_AMOUNT = 1;
+    const POINTAUC_VISUAL_MIN_MODIFIER = 0.55;
+    const POINTAUC_VISUAL_MAX_MODIFIER = 1.0;
     const appSessionStartedAt = Date.now();
     const seenDonationKeys = new Set();
-    const winChanceCache = new Map();
-    console.info('[Donations] session started at:', new Date(appSessionStartedAt).toISOString());
 
     let integrationModalService = null;
     let donatePayWizardRegion = null;
@@ -3723,8 +3691,6 @@
         loadData();
         applyViewMode();
         renderList();
-        renderWheelReadonlyEntriesList();
-        renderDonationsPanel();
         renderIntegrationCards();
         refreshCenterCircleBackground();
         restoreTimerState();
@@ -3820,6 +3786,15 @@
       return min + (x % range);
     }
 
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function getWheelLabelFontPx() {
       const el = document.getElementById('wheel-font-slider');
       if (!el) return WHEEL_LABEL_FONT_DEFAULT;
@@ -3843,11 +3818,16 @@
     let confirmModalOnCancel = null;
     let spinSeriesInitialWinChances = new Map();
     let spinSeriesActive = false;
+    let spinSeriesDropoutQueue = [];
+    let spinSeriesFinalWinnerId = null;
+    let spinSeriesInitialEntryKey = '';
+    let spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
+    let spinSeriesInitialCount = 0;
 
     // Глобальные переменные для анимации сужения (удаления) сектора
     let shrinkingTarget = null;
     let shrinkingProgress = 0;
-    let shrinkAnimFrame = null; // <--- НОВАЯ ПЕРЕМЕННАЯ
+    let shrinkAnimFrame = null;
     let spinResultClearTimeout = null;
 
     function resetSpinSeriesSnapshot() {
@@ -3857,6 +3837,40 @@
 
     function resetSpinState() {
       resetSpinSeriesSnapshot();
+      spinSeriesDropoutQueue = [];
+      spinSeriesFinalWinnerId = null;
+      spinSeriesInitialEntryKey = '';
+      spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
+      spinSeriesInitialCount = 0;
+    }
+
+    function resetSpinSeriesForCompositionChange({ clearEliminated = true } = {}) {
+      if (clearEliminated) {
+        entries.forEach(entry => {
+          if (entry) entry.eliminated = false;
+        });
+      }
+      resetSpinState();
+    }
+
+    function serializeChanceMap(chanceMap) {
+      return Array.from(chanceMap instanceof Map ? chanceMap.entries() : []);
+    }
+
+    function deserializeChanceMap(raw) {
+      const map = new Map();
+      if (!Array.isArray(raw)) return map;
+
+      raw.forEach(item => {
+        if (!Array.isArray(item) || item.length < 2) return;
+        const id = String(item[0]);
+        const chance = Number(item[1]);
+        if (id && Number.isFinite(chance)) {
+          map.set(id, Math.max(0, Math.min(1, chance)));
+        }
+      });
+
+      return map;
     }
 
     function ensureSpinSeriesSnapshot(activeEntries) {
@@ -3865,11 +3879,10 @@
         : entries.filter(entry => entry && !entry.eliminated);
       if (!candidates.length) return;
 
-      const eliminatedCount = entries.filter(entry => entry && entry.eliminated).length;
-      const shouldStartNewSeries = eliminatedCount === 0 || !spinSeriesActive;
+      const shouldStartNewSeries = !spinSeriesActive || spinSeriesInitialWinChances.size === 0;
       if (!shouldStartNewSeries) return;
 
-      spinSeriesInitialWinChances = calculateEliminationWinChances(candidates);
+      spinSeriesInitialWinChances = calculateAmountWinChances(candidates);
       spinSeriesActive = true;
     }
 
@@ -3885,8 +3898,8 @@
       document.body.classList.remove('show-result');
       const centerOverlay = document.getElementById('center-text-overlay');
       const topText = document.getElementById('top-winner-text');
-      if (centerOverlay) centerOverlay.innerHTML = '';
-      if (topText) topText.innerHTML = '';
+      if (centerOverlay) centerOverlay.replaceChildren();
+      if (topText) topText.textContent = '';
       if (redraw) {
         drawWheel();
         renderWheelReadonlyEntriesList();
@@ -3901,192 +3914,245 @@
       }, delayMs);
     }
 
-    function getPowerEliminationWeight(entry) {
+    function getEntryAmount(entry) {
+      return Math.max(0, Number(entry && entry.price) || 0);
+    }
+
+    function getChanceAmount(entry) {
+      return getEntryAmount(entry);
+    }
+
+    function getWeightedCandidatesByAmount(sourceEntries) {
+      const candidates = (Array.isArray(sourceEntries) ? sourceEntries : [])
+        .filter(entry => entry);
+
+      const totalAmount = candidates.reduce((sum, entry) => sum + getChanceAmount(entry), 0);
+
+      if (totalAmount > 0) {
+        return candidates;
+      }
+
+      return candidates.map(entry => ({ ...entry, __pointaucFallbackAmount: 1 }));
+    }
+
+    function getCandidateWeightAmount(entry) {
+      if (!entry) return 0;
+      if (entry.__pointaucFallbackAmount) return entry.__pointaucFallbackAmount;
+      return getChanceAmount(entry);
+    }
+
+    function calculateAmountWinChances(sourceEntries) {
+      const result = new Map();
+      const candidates = (Array.isArray(sourceEntries) ? sourceEntries : [])
+        .filter(entry => entry);
+
+      if (candidates.length === 0) return result;
+
+      const totalAmount = candidates.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
+
+      if (totalAmount > 0) {
+        candidates.forEach(entry => {
+          result.set(entry.id, getEntryAmount(entry) / totalAmount);
+        });
+        return result;
+      }
+
+      const equalChance = 1 / candidates.length;
+      candidates.forEach(entry => {
+        result.set(entry.id, equalChance);
+      });
+
+      return result;
+    }
+
+    function getSpinSeriesEntryKey(sourceEntries) {
+      return (Array.isArray(sourceEntries) ? sourceEntries : [])
+        .filter(entry => entry)
+        .map(entry => `${String(entry.id)}:${getEntryAmount(entry)}`)
+        .sort()
+        .join('|');
+    }
+
+    function getPointaucVisualModifier(activeEntries) {
+      const activeCount = Math.max(
+        1,
+        Array.isArray(activeEntries)
+          ? activeEntries.filter(entry => entry && !entry.eliminated).length
+          : 0
+      );
+      const initialCount = Math.max(activeCount, Number(spinSeriesInitialCount) || activeCount);
+      const ratio = Math.max(0, Math.min(1, activeCount / initialCount));
+
+      return POINTAUC_VISUAL_MIN_MODIFIER
+        + ratio * (POINTAUC_VISUAL_MAX_MODIFIER - POINTAUC_VISUAL_MIN_MODIFIER);
+    }
+
+    function getPointaucNewVisualWeight(entry, activeEntries) {
       if (!entry) return 0;
 
-      const amount = Math.max(
-        ELIMINATION_MIN_AMOUNT,
-        Math.max(0, Number(entry.price) || 0)
-      );
-      const weight = 1 / Math.pow(amount, ELIMINATION_POWER_EXPONENT);
+      const amount = Math.max(POINTAUC_VISUAL_MIN_AMOUNT, getEntryAmount(entry));
+      const modifier = getPointaucVisualModifier(activeEntries);
+      const weight = 1 / Math.pow(amount, modifier);
 
       return Number.isFinite(weight) && weight > 0 ? weight : 0;
     }
 
-    function getEliminationPickWeight(entry, activeEntries) {
-      return getPowerEliminationWeight(entry);
-    }
-
     function getCurrentWheelWeight(entry, activeEntries = null) {
-      return getEliminationPickWeight(
+      return getPointaucNewVisualWeight(
         entry,
         Array.isArray(activeEntries) ? activeEntries : entries.filter(item => item && !item.eliminated)
       );
     }
 
-    function getWinChanceCacheKey(candidates, cacheScope) {
-      const rows = candidates
-        .filter(Boolean)
-        .map(entry => [
-          String(entry.id || ''),
-          Math.max(0, Number(entry.price) || 0),
-          entry.eliminated ? 1 : 0
-        ])
-        .sort((a, b) => a[0].localeCompare(b[0]));
-      return `${WIN_CHANCE_FORMULA_VERSION}|${cacheScope}|${JSON.stringify(rows)}`;
-    }
+    function pickWeightedEntryByAmount(candidates) {
+      const list = (Array.isArray(candidates) ? candidates : []).filter(Boolean);
+      if (list.length === 0) return null;
 
-    function createDeterministicSeed(text) {
-      let hash = 2166136261;
-      for (let i = 0; i < text.length; i++) {
-        hash ^= text.charCodeAt(i);
-        hash = Math.imul(hash, 16777619);
+      const total = list.reduce((sum, entry) => sum + Math.max(0, getCandidateWeightAmount(entry)), 0);
+
+      if (total <= 0) {
+        const index = cryptoRandomInt(0, list.length);
+        return list[index] || null;
       }
-      return hash >>> 0;
+
+      const randomValue = cryptoRandomFloat() * total;
+      let acc = 0;
+
+      for (const entry of list) {
+        acc += Math.max(0, getCandidateWeightAmount(entry));
+        if (randomValue <= acc) return entry;
+      }
+
+      return list[list.length - 1] || null;
     }
 
-    function createDeterministicPrng(seed) {
-      let state = seed >>> 0;
-      return function nextRandomFloat() {
-        state += 0x6D2B79F5;
-        let t = state;
-        t = Math.imul(t ^ (t >>> 15), t | 1);
-        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    function buildSpinSeriesDropoutQueue(activeEntries) {
+      const source = (Array.isArray(activeEntries) ? activeEntries : [])
+        .filter(entry => entry && !entry.eliminated);
+
+      if (source.length === 0) {
+        return { queue: [], finalWinnerId: null, initialEntryKey: '', initialCount: 0 };
+      }
+
+      const initialEntryKey = getSpinSeriesEntryKey(source);
+      const initialCount = source.length;
+      const remaining = getWeightedCandidatesByAmount(source).map(entry => ({ ...entry }));
+      const dropoutQueue = [];
+
+      const finalWinner = pickWeightedEntryByAmount(remaining);
+      if (!finalWinner) {
+        return { queue: [], finalWinnerId: null, initialEntryKey, initialCount };
+      }
+
+      dropoutQueue.push(String(finalWinner.id));
+
+      const finalWinnerIndex = remaining.findIndex(entry => String(entry.id) === String(finalWinner.id));
+      if (finalWinnerIndex >= 0) {
+        remaining.splice(finalWinnerIndex, 1);
+      }
+
+      while (remaining.length > 0) {
+        const picked = pickWeightedEntryByAmount(remaining);
+        if (!picked) break;
+
+        dropoutQueue.push(String(picked.id));
+
+        const index = remaining.findIndex(entry => String(entry.id) === String(picked.id));
+        if (index >= 0) {
+          remaining.splice(index, 1);
+        } else {
+          break;
+        }
+      }
+
+      dropoutQueue.reverse();
+
+      return {
+        queue: dropoutQueue,
+        finalWinnerId: String(finalWinner.id),
+        initialEntryKey,
+        initialCount
       };
     }
 
-    function pickWeightedIndexByRandom(weights, randomFloat) {
-      const totalWeight = weights.reduce((sum, weight) => sum + Math.max(0, Number(weight) || 0), 0);
-      if (totalWeight <= 0) return Math.floor(randomFloat * weights.length) % weights.length;
+    function validateSpinSeriesQueue(activeEntries) {
+      const activeIds = new Set((Array.isArray(activeEntries) ? activeEntries : [])
+        .filter(entry => entry && !entry.eliminated)
+        .map(entry => String(entry.id)));
 
-      const randomValue = randomFloat * totalWeight;
-      let accumulated = 0;
-      for (let i = 0; i < weights.length; i++) {
-        accumulated += Math.max(0, Number(weights[i]) || 0);
-        if (randomValue <= accumulated) return i;
+      if (!Array.isArray(spinSeriesDropoutQueue) || spinSeriesDropoutQueue.length !== activeIds.size) {
+        return false;
       }
-      return weights.length - 1;
+
+      const seen = new Set();
+
+      for (const id of spinSeriesDropoutQueue) {
+        const normalizedId = String(id);
+        if (!activeIds.has(normalizedId)) return false;
+        if (seen.has(normalizedId)) return false;
+        seen.add(normalizedId);
+      }
+
+      if (spinSeriesFinalWinnerId && !activeIds.has(String(spinSeriesFinalWinnerId))) {
+        return false;
+      }
+
+      const expectedKey = getSpinSeriesEntryKey(entries.filter(entry => entry));
+      if (spinSeriesInitialEntryKey && spinSeriesInitialEntryKey !== expectedKey) {
+        return false;
+      }
+
+      return true;
     }
 
-    function calculateApproxEliminationWinChances(candidates, cacheKey) {
-      const result = new Map();
-      const sourceEntries = candidates.filter(Boolean);
-      sourceEntries.forEach(entry => result.set(entry.id, 0));
-      if (!sourceEntries.length) return result;
-      if (sourceEntries.length === 1) {
-        result.set(sourceEntries[0].id, 1);
-        return result;
+    function ensureSpinSeriesDropoutQueue(activeEntries) {
+      const active = (Array.isArray(activeEntries) ? activeEntries : [])
+        .filter(entry => entry && !entry.eliminated);
+
+      if (active.length === 0) {
+        spinSeriesDropoutQueue = [];
+        spinSeriesFinalWinnerId = null;
+        spinSeriesInitialEntryKey = '';
+        spinSeriesInitialCount = 0;
+        spinSeriesActive = false;
+        return null;
       }
 
-      const iterations = sourceEntries.length <= 30 ? 30000 : 20000;
-      const random = createDeterministicPrng(createDeterministicSeed(cacheKey));
-
-      for (let iteration = 0; iteration < iterations; iteration++) {
-        const stateEntries = sourceEntries.slice();
-        while (stateEntries.length > 1) {
-          const weights = stateEntries.map(entry => getEliminationPickWeight(entry, stateEntries));
-          const victimIndex = pickWeightedIndexByRandom(weights, random());
-          stateEntries.splice(victimIndex, 1);
+      if (validateSpinSeriesQueue(active)) {
+        spinSeriesActive = true;
+        if (spinSeriesInitialWinChances.size === 0) {
+          ensureSpinSeriesSnapshot(active);
         }
-        const winner = stateEntries[0];
-        if (winner) result.set(winner.id, (result.get(winner.id) || 0) + 1);
+        return spinSeriesDropoutQueue[0] || null;
       }
 
-      result.forEach((wins, id) => result.set(id, wins / iterations));
-      return result;
+      const built = buildSpinSeriesDropoutQueue(active);
+      spinSeriesDropoutQueue = built.queue;
+      spinSeriesFinalWinnerId = built.finalWinnerId;
+      spinSeriesInitialEntryKey = built.initialEntryKey;
+      spinSeriesInitialCount = built.initialCount;
+      spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
+      spinSeriesInitialWinChances = calculateAmountWinChances(active);
+      spinSeriesActive = true;
+
+      return spinSeriesDropoutQueue[0] || null;
     }
 
-    function calculatePowerEliminationWinChances(candidates, cacheScope = 'wheel_current') {
-      const calculationEntries = candidates.filter(Boolean);
-      const result = new Map();
-
-      if (calculationEntries.length === 0) return result;
-      if (calculationEntries.length === 1) {
-        result.set(calculationEntries[0].id, 1);
-        return result;
+    function shiftSpinSeriesQueueAfterVictim(victimRef) {
+      if (!victimRef) return;
+      if (String(spinSeriesDropoutQueue[0]) === String(victimRef.id)) {
+        spinSeriesDropoutQueue.shift();
+        return;
       }
-
-      const cacheKey = getWinChanceCacheKey(calculationEntries, cacheScope);
-      if (winChanceCache.has(cacheKey)) {
-        return new Map(winChanceCache.get(cacheKey));
-      }
-
-      const exactLimit = 16;
-      const byId = new Map();
-      calculationEntries.forEach(entry => byId.set(entry.id, entry));
-
-      let computed;
-      if (calculationEntries.length > exactLimit) {
-        computed = calculateApproxEliminationWinChances(calculationEntries, cacheKey);
-      } else {
-        const memo = new Map();
-
-        function solve(ids) {
-          const key = ids.join('|');
-          if (memo.has(key)) return memo.get(key);
-
-          const stateResult = new Map();
-          if (ids.length === 1) {
-            stateResult.set(ids[0], 1);
-            memo.set(key, stateResult);
-            return stateResult;
-          }
-
-          const stateEntries = ids
-            .map(id => byId.get(id))
-            .filter(Boolean);
-
-          const stateWeights = new Map();
-          stateEntries.forEach((entry) => {
-            stateWeights.set(
-              entry.id,
-              Math.max(0, Number(getEliminationPickWeight(entry, stateEntries)) || 0)
-            );
-          });
-
-          const totalWeight = ids.reduce((sum, id) => sum + (stateWeights.get(id) || 0), 0);
-
-          if (totalWeight <= 0) {
-            const equalChance = 1 / ids.length;
-            ids.forEach(id => stateResult.set(id, equalChance));
-            memo.set(key, stateResult);
-            return stateResult;
-          }
-
-          ids.forEach((victimId) => {
-            const eliminationChance = (stateWeights.get(victimId) || 0) / totalWeight;
-            if (eliminationChance <= 0) return;
-            const nextIds = ids.filter(id => id !== victimId);
-            const nextResult = solve(nextIds);
-            nextResult.forEach((chance, winnerId) => {
-              stateResult.set(winnerId, (stateResult.get(winnerId) || 0) + eliminationChance * chance);
-            });
-          });
-
-          memo.set(key, stateResult);
-          return stateResult;
-        }
-
-        computed = new Map();
-        solve(calculationEntries.map(entry => entry.id)).forEach((chance, id) => {
-          if (byId.has(id)) computed.set(id, chance);
-        });
-      }
-
-      if (winChanceCache.size > 80) winChanceCache.clear();
-      winChanceCache.set(cacheKey, new Map(computed));
-      return computed;
+      resetSpinState();
     }
 
     function calculateAuctionInitialWinChances(allEntries) {
-      const candidates = allEntries.filter(entry => entry);
-      return calculatePowerEliminationWinChances(candidates, 'auction_initial');
+      return calculateAmountWinChances((Array.isArray(allEntries) ? allEntries : []).filter(Boolean));
     }
 
     function calculateCurrentWheelWinChances(activeEntries) {
-      const candidates = activeEntries.filter(entry => entry && !entry.eliminated);
-      return calculatePowerEliminationWinChances(candidates, 'wheel_current');
+      return calculateAmountWinChances((Array.isArray(activeEntries) ? activeEntries : []).filter(entry => entry && !entry.eliminated));
     }
 
     function calculateEliminationWinChances(activeEntries) {
@@ -4094,7 +4160,7 @@
     }
 
     function getWinChanceTooltip() {
-      return 'В Аукционе показан изначальный шанс победы по Power 0.6. В Колесе показан текущий шанс победы среди оставшихся. Размер сектора на колесе показывает шанс вылета на текущем прокруте.';
+      return 'В Аукционе показан изначальный шанс победы по сумме лота. В Колесе показан текущий шанс победы среди оставшихся. Размер сектора на колесе показывает риск вылета на текущем прокруте.';
     }
 
     function formatAuctionWinChancePercent(entry, winChances) {
@@ -4123,35 +4189,6 @@
       return Number.isFinite(fallbackChance)
         ? (Math.max(0, Math.min(1, fallbackChance)) * 100).toFixed(2)
         : '0.00';
-    }
-
-    function pickWeightedEntry(activeEntries, weightFn) {
-      const candidates = activeEntries.filter(Boolean);
-      if (!candidates.length) return null;
-
-      const weights = candidates.map((entry) => Math.max(0, Number(weightFn(entry)) || 0));
-      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-
-      if (totalWeight <= 0) {
-        return {
-          entry: candidates[cryptoRandomInt(0, candidates.length)]
-        };
-      }
-
-      const randomValue = cryptoRandomFloat() * totalWeight;
-      let accumulated = 0;
-      for (let i = 0; i < candidates.length; i++) {
-        accumulated += weights[i];
-        if (randomValue <= accumulated) {
-          return {
-            entry: candidates[i]
-          };
-        }
-      }
-
-      return {
-        entry: candidates[candidates.length - 1]
-      };
     }
 
     const modal = document.getElementById('confirm-modal');
@@ -4194,10 +4231,9 @@
       if (activeDonationAssignmentId && !entries.some(entry => !entry.eliminated)) {
         activeDonationAssignmentId = null;
       }
-      resetSpinState();
+      resetSpinSeriesForCompositionChange();
       saveData();
       renderList();
-      renderWheelReadonlyEntriesList();
       drawWheel();
       return true;
     }
@@ -4238,29 +4274,26 @@
           document.getElementById('search-filter').value = '';
           saveData();
           renderList();
-          renderWheelReadonlyEntriesList();
           drawWheel();
           document.body.classList.remove('show-result');
           document.body.classList.remove('is-spinning');
-          document.getElementById('top-winner-text').innerHTML = '';
-          document.getElementById('center-text-overlay').innerHTML = '';
+          document.getElementById('top-winner-text').textContent = '';
+          document.getElementById('center-text-overlay').replaceChildren();
         }
       });
     };
 
     document.getElementById('btn-reset-all').onclick = () => {
       if (entries.length === 0) return;
-      entries.forEach(e => e.eliminated = false);
-      resetSpinState();
+      resetSpinSeriesForCompositionChange();
       cancelScheduledSpinResultClear();
       saveData();
       renderList();
-      renderWheelReadonlyEntriesList();
       drawWheel();
       document.body.classList.remove('show-result');
       document.body.classList.remove('is-spinning');
-      document.getElementById('top-winner-text').innerHTML = '';
-      document.getElementById('center-text-overlay').innerHTML = '';
+      document.getElementById('top-winner-text').textContent = '';
+      document.getElementById('center-text-overlay').replaceChildren();
     };
 
     confirmModalCancel.onclick = () => {
@@ -4287,6 +4320,7 @@
       if (isDelaying && shrinkingTarget) {
           cancelAnimationFrame(shrinkAnimFrame);
           shrinkingTarget.eliminated = true;
+          shiftSpinSeriesQueueAfterVictim(shrinkingTarget);
           const remainingAfterInterrupt = entries.filter(e => !e.eliminated);
           shrinkingTarget = null;
           shrinkingProgress = 0;
@@ -4294,7 +4328,6 @@
           isSpinning = false;
           saveData();
           renderList();
-          renderWheelReadonlyEntriesList();
           drawWheel();
           if (remainingAfterInterrupt.length > 1) {
             scheduleClearSpinResult(3000);
@@ -4304,6 +4337,35 @@
 
       // Плашку результата кликом по странице не скрываем — снимается при новом «Крутить» и др. сценариях в коде
     }, true);
+
+    function restoreSpinSeriesState(rawSpinSeries) {
+      if (!rawSpinSeries || typeof rawSpinSeries !== 'object') {
+        resetSpinState();
+        return;
+      }
+
+      spinSeriesMode = rawSpinSeries.mode === SPIN_SERIES_MODE_POINTAUC_NEW
+        ? rawSpinSeries.mode
+        : SPIN_SERIES_MODE_POINTAUC_NEW;
+      spinSeriesDropoutQueue = Array.isArray(rawSpinSeries.dropoutQueue)
+        ? rawSpinSeries.dropoutQueue.map(id => String(id)).filter(Boolean)
+        : [];
+      spinSeriesFinalWinnerId = rawSpinSeries.finalWinnerId
+        ? String(rawSpinSeries.finalWinnerId)
+        : null;
+      spinSeriesInitialEntryKey = String(rawSpinSeries.initialEntryKey || '');
+      spinSeriesInitialCount = Math.max(0, Number(rawSpinSeries.initialCount) || 0);
+      spinSeriesActive = !!rawSpinSeries.active;
+      spinSeriesInitialWinChances = deserializeChanceMap(rawSpinSeries.initialWinChances);
+    }
+
+    function resetInvalidLoadedSpinSeriesIfNeeded() {
+      const activeEntries = entries.filter(entry => entry && !entry.eliminated);
+      if (spinSeriesDropoutQueue.length === 0 && !spinSeriesActive) return;
+      if (!validateSpinSeriesQueue(activeEntries)) {
+        resetSpinState();
+      }
+    }
 
     function loadData() {
       try {
@@ -4326,7 +4388,8 @@
               entry.id = `${Date.now()}-${idx}-${cryptoRandomUint32().toString(16)}`;
             }
           });
-          resetSpinState();
+          restoreSpinSeriesState(parsed.spinSeries);
+          resetInvalidLoadedSpinSeriesIfNeeded();
 
           donationsPending = Array.isArray(parsed.donationsPending)
             ? parsed.donationsPending
@@ -4385,6 +4448,7 @@
           }
         } else {
           entries = [];
+          resetSpinState();
           donationsPending = [];
           donationsAdded = [];
           donationIntegrations = createDefaultDonationIntegrations();
@@ -4434,7 +4498,16 @@
         donationIntegrations,
         activeMainTab: appViewMode === 'admin' ? activeMainTab : persistedActiveMainTab,
         activeDonationsTab,
-        timerState: getTimerStateSnapshot()
+        timerState: getTimerStateSnapshot(),
+        spinSeries: {
+          mode: spinSeriesMode,
+          dropoutQueue: Array.isArray(spinSeriesDropoutQueue) ? spinSeriesDropoutQueue.map(id => String(id)) : [],
+          finalWinnerId: spinSeriesFinalWinnerId,
+          initialEntryKey: spinSeriesInitialEntryKey,
+          initialCount: spinSeriesInitialCount,
+          active: spinSeriesActive,
+          initialWinChances: serializeChanceMap(spinSeriesInitialWinChances)
+        }
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
       notifyStateUpdated();
@@ -4523,8 +4596,8 @@
       donationAlertsBaselineReady = false;
       donationAlertsMaxSeenId = 0;
       document.body.classList.remove('show-result', 'is-spinning');
-      document.getElementById('top-winner-text').innerHTML = '';
-      document.getElementById('center-text-overlay').innerHTML = '';
+      document.getElementById('top-winner-text').textContent = '';
+      document.getElementById('center-text-overlay').replaceChildren();
     }
 
     function handleRemoteResetAllData() {
@@ -4532,8 +4605,6 @@
       closeResetSiteDataModal();
       clearProjectStorageKeys();
       renderList();
-      renderWheelReadonlyEntriesList();
-      renderDonationsPanel();
       renderIntegrationCards();
       drawWheel();
       setTimeout(() => {
@@ -4572,7 +4643,6 @@
 
       if (activeMainTab === 'auction') {
         renderList();
-        renderDonationsPanel();
       } else if (activeMainTab === 'settings') {
         fillIntegrationForms();
       }
@@ -4658,7 +4728,7 @@
       const numericAmount = Number(amount);
       if (!entry || !Number.isFinite(numericAmount)) return false;
       entry.price += numericAmount;
-      resetSpinState();
+      resetSpinSeriesForCompositionChange();
       if (!deferRefresh) {
         saveData();
         renderList();
@@ -4683,52 +4753,6 @@
       return Number.isFinite(value) ? value : 0;
     }
 
-    function shouldAcceptDonationAlertsDonation(donation) {
-      const source = 'donationalerts';
-      const externalId = donation?.externalId;
-      if (!externalId) return false;
-
-      const key = getDonationKey(source, externalId);
-      const numericId = getNumericDonationId(externalId);
-      const cfg = donationIntegrations.donationalerts;
-      const lastSeenId = Number(cfg.lastSeenId || 0) || 0;
-
-      if (seenDonationKeys.has(key)) return false;
-
-      if (isDonationKnown(source, externalId)) {
-        seenDonationKeys.add(key);
-        if (numericId > donationAlertsMaxSeenId) {
-          donationAlertsMaxSeenId = numericId;
-        }
-        return false;
-      }
-
-      if (lastSeenId > 0 && numericId > 0 && numericId <= lastSeenId) {
-        seenDonationKeys.add(key);
-        if (numericId > donationAlertsMaxSeenId) donationAlertsMaxSeenId = numericId;
-        return false;
-      }
-
-      if (!donationAlertsBaselineReady && lastSeenId <= 0) {
-        seenDonationKeys.add(key);
-        if (numericId > donationAlertsMaxSeenId) {
-          donationAlertsMaxSeenId = numericId;
-        }
-        console.info('[DonationAlerts] baseline donation skipped:', key);
-        return false;
-      }
-
-      seenDonationKeys.add(key);
-      if (numericId > donationAlertsMaxSeenId) {
-        donationAlertsMaxSeenId = numericId;
-      }
-      if (numericId > Number(cfg.lastSeenId || 0)) {
-        cfg.lastSeenId = numericId;
-        cfg.lastSeenCreatedAt = donation.createdAt || cfg.lastSeenCreatedAt || '';
-      }
-      console.info('[DonationAlerts] new donation accepted:', key);
-      return true;
-    }
 
     function shouldAcceptDonatePayDonation(donation, options = {}) {
       const source = 'donatepay';
@@ -4760,7 +4784,6 @@
           cfg.lastSeenId = numericId;
           cfg.lastSeenCreatedAt = donation.createdAt || cfg.lastSeenCreatedAt || '';
         }
-        console.info('[DonatePay] baseline donation skipped:', key);
         return false;
       }
 
@@ -4769,7 +4792,6 @@
         cfg.lastSeenId = numericId;
         cfg.lastSeenCreatedAt = donation.createdAt || cfg.lastSeenCreatedAt || '';
       }
-      console.info('[DonatePay] new donation accepted:', key);
       return true;
     }
 
@@ -4804,43 +4826,11 @@
       return ms ? new Date(ms).toISOString() : new Date().toISOString();
     }
 
-    function parseDonationCreatedAt(value) {
-      return parseDonationDateMs(value);
-    }
 
     function getDonationCreatedAtMs(donation) {
       return parseDonationDateMs(donation?.createdAt, donation?.source);
     }
 
-    function shouldAcceptDonationForCurrentSession(donation, options = {}) {
-      const realtime = options.realtime === true;
-      const source = donation?.source;
-      const externalId = donation?.externalId;
-      if (!source || !externalId) return false;
-
-      const key = getDonationKey(source, externalId);
-      if (seenDonationKeys.has(key)) return false;
-      seenDonationKeys.add(key);
-
-      if (isDonationKnown(source, externalId)) return false;
-
-      const createdAtMs = getDonationCreatedAtMs(donation);
-      if (!createdAtMs && realtime) {
-        console.info('[Donations] new donation accepted:', key);
-        return true;
-      }
-      if (!createdAtMs) {
-        console.info(`[Donations] skipped donation without date: ${key}`);
-        return false;
-      }
-      if (createdAtMs < appSessionStartedAt) {
-        console.info('[Donations] old donation skipped:', key);
-        return false;
-      }
-
-      console.info('[Donations] new donation accepted:', key);
-      return true;
-    }
 
     function normalizeDonationForStorage(donation) {
       if (!donation || typeof donation !== 'object') return null;
@@ -4896,7 +4886,6 @@
       if (activeDonationAssignmentId === donationId) activeDonationAssignmentId = null;
       saveData();
       renderList();
-      renderDonationsPanel();
       drawWheel();
       return true;
     }
@@ -4912,7 +4901,6 @@
       if (activeDonationAssignmentId === donationId) activeDonationAssignmentId = null;
       saveData();
       renderList();
-      renderDonationsPanel();
       return true;
     }
 
@@ -4925,13 +4913,11 @@
       }
       activeDonationAssignmentId = donationId;
       renderList();
-      renderDonationsPanel();
     }
 
     function cancelDonationAssignment() {
       activeDonationAssignmentId = null;
       renderList();
-      renderDonationsPanel();
     }
 
     function assignActiveDonationToEntry(entryId) {
@@ -4940,7 +4926,6 @@
       if (!assignDonationToEntry(donationId, entryId)) return;
       activeDonationAssignmentId = null;
       renderList();
-      renderDonationsPanel();
       drawWheel();
     }
 
@@ -5119,27 +5104,6 @@
       return donation;
     }
 
-    function normalizeDonatePayTransactionEvent(raw) {
-      if (!raw || raw.id == null) return null;
-      const rawCreatedAt = raw.created_at || raw.createdAt || raw.date || '';
-      const createdAt = normalizeDonationCreatedAt(rawCreatedAt, 'donatepay');
-      const donation = normalizeDonationForStorage({
-        id: `donatepay-${raw.id}`,
-        source: 'donatepay',
-        externalId: String(raw.id),
-        username: raw.what || raw.name || raw.username || raw.vars?.name || 'Anonymous',
-        amount: Number(raw.sum || raw.amount || raw.vars?.sum),
-        currency: raw.currency || raw.vars?.currency || 'RUB',
-        message: raw.comment || raw.vars?.comment || raw.text || '',
-        createdAt,
-        assignedEntryId: null,
-        assignedEntryName: null,
-        status: 'pending',
-        raw
-      });
-      if (donation) donation.createdAt = createdAt;
-      return donation;
-    }
 
     function getDonatePayHost(region = 'ru') {
       return region === 'eu' ? 'donatepay.eu' : 'donatepay.ru';
@@ -5316,9 +5280,6 @@
           settings.lastSeenId = Number(payload.lastSeenId);
           saveData();
         }
-        if (Number(payload?.added || 0) > 0 || Number(payload?.received || 0) > 0) {
-          console.info(`[DonatePay] recovery ${reason}: получено ${payload.received || 0}, новых ${payload.added || 0}`);
-        }
         return true;
       } catch (error) {
         const status = Number(error?.upstreamStatus || error?.status || 0);
@@ -5355,7 +5316,6 @@
         await ensureDonatePayUserId(settings);
         await ensureDonatePayCentrifugeLoaded();
         const token = await fetchDonatePaySocketToken(settings);
-        console.info('[DonatePay] socket token received');
 
         return await new Promise((resolve, reject) => {
           let settled = false;
@@ -5381,7 +5341,6 @@
             settings.lastEventAt = new Date().toISOString();
             saveData();
             renderIntegrationCards();
-            console.info('[DonatePay] subscribed');
             const reason = donatePayWasDisconnected
               ? 'after-websocket-reconnect'
               : 'after-websocket-connect';
@@ -5418,7 +5377,6 @@
           socket.on('connect', () => {
             if (socket !== donatePaySocket) return;
             donatePaySocketConnected = true;
-            console.info('[DonatePay] websocket connected');
             clearSubscribeAckFallbackTimer();
             subscribeAckFallbackTimer = setTimeout(() => {
               subscribeAckFallbackTimer = null;
@@ -5426,7 +5384,6 @@
               if (settled) return;
               if (!donatePaySocketConnected) return;
               if (donatePaySocketSubscribed) return;
-              console.info('[DonatePay] subscribe ack fallback accepted');
               finishSubscribed();
             }, 1200);
           });
@@ -5461,8 +5418,6 @@
             }
             console.warn('[DonatePay] websocket error:', event?.error || event?.message || event);
           });
-
-          console.info('[DonatePay] connecting...');
           socket.connect();
         });
       })();
@@ -5489,33 +5444,6 @@
       });
     }
 
-    function normalizeDonationAlertsEvent(raw) {
-      if (!raw || raw.id == null) return null;
-      const rawCreatedAt =
-        raw.created_at
-        || raw.createdAt
-        || raw.date
-        || raw.message?.created_at
-        || raw.data?.created_at
-        || '';
-      const createdAt = normalizeDonationCreatedAt(rawCreatedAt, 'donationalerts');
-      const donation = normalizeDonationForStorage({
-        id: `donationalerts-${raw.id}`,
-        source: 'donationalerts',
-        externalId: String(raw.id),
-        username: raw.username || raw.name || raw.sender || raw.user?.name || 'Anonymous',
-        amount: Number(raw.amount || raw.sum || raw.amount_in_user_currency),
-        currency: raw.currency || raw.currency_code || 'RUB',
-        message: raw.message || raw.comment || raw.text || '',
-        createdAt,
-        assignedEntryId: null,
-        assignedEntryName: null,
-        status: 'pending',
-        raw
-      });
-      if (donation) donation.createdAt = createdAt;
-      return donation;
-    }
 
     function setIntegrationStatus(service, status, errorMessage = '') {
       const settings = donationIntegrations[service];
@@ -5929,7 +5857,7 @@
             || !Number.isFinite(amount)
             || amount <= 0
           ) {
-            console.warn('[Collector] invalid donation skipped:', donation);
+            console.warn('[Collector] invalid donation skipped');
             ackIds.push(donation.id);
             return;
           }
@@ -6230,7 +6158,7 @@
           appViewMode = getAppViewMode();
         }
       } catch (error) {
-        console.warn('Не удалось очистить OAuth token из адресной строки', error);
+        console.warn('Не удалось очистить OAuth hash из адресной строки', error);
       }
 
       finishDonationAlertsConnection();
@@ -6718,7 +6646,6 @@
       const totalAmount = entries.reduce((sum, entry) => {
         return sum + Math.max(0, Number(entry?.price) || 0);
       }, 0);
-      const winChances = calculateCurrentWheelWinChances(activeEntries);
       const chanceTooltip = getWinChanceTooltip();
       summary.textContent = `${activeEntries.length} активных из ${entries.length}`;
       totalLabel.textContent = `${totalAmount.toLocaleString('ru-RU')} ₽`;
@@ -6731,6 +6658,7 @@
         list.appendChild(empty);
         return;
       }
+      const winChances = calculateCurrentWheelWinChances(activeEntries);
       const rows = entries
         .map((entry, index) => ({ entry, index }))
         .sort((a, b) => {
@@ -6773,7 +6701,7 @@
 
     function renderList() {
       const list = document.getElementById('entries-list');
-      list.innerHTML = '';
+      list.replaceChildren();
       
       const auctionEntries = entries.filter(entry => entry);
       const winChances = calculateAuctionInitialWinChances(auctionEntries);
@@ -6797,6 +6725,9 @@
       rows.forEach(({ entry, idx }, displayIdx) => {
         const pctAbs = formatAuctionWinChancePercent(entry, winChances);
         const addedOrder = Number.isFinite(entry.addedOrder) ? entry.addedOrder : (idx + 1);
+        const safeEntryName = escapeHtml(entry.name);
+        const safeEntryPrice = escapeHtml(entry.price);
+        const safeChanceTooltip = escapeHtml(chanceTooltip);
 
         let probHtml = entry.eliminated 
             ? `<div class="entry-percent dimmed">${pctAbs}%</div>`
@@ -6819,16 +6750,16 @@
         el.innerHTML = `
           <div class="entry-order-slot entry-order-slot-current"><div class="entry-order entry-order-current" title="Порядок в текущем списке">${displayIdx + 1}</div></div>
           ${addedOrderHtml}
-          <input type="text" class="entry-name" value="${entry.name.replace(/"/g, '&quot;')}" onblur="updateName(${idx}, this.value)" onkeydown="if(event.key==='Enter'){updateName(${idx}, this.value);this.blur()}">
+          <input type="text" class="entry-name" value="${safeEntryName}" onblur="updateName(${idx}, this.value)" onkeydown="if(event.key==='Enter'){updateName(${idx}, this.value);this.blur()}">
           <div class="edit-inputs">
-            <input type="number" class="val-input" value="${entry.price}" onkeydown="if(event.key==='Enter') updatePrice(${idx}, this.value)" onblur="updatePrice(${idx}, this.value)">
+            <input type="number" class="val-input" value="${safeEntryPrice}" onkeydown="if(event.key==='Enter') updatePrice(${idx}, this.value)" onblur="updatePrice(${idx}, this.value)">
             <div class="plus-wrapper">
               <button type="button" class="plus-btn" title="Добавить" onclick="const inp = this.nextElementSibling; adjustPrice(${idx}, inp.value, 1); inp.value='';">+</button>
               <input type="number" min="0" step="0.01" onkeydown="if(event.key==='Enter') { adjustPrice(${idx}, this.value, 1); this.value=''; }">
               <button type="button" class="plus-btn minus-btn" title="Вычесть" onclick="const inp = this.previousElementSibling; adjustPrice(${idx}, inp.value, -1); inp.value='';">−</button>
             </div>
           </div>
-          <div class="percents-wrapper" title="${chanceTooltip}">${probHtml}</div>
+          <div class="percents-wrapper" title="${safeChanceTooltip}">${probHtml}</div>
           ${deleteButtonHtml}
         `;
         const deleteButton = el.querySelector('.entry-delete-button');
@@ -6856,13 +6787,12 @@
       const trimmed = String(val).trim();
       if (!trimmed) return;
       entries[index].name = trimmed;
-      resetSpinState();
       saveData(); renderList(); drawWheel();
     };
 
     window.updatePrice = function(index, val) {
       entries[index].price = Math.max(0, parseFloat(val) || 0);
-      resetSpinState();
+      resetSpinSeriesForCompositionChange();
       saveData(); renderList(); drawWheel();
     };
 
@@ -6876,7 +6806,7 @@
       if (!Number.isFinite(amount) || amount <= 0) return;
       const sign = Number(direction) < 0 ? -1 : 1;
       entries[index].price = Math.max(0, (Number(entries[index].price) || 0) + sign * amount);
-      resetSpinState();
+      resetSpinSeriesForCompositionChange();
       saveData(); renderList(); drawWheel();
     };
 
@@ -6905,7 +6835,7 @@
         
         document.getElementById('new-name').value = '';
         document.getElementById('new-price').value = '0';
-        resetSpinState();
+        resetSpinSeriesForCompositionChange();
         saveData(); renderList(); drawWheel();
       }
     };
@@ -7146,18 +7076,6 @@
       ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
 
-    function shadeColor(color, percent) {
-      let R = parseInt(color.substring(1,3),16);
-      let G = parseInt(color.substring(3,5),16);
-      let B = parseInt(color.substring(5,7),16);
-      R = parseInt(R * (100 + percent) / 100);
-      G = parseInt(G * (100 + percent) / 100);
-      B = parseInt(B * (100 + percent) / 100);
-      R = Math.max(0, Math.min(255, R));
-      G = Math.max(0, Math.min(255, G));
-      B = Math.max(0, Math.min(255, B));
-      return "#" + ((1<<24) + (R<<16) + (G<<8) + B).toString(16).slice(1);
-    }
 
     document.getElementById('btn-spin').onclick = async () => {
       if (isSpinning || isDelaying) return;
@@ -7170,8 +7088,8 @@
       }
       ensureSpinSeriesSnapshot(activeEntries);
 
-      document.getElementById('top-winner-text').innerHTML = '';
-      document.getElementById('center-text-overlay').innerHTML = '';
+      document.getElementById('top-winner-text').textContent = '';
+      document.getElementById('center-text-overlay').replaceChildren();
 
       if (activeEntries.length === 1) {
           document.getElementById('search-filter').value = '';
@@ -7194,7 +7112,7 @@
               currentAngle = initialAngle + (targetAngle - initialAngle) * easeOutQuart(progress);
               
               let currentSeg = getCurrentSegment(currentAngle);
-              if (currentSeg) document.getElementById('top-winner-text').innerHTML = currentSeg.name;
+              if (currentSeg) document.getElementById('top-winner-text').textContent = currentSeg.name;
 
               drawWheel();
               
@@ -7206,11 +7124,12 @@
                   
                   const winner = activeEntries[0];
                   const winChance = formatInitialSeriesWinChancePercent(winner, activeEntries);
+                  const safeWinnerName = escapeHtml(winner ? winner.name : '');
                   
-                  document.getElementById('top-winner-text').innerHTML = ''; // Скрываем верхний
+                  document.getElementById('top-winner-text').textContent = ''; // Скрываем верхний
                   document.getElementById('center-text-overlay').innerHTML = `
                       <div class="final-winner-layout">
-                          <div class="winner-name" style="margin-top:20px;">${winner.name}</div>
+                          <div class="winner-name" style="margin-top:20px;">${safeWinnerName}</div>
                           <div class="chance-badge">
                              <svg width="22" height="22" viewBox="0 0 24 24" fill="#e6a822"><circle cx="12" cy="12" r="10"/></svg>
                              <div class="chance-col">
@@ -7236,16 +7155,19 @@
       document.body.classList.add('is-spinning');
       document.body.classList.remove('show-result');
       
-      const picked = pickWeightedEntry(
-        activeEntries,
-        entry => getEliminationPickWeight(entry, activeEntries)
-      );
-      const victim = picked?.entry;
+      let victimId = ensureSpinSeriesDropoutQueue(activeEntries);
+      let victim = activeEntries.find(entry => String(entry.id) === String(victimId));
+      if (!victim) {
+        resetSpinState();
+        victimId = ensureSpinSeriesDropoutQueue(activeEntries);
+        victim = activeEntries.find(entry => String(entry.id) === String(victimId));
+      }
       if (!victim) {
         isSpinning = false;
         document.body.classList.remove('is-spinning');
         return;
       }
+      saveData();
 
       const totalWheelWeight = activeEntries.reduce((s, e) => {
         return s + getCurrentWheelWeight(e, activeEntries);
@@ -7282,7 +7204,7 @@
         
         // Отображение текущего имени наверху (обновляется во время вращения)
         let currentSeg = getCurrentSegment(currentAngle);
-        if (currentSeg) document.getElementById('top-winner-text').innerHTML = currentSeg.name;
+        if (currentSeg) document.getElementById('top-winner-text').textContent = currentSeg.name;
 
         drawWheel();
 
@@ -7316,14 +7238,16 @@
       if (isFinal) {
           const winner = activeEntries.find(e => e.id !== victimRef.id);
           const winChance = formatInitialSeriesWinChancePercent(winner, activeEntries);
+          const safeVictimName = escapeHtml(victimRef ? victimRef.name : '');
+          const safeWinnerName = escapeHtml(winner ? winner.name : '');
           
-          topText.innerHTML = ''; // Убираем верхний, всё будет посередине
+          topText.textContent = ''; // Убираем верхний, всё будет посередине
           overlay.innerHTML = `
             <div class="final-winner-layout">
                 <div class="strike-wrapper center-small">
-                  <span class="strike-text-content">${victimRef.name}</span>
+                  <span class="strike-text-content">${safeVictimName}</span>
                 </div>
-                <div class="winner-name">${winner ? winner.name : ''}</div>
+                <div class="winner-name">${safeWinnerName}</div>
                 <div class="chance-badge">
                    <svg width="22" height="22" viewBox="0 0 24 24" fill="#e6a822"><circle cx="12" cy="12" r="10"/></svg>
                    <div class="chance-col">
@@ -7336,9 +7260,10 @@
       } 
       // ОБЫЧНОЕ УДАЛЕНИЕ
       else {
+          const safeVictimName = escapeHtml(victimRef ? victimRef.name : '');
           overlay.innerHTML = `
             <div class="strike-wrapper center-main">
-              <span class="strike-text-content">${victimRef.name}</span>
+              <span class="strike-text-content">${safeVictimName}</span>
             </div>
           `;
       }
@@ -7373,13 +7298,13 @@
               shrinkingTarget = null;
               shrinkingProgress = 0;
               victimRef.eliminated = true;
+              shiftSpinSeriesQueueAfterVictim(victimRef);
               const remainingAfterElimination = entries.filter(e => !e.eliminated);
               isDelaying = false;
               isSpinning = false; 
               
               saveData();
               renderList();
-              renderWheelReadonlyEntriesList();
               drawWheel(); 
               if (!isFinal) {
                 scheduleClearSpinResult(3000);

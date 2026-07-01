@@ -17,6 +17,50 @@ $TrayIconPath = Join-Path $RootPath "tray.ico"
 $TrayErrorIconPath = Join-Path $RootPath "tray-error.ico"
 $LogPath = Join-Path $RootPath "server.log"
 
+function Mask-SecretText {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    $Masked = $Text
+    $Patterns = @(
+        '(?i)(access[_-]?token["''\s:=]+)([^"&''\s,}]+)',
+        '(?i)(refresh[_-]?token["''\s:=]+)([^"&''\s,}]+)',
+        '(?i)(client[_-]?secret["''\s:=]+)([^"&''\s,}]+)',
+        '(?i)(api[_-]?key["''\s:=]+)([^"&''\s,}]+)',
+        '(?i)(authorization["''\s:=]+Bearer\s+)([^"&''\s,}]+)',
+        '(?i)(code["''\s:=]+)([^"&''\s,}]+)',
+        '(?i)(password["''\s:=]+)([^"&''\s,}]+)',
+        '(?i)(token["''\s:=]+)([^"&''\s,}]+)',
+        '(?i)(Bearer\s+)([A-Za-z0-9._~+/=-]+)'
+    )
+
+    foreach ($Pattern in $Patterns) {
+        $Masked = [System.Text.RegularExpressions.Regex]::Replace($Masked, $Pattern, '$1***')
+    }
+
+    return $Masked
+}
+
+function Limit-LogText {
+    param(
+        [AllowNull()][string]$Text,
+        [int]$MaxLength = 1000
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    if ($Text.Length -le $MaxLength) {
+        return $Text
+    }
+
+    return $Text.Substring(0, $MaxLength) + "...[truncated]"
+}
+
 function Initialize-AppLog {
     try {
         if (-not [System.IO.Directory]::Exists($RootPath)) {
@@ -45,7 +89,8 @@ function Write-AppLog {
 
     try {
         $Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-        $Line = "[$Timestamp] [$Level] $Message"
+        $SafeMessage = Limit-LogText (Mask-SecretText $Message)
+        $Line = "[$Timestamp] [$Level] $SafeMessage"
         [System.IO.File]::AppendAllText($LogPath, $Line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($true))
     }
     catch {
@@ -76,6 +121,9 @@ $HostAddress = "127.0.0.1"
 $Ports = @(5500)
 $Listener = $null
 $SelectedPort = 5500
+$script:SelectedPort = $SelectedPort
+$script:CurrentRequestOrigin = ""
+$script:CurrentCorsOrigin = ""
 $SiteUrl = "http://${HostAddress}:${SelectedPort}/koleso_papich.html?view=admin"
 $script:AppBuildSha = "__APP_BUILD_SHA__"
 $script:AppBuildVersion = "__APP_BUILD_VERSION__"
@@ -330,6 +378,61 @@ function Get-ContentType {
     }
 }
 
+function Get-AllowedCorsOrigin {
+    param([string]$Origin)
+
+    if ([string]::IsNullOrWhiteSpace($Origin)) {
+        return ""
+    }
+
+    $AllowedOrigins = @(
+        "http://127.0.0.1:$script:SelectedPort",
+        "http://localhost:$script:SelectedPort"
+    )
+
+    if ($AllowedOrigins -contains $Origin) {
+        return $Origin
+    }
+
+    return $null
+}
+
+function Test-ApiRequestPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    return $Path -eq "/api/health" -or $Path.StartsWith("/api/")
+}
+
+function Resolve-SafePath {
+    param(
+        [string]$RootPath,
+        [string]$RelativePath
+    )
+
+    try {
+        $RootFull = [System.IO.Path]::GetFullPath($RootPath).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ) + [System.IO.Path]::DirectorySeparatorChar
+
+        $TargetFull = [System.IO.Path]::GetFullPath((Join-Path $RootFull $RelativePath))
+
+        if (-not $TargetFull.StartsWith($RootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+
+        return $TargetFull
+    }
+    catch {
+        Write-AppLog -Level "WARN" -Message "Safe path resolve failed: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 function Send-Response {
     param(
         [System.Net.Sockets.NetworkStream]$Stream,
@@ -340,11 +443,17 @@ function Send-Response {
         [bool]$HeadOnly = $false
     )
 
+    $CorsHeader = ""
+    if (-not [string]::IsNullOrWhiteSpace($script:CurrentCorsOrigin)) {
+        $CorsHeader = "Access-Control-Allow-Origin: $script:CurrentCorsOrigin`r`n" +
+                      "Vary: Origin`r`n"
+    }
+
     $HeaderText = "HTTP/1.1 $StatusCode $StatusText`r`n" +
                   "Content-Type: $ContentType`r`n" +
                   "Content-Length: $($Body.Length)`r`n" +
                   "Cache-Control: no-cache`r`n" +
-                  "Access-Control-Allow-Origin: *`r`n" +
+                  $CorsHeader +
                   "Access-Control-Allow-Headers: Content-Type, Authorization`r`n" +
                   "Access-Control-Allow-Methods: GET, POST, OPTIONS`r`n" +
                   "Connection: close`r`n`r`n"
@@ -596,15 +705,8 @@ function Get-MaskedUrl {
     if ([string]::IsNullOrWhiteSpace($Url)) {
         return $Url
     }
-    $Masked = [System.Text.RegularExpressions.Regex]::Replace(
-        $Url,
-        "access_token=([^&]+)",
-        "access_token=***"
-    )
-    $Masked = [System.Text.RegularExpressions.Regex]::Replace($Masked, "refresh_token=([^&]+)", "refresh_token=***")
-    $Masked = [System.Text.RegularExpressions.Regex]::Replace($Masked, "client_secret=([^&]+)", "client_secret=***")
-    $Masked = [System.Text.RegularExpressions.Regex]::Replace($Masked, "code=([^&]+)", "code=***")
-    return $Masked
+
+    return Mask-SecretText $Url
 }
 
 function Get-MaskedText {
@@ -614,26 +716,7 @@ function Get-MaskedText {
         return $Text
     }
 
-    $Masked = $Text
-    $Keys = @("access_token", "refresh_token", "client_secret", "code")
-    foreach ($Key in $Keys) {
-        $Masked = [System.Text.RegularExpressions.Regex]::Replace(
-            $Masked,
-            "(`"$Key`"\s*:\s*`")[^`"]+(`")",
-            "`$1***`$2"
-        )
-        $Masked = [System.Text.RegularExpressions.Regex]::Replace(
-            $Masked,
-            "($Key=)[^&\s]+",
-            "`$1***"
-        )
-    }
-    $Masked = [System.Text.RegularExpressions.Regex]::Replace(
-        $Masked,
-        "(Bearer\s+)[A-Za-z0-9._~+/=-]+",
-        "`$1***"
-    )
-    return $Masked
+    return Mask-SecretText $Text
 }
 
 function New-UpstreamError {
@@ -665,9 +748,9 @@ function New-UpstreamError {
         method = $Method
         upstreamUrl = Get-MaskedUrl $UpstreamUrl
         upstreamStatus = $StatusCode
-        upstreamBody = Get-MaskedText $Body
+        upstreamBody = Limit-LogText (Get-MaskedText $Body)
         error = $Message
-        exceptionMessage = Get-MaskedText $Error.Message
+        exceptionMessage = Limit-LogText (Get-MaskedText $Error.Message)
         status = 500
     }
 }
@@ -680,16 +763,21 @@ function Write-UpstreamErrorLog {
 
     Write-Host "$Service proxy request failed." -ForegroundColor Yellow
     Write-AppLog -Level "ERROR" -Message "$Service proxy request failed."
-    if ($ErrorData.endpoint) { Write-Host "  endpoint: $($ErrorData.endpoint)" -ForegroundColor Yellow }
+    $SafeEndpoint = Limit-LogText (Mask-SecretText ([string]$ErrorData.endpoint))
+    $SafeUrl = Limit-LogText (Mask-SecretText ([string]$ErrorData.upstreamUrl))
+    $SafeBody = Limit-LogText (Mask-SecretText ([string]$ErrorData.upstreamBody))
+    $SafeException = Limit-LogText (Mask-SecretText ([string]$ErrorData.exceptionMessage))
+
+    if ($ErrorData.endpoint) { Write-Host "  endpoint: $SafeEndpoint" -ForegroundColor Yellow }
     if ($ErrorData.upstreamStatus) { Write-Host "  upstream status: $($ErrorData.upstreamStatus)" -ForegroundColor Yellow }
-    if ($ErrorData.upstreamUrl) { Write-Host "  upstream url: $($ErrorData.upstreamUrl)" -ForegroundColor Yellow }
-    if ($ErrorData.upstreamBody) { Write-Host "  upstream body: $($ErrorData.upstreamBody)" -ForegroundColor Yellow }
-    if ($ErrorData.exceptionMessage) { Write-Host "  exception: $($ErrorData.exceptionMessage)" -ForegroundColor Yellow }
-    if ($ErrorData.endpoint) { Write-AppLog -Level "ERROR" -Message "  endpoint: $($ErrorData.endpoint)" }
+    if ($ErrorData.upstreamUrl) { Write-Host "  upstream url: $SafeUrl" -ForegroundColor Yellow }
+    if ($ErrorData.upstreamBody) { Write-Host "  upstream body: $SafeBody" -ForegroundColor Yellow }
+    if ($ErrorData.exceptionMessage) { Write-Host "  exception: $SafeException" -ForegroundColor Yellow }
+    if ($ErrorData.endpoint) { Write-AppLog -Level "ERROR" -Message "  endpoint: $SafeEndpoint" }
     if ($ErrorData.upstreamStatus) { Write-AppLog -Level "ERROR" -Message "  upstream status: $($ErrorData.upstreamStatus)" }
-    if ($ErrorData.upstreamUrl) { Write-AppLog -Level "ERROR" -Message "  upstream url: $($ErrorData.upstreamUrl)" }
-    if ($ErrorData.upstreamBody) { Write-AppLog -Level "ERROR" -Message "  upstream body: $($ErrorData.upstreamBody)" }
-    if ($ErrorData.exceptionMessage) { Write-AppLog -Level "ERROR" -Message "  exception: $($ErrorData.exceptionMessage)" }
+    if ($ErrorData.upstreamUrl) { Write-AppLog -Level "ERROR" -Message "  upstream url: $SafeUrl" }
+    if ($ErrorData.upstreamBody) { Write-AppLog -Level "ERROR" -Message "  upstream body: $SafeBody" }
+    if ($ErrorData.exceptionMessage) { Write-AppLog -Level "ERROR" -Message "  exception: $SafeException" }
 }
 
 function Invoke-DonatePayApi {
@@ -741,21 +829,6 @@ function Invoke-DonatePayApi {
     }
 }
 
-function Invoke-DonationAlertsToken {
-    param([object]$InputData, [string]$GrantType, [string]$LocalEndpoint)
-
-    return [pscustomobject]@{
-        ok = $false
-        endpoint = $LocalEndpoint
-        method = "POST"
-        upstreamUrl = ""
-        upstreamStatus = $null
-        upstreamBody = ""
-        error = "DonationAlerts authorization-code flow is disabled. Use implicit OAuth."
-        exceptionMessage = ""
-        status = 404
-    }
-}
 
 function Invoke-DonationAlertsApi {
     param(
@@ -1005,25 +1078,6 @@ function Convert-DonationAlertsRow {
     }
 }
 
-function Convert-DonatePayTransactionRow {
-    param([object]$Raw)
-
-    if ($null -eq $Raw -or $null -eq $Raw.id) { return $null }
-    $ExternalId = [string]$Raw.id
-    $CreatedRaw = Get-FirstPresentValue @($Raw.created_at, $Raw.createdAt, $Raw.date)
-    return @{
-        id = "server-donatepay-$ExternalId"
-        source = "donatepay"
-        externalId = $ExternalId
-        username = [string](Get-FirstPresentValue @($Raw.what, $Raw.name, $Raw.username, $Raw.vars.name, "Anonymous"))
-        amount = Get-DonationAmountValue (Get-FirstPresentValue @($Raw.sum, $Raw.amount, $Raw.vars.sum, 0))
-        currency = [string](Get-FirstPresentValue @($Raw.currency, $Raw.vars.currency, "RUB"))
-        message = [string](Get-FirstPresentValue @($Raw.comment, $Raw.vars.comment, $Raw.text, ""))
-        createdAt = Convert-DonationDateToIso $CreatedRaw "donatepay"
-        status = "pending"
-        raw = $Raw
-    }
-}
 
 function Convert-DonatePayNotificationRow {
     param([object]$Raw)
@@ -1082,9 +1136,6 @@ function Test-CollectorBackoff {
     }
 }
 
-function Refresh-DonationAlertsCollectorToken {
-    return $false
-}
 
 function Invoke-DonationAlertsCollectorPoll {
     $Service = $script:ServerState.Integrations.DonationAlerts
@@ -1142,9 +1193,6 @@ function Invoke-DonationAlertsCollectorPoll {
     }
 }
 
-function Invoke-DonatePayCollectorPoll {
-    return
-}
 
 function Invoke-DonatePayRecoveryTransactions {
     param([object]$InputData)
@@ -1480,6 +1528,7 @@ foreach ($Port in $Ports) {
         $Candidate.Start()
         $Listener = $Candidate
         $SelectedPort = $Port
+        $script:SelectedPort = $SelectedPort
         $SiteUrl = "http://${HostAddress}:${SelectedPort}/koleso_papich.html?view=admin"
         break
     }
@@ -1537,6 +1586,8 @@ try {
                 4096,
                 $true
             )
+            $script:CurrentRequestOrigin = ""
+            $script:CurrentCorsOrigin = ""
 
             $RequestLine = $Reader.ReadLine()
             if ([string]::IsNullOrWhiteSpace($RequestLine)) {
@@ -1568,6 +1619,16 @@ try {
             $ContentLength = 0
             if ($Headers.ContainsKey("content-length")) {
                 [void][int]::TryParse($Headers["content-length"], [ref]$ContentLength)
+            }
+
+            $script:CurrentRequestOrigin = if ($Headers.ContainsKey("origin")) { [string]$Headers["origin"] } else { "" }
+            $script:CurrentCorsOrigin = Get-AllowedCorsOrigin $script:CurrentRequestOrigin
+            $IsApiRequest = Test-ApiRequestPath $DecodedTarget
+
+            if ($IsApiRequest -and -not [string]::IsNullOrWhiteSpace($script:CurrentRequestOrigin) -and $null -eq $script:CurrentCorsOrigin) {
+                Write-AppLog -Level "WARN" -Message "Blocked API request from disallowed Origin: $script:CurrentRequestOrigin"
+                Send-Json $Stream 403 @{ ok = $false; error = "Forbidden origin."; status = 403 } $HeadOnly
+                continue
             }
 
             if ($Method -eq "OPTIONS") {
@@ -1827,15 +1888,9 @@ try {
                 [char]"/",
                 [System.IO.Path]::DirectorySeparatorChar
             )
-            $RequestedPath = [System.IO.Path]::GetFullPath(
-                [System.IO.Path]::Combine($RootPath, $RelativePath)
-            )
-            $RootPrefix = $RootPath.TrimEnd(
-                [System.IO.Path]::DirectorySeparatorChar,
-                [System.IO.Path]::AltDirectorySeparatorChar
-            ) + [System.IO.Path]::DirectorySeparatorChar
+            $RequestedPath = Resolve-SafePath $RootPath $RelativePath
 
-            if (-not $RequestedPath.StartsWith($RootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
                 Send-Json $Stream 403 @{ ok = $false; error = "Forbidden."; status = 403 } $HeadOnly
                 continue
             }
