@@ -2504,6 +2504,56 @@ function ConvertFrom-LlmStructuredJson {
     }
 }
 
+function ConvertTo-LlmConfidence {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value -or $Value -is [bool]) { return $null }
+
+    $Parsed = 0.0
+    if ($Value -is [string]) {
+        $Text = ([string]$Value).Trim()
+        if (
+            [string]::IsNullOrWhiteSpace($Text) -or
+            -not [double]::TryParse(
+                $Text,
+                [Globalization.NumberStyles]::Float,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$Parsed
+            )
+        ) {
+            return $null
+        }
+    }
+    elseif (
+        $Value -is [byte] -or
+        $Value -is [sbyte] -or
+        $Value -is [int16] -or
+        $Value -is [uint16] -or
+        $Value -is [int32] -or
+        $Value -is [uint32] -or
+        $Value -is [int64] -or
+        $Value -is [uint64] -or
+        $Value -is [single] -or
+        $Value -is [double] -or
+        $Value -is [decimal]
+    ) {
+        try {
+            $Parsed = [Convert]::ToDouble($Value, [Globalization.CultureInfo]::InvariantCulture)
+        }
+        catch {
+            return $null
+        }
+    }
+    else {
+        return $null
+    }
+
+    if ([double]::IsNaN($Parsed) -or [double]::IsInfinity($Parsed) -or $Parsed -lt 0 -or $Parsed -gt 1) {
+        return $null
+    }
+    return [double]$Parsed
+}
+
 function Invoke-OpenRouterRequest {
     param(
         [object]$Payload,
@@ -2609,10 +2659,11 @@ Examples: бабка 3, бабуся 3, гренни 3 => Granny 3, game. дбд
     ) {
         Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter intent response did not match the required schema."
     }
-    $Confidence = 0.0
-    if (-not [double]::TryParse([string]$Result.intentConfidence, [ref]$Confidence) -or $Confidence -lt 0 -or $Confidence -gt 1) {
+    $Confidence = ConvertTo-LlmConfidence $Result.intentConfidence
+    if ($null -eq $Confidence) {
         Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter intent confidence is invalid."
     }
+    $Result.intentConfidence = [double]$Confidence
     return $Result
 }
 
@@ -2675,10 +2726,11 @@ function Invoke-OpenRouterCandidateSelection {
     ) {
         Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter candidate selection did not match the required schema."
     }
-    $SelectionConfidence = 0.0
-    if (-not [double]::TryParse([string]$Selection.selectionConfidence, [ref]$SelectionConfidence) -or $SelectionConfidence -lt 0 -or $SelectionConfidence -gt 1) {
+    $SelectionConfidence = ConvertTo-LlmConfidence $Selection.selectionConfidence
+    if ($null -eq $SelectionConfidence) {
         Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter selection confidence is invalid."
     }
+    $Selection.selectionConfidence = [double]$SelectionConfidence
     if ([string]$Selection.decision -eq "select_candidate" -and $AllowedIds -notcontains [string]$Selection.candidateId) {
         Throw-LlmError "UNKNOWN_CANDIDATE_ID" "OpenRouter returned an unknown candidateId."
     }
@@ -2711,7 +2763,7 @@ function Test-OpenRouterIntegration {
         }
         messages = @(
             @{ role = "system"; content = "Return the requested strict JSON object." },
-            @{ role = "user"; content = "Return category unknown, empty query, intentConfidence 0, and a short reason." }
+            @{ role = "user"; content = "Return category unknown, empty query, intentConfidence 0.5, and a short reason." }
         )
     }
     $StartedAt = Get-Date
@@ -2719,9 +2771,11 @@ function Test-OpenRouterIntegration {
         $Response = Invoke-OpenRouterRequest $Payload 20
         $Content = [string]$Response.choices[0].message.content
         $Parsed = $Content | ConvertFrom-Json
-        if ([string]$Parsed.category -ne "unknown" -or $null -eq $Parsed.intentConfidence) {
+        $TestConfidence = ConvertTo-LlmConfidence $Parsed.intentConfidence
+        if ([string]$Parsed.category -ne "unknown" -or $null -eq $TestConfidence) {
             throw "Selected model returned invalid structured output."
         }
+        $Parsed.intentConfidence = [double]$TestConfidence
         $ElapsedMs = [int]((Get-Date) - $StartedAt).TotalMilliseconds
         return [pscustomobject]@{
             ok = $true

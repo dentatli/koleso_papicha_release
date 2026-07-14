@@ -41,6 +41,7 @@ $FunctionNames = @(
     'Test-LlmIntentReadyForCatalog',
     'New-LlmCodedException',
     'Throw-LlmError',
+    'ConvertTo-LlmConfidence',
     'Get-LlmExceptionCode',
     'Test-LlmTransientNetworkException',
     'Get-LlmFailureClassification',
@@ -139,6 +140,44 @@ function Assert-Equal {
     param($Actual, $Expected, [string]$Message)
     if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'" }
 }
+
+$OriginalTestCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('ru-RU')
+    $JsonConfidence = '{"intentConfidence":0.85}' | ConvertFrom-Json
+    Assert-Equal (ConvertTo-LlmConfidence $JsonConfidence.intentConfidence) ([double]0.85) 'ConvertFrom-Json confidence failed under ru-RU.'
+    Assert-Equal (ConvertTo-LlmConfidence ([double]0.85)) ([double]0.85) 'Numeric confidence failed under ru-RU.'
+    Assert-Equal (ConvertTo-LlmConfidence '0.85') ([double]0.85) 'Invariant confidence string failed under ru-RU.'
+    Assert-Equal (ConvertTo-LlmConfidence 0) ([double]0) 'Zero confidence boundary failed.'
+    Assert-Equal (ConvertTo-LlmConfidence 1) ([double]1) 'One confidence boundary failed.'
+    Assert-True ($null -eq (ConvertTo-LlmConfidence '0,85')) 'Localized confidence string must be rejected.'
+    Assert-True ($null -eq (ConvertTo-LlmConfidence -0.01)) 'Negative confidence must be rejected.'
+    Assert-True ($null -eq (ConvertTo-LlmConfidence 1.01)) 'Confidence greater than one must be rejected.'
+    Assert-True ($null -eq (ConvertTo-LlmConfidence $true)) 'Boolean confidence must be rejected.'
+    Assert-True ($null -eq (ConvertTo-LlmConfidence $null)) 'Null confidence must be rejected.'
+    Assert-True ($null -eq (ConvertTo-LlmConfidence ([double]::NaN))) 'NaN confidence must be rejected.'
+    Assert-True ($null -eq (ConvertTo-LlmConfidence ([double]::PositiveInfinity))) 'Infinite confidence must be rejected.'
+}
+finally {
+    [Threading.Thread]::CurrentThread.CurrentCulture = $OriginalTestCulture
+}
+Assert-Equal ([Threading.Thread]::CurrentThread.CurrentCulture.Name) $OriginalTestCulture.Name 'Confidence tests did not restore the original culture.'
+
+$IntentFunctionStart = $ServerSource.IndexOf('function Invoke-OpenRouterIntentAnalysis')
+$IntentFunctionEnd = $ServerSource.IndexOf('function Invoke-OpenRouterCandidateSelection', $IntentFunctionStart)
+$IntentFunctionSource = $ServerSource.Substring($IntentFunctionStart, $IntentFunctionEnd - $IntentFunctionStart)
+Assert-True ($IntentFunctionSource.Contains('ConvertTo-LlmConfidence $Result.intentConfidence')) 'Intent analysis does not use the shared confidence validator.'
+Assert-True ($IntentFunctionSource.Contains('$Result.intentConfidence = [double]$Confidence')) 'Intent confidence is not normalized back to double.'
+$SelectionFunctionStart = $IntentFunctionEnd
+$SelectionFunctionEnd = $ServerSource.IndexOf('function Test-OpenRouterIntegration', $SelectionFunctionStart)
+$SelectionFunctionSource = $ServerSource.Substring($SelectionFunctionStart, $SelectionFunctionEnd - $SelectionFunctionStart)
+Assert-True ($SelectionFunctionSource.Contains('ConvertTo-LlmConfidence $Selection.selectionConfidence')) 'Candidate selection does not use the shared confidence validator.'
+Assert-True ($SelectionFunctionSource.Contains('$Selection.selectionConfidence = [double]$SelectionConfidence')) 'Selection confidence is not normalized back to double.'
+$OpenRouterTestStart = $SelectionFunctionEnd
+$OpenRouterTestEnd = $ServerSource.IndexOf('function Assert-LlmJobGenerationCurrent', $OpenRouterTestStart)
+$OpenRouterTestSource = $ServerSource.Substring($OpenRouterTestStart, $OpenRouterTestEnd - $OpenRouterTestStart)
+Assert-True ($OpenRouterTestSource.Contains('intentConfidence 0.5')) 'OpenRouter integration test does not request fractional confidence.'
+Assert-True ($OpenRouterTestSource.Contains('ConvertTo-LlmConfidence $Parsed.intentConfidence')) 'OpenRouter integration test bypasses the shared confidence validator.'
 
 function Write-AppLog {
     param([string]$Level = 'INFO', [string]$Message = '')
