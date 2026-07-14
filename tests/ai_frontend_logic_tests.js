@@ -38,7 +38,7 @@ function assert(condition, message) {
 const identityStart = source.indexOf('    function limitAiServerText');
 const identityEnd = source.indexOf('    function removeDonationAiJob', identityStart);
 if (identityStart < 0 || identityEnd < 0) throw new Error('AI identity helper block not found');
-function loadAiIdentityHelpers(pipelineVersion = 3) {
+function loadAiIdentityHelpers(pipelineVersion = 4) {
   return new Function('LLM_PIPELINE_VERSION', 'getEntriesForAiPayload', `${source.slice(identityStart, identityEnd)}; return {
     limitAiServerText,
     getActiveEntriesForAiIdentity,
@@ -46,7 +46,7 @@ function loadAiIdentityHelpers(pipelineVersion = 3) {
     getDonationAnalysisKey
   };`)(pipelineVersion, () => []);
 }
-const identityHelpers = loadAiIdentityHelpers(3);
+const identityHelpers = loadAiIdentityHelpers(4);
 const identityDonation = {
   source: 'donatepay',
   externalId: 'identity-1',
@@ -62,8 +62,8 @@ const identityEntries = [{
   eliminated: false
 }];
 const identityKey = identityHelpers.getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries });
-assert(identityKey.startsWith('v3:donatepay:identity-1:'), 'Frontend analysis key does not include pipeline version');
-assert(identityKey === 'v3:donatepay:identity-1:5fd03456', 'Frontend analysisKey no longer matches the server UTF-16 fingerprint contract');
+assert(identityKey.startsWith('v4:donatepay:identity-1:'), 'Frontend analysis key does not include pipeline version');
+assert(identityKey === 'v4:donatepay:identity-1:c1033163', 'Frontend analysisKey no longer matches the server UTF-16 fingerprint contract');
 assert(
   identityHelpers.getDonationAnalysisKey({ ...identityDonation, message: 'на другую игру' }, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
   'Frontend analysis key ignores donation message changes'
@@ -73,16 +73,16 @@ assert(
   'Frontend analysis key ignores active entry changes'
 );
 assert(
-  loadAiIdentityHelpers(4).getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
+  loadAiIdentityHelpers(5).getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
   'Frontend analysis key ignores pipeline version changes'
 );
 
 const skipStart = source.indexOf('    function shouldSkipDonationAi');
 const skipEnd = source.indexOf('    function getEntriesForAiPayload', skipStart);
 if (skipStart < 0 || skipEnd < 0) throw new Error('AI skip helper not found');
-const { shouldSkipDonationAi } = new Function('LLM_PIPELINE_VERSION', `${source.slice(skipStart, skipEnd)}; return { shouldSkipDonationAi };`)(3);
-assert(!shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 2, status: 'done' } }), 'Legacy AI result was reused after pipeline upgrade');
-assert(shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 3, status: 'done' } }), 'Current completed AI result was needlessly resubmitted');
+const { shouldSkipDonationAi } = new Function('LLM_PIPELINE_VERSION', `${source.slice(skipStart, skipEnd)}; return { shouldSkipDonationAi };`)(4);
+assert(!shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 3, status: 'done' } }), 'Legacy AI result was reused after pipeline upgrade');
+assert(shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 4, status: 'done' } }), 'Current completed AI result was needlessly resubmitted');
 
 const mojibakeStart = source.indexOf('    function isLikelyMojibakeText');
 const mojibakeEnd = source.indexOf('    function getSafeExternalUrl', mojibakeStart);
@@ -94,14 +94,48 @@ const displayHelpers = new Function('limitStoredText', `${source.slice(mojibakeS
 assert(displayHelpers.getSafeAiDisplayText('Сообщение указывает на игру Bully', 'fallback').includes('Bully'), 'Valid Russian AI reason was hidden');
 assert(displayHelpers.getSafeAiDisplayText('Ð½Ð° Ð±ÑƒÐ»Ð»Ð¸', 'Безопасный текст') === 'Безопасный текст', 'Mojibake-like AI reason reached the UI');
 
+const daDisplayStart = source.indexOf('    function getDonationAlertsServerDisplayState');
+const daDisplayEnd = source.indexOf('    function getEffectiveIntegrationState', daDisplayStart);
+if (daDisplayStart < 0 || daDisplayEnd < 0) throw new Error('DonationAlerts display helper not found');
+const { getDonationAlertsServerDisplayState } = new Function(
+  'formatIntegrationEventTime',
+  `${source.slice(daDisplayStart, daDisplayEnd)}; return { getDonationAlertsServerDisplayState };`
+)(value => value || '—');
+const degradedDaState = getDonationAlertsServerDisplayState({ status: 'degraded', degraded: true }, '');
+assert(degradedDaState.status === 'connecting', 'Transient DonationAlerts failure is shown as a terminal error');
+assert(degradedDaState.message.includes('выполняется повтор'), 'DonationAlerts degraded UI does not explain automatic retry');
+const authDaState = getDonationAlertsServerDisplayState({ status: 'auth_error' }, '');
+assert(authDaState.label.includes('переподключение'), 'DonationAlerts auth failure does not request reconnection');
+
 assert(source.includes('pipelineVersion: LLM_PIPELINE_VERSION,\n          auctionGeneration:'), 'AI job request does not send pipelineVersion');
 assert(source.includes("title.appendChild(document.createTextNode('AI выбрал существующий лот: '))"), 'Existing-entry AI result has no clear Russian UI state');
 assert(!source.includes('AI понял: Неизвестно · unknown'), 'Raw unknown enum is still shown to users');
+assert(source.includes("'LLM_RESPONSE_CONTENT_MISSING'"), 'Missing OpenRouter content has no safe UI state');
+assert(source.includes("'LLM_RESPONSE_REFUSAL'"), 'OpenRouter refusal has no safe UI state');
 const aiBlockStart = source.indexOf('    function createDonationAiBlock');
 const aiBlockEnd = source.indexOf('    function formatDonationMoney', aiBlockStart);
 const aiBlockSource = source.slice(aiBlockStart, aiBlockEnd);
 assert(aiBlockSource.includes('reason.textContent = getSafeAiDisplayText'), 'AI reason bypasses safe text rendering');
 assert(!aiBlockSource.includes('.innerHTML'), 'AI result UI inserts model output as HTML');
+
+const existingEvidenceStart = source.indexOf('    function isSafeAiExistingMatchEvidence');
+const existingEvidenceEnd = source.indexOf('    function normalizeAiComparableText', existingEvidenceStart);
+if (existingEvidenceStart < 0 || existingEvidenceEnd < 0) throw new Error('AI existing-match evidence helper not found');
+const { isSafeAiExistingMatchEvidence } = new Function(
+  `${source.slice(existingEvidenceStart, existingEvidenceEnd)}; return { isSafeAiExistingMatchEvidence };`
+)();
+assert(isSafeAiExistingMatchEvidence({ existingMatchKind: 'exact_title' }), 'Exact-title AI evidence was rejected by frontend');
+assert(isSafeAiExistingMatchEvidence({ existingMatchKind: 'exact_external_identity' }), 'Exact external identity was rejected by frontend');
+assert(!isSafeAiExistingMatchEvidence({ matchedBy: 'llm_existing_entry', finalConfidence: 1 }), 'Legacy generic existing match can still auto-apply');
+assert(!isSafeAiExistingMatchEvidence({ matchedBy: 'manual_required', finalConfidence: 1 }), 'Manual-only existing result can auto-apply');
+const autoAssignStart = source.indexOf('    function canAutoApplyAiSuggestion');
+const autoAssignEnd = source.indexOf('    function normalizeAiComparableText', autoAssignStart);
+const autoAssignSource = source.slice(autoAssignStart, autoAssignEnd);
+assert(autoAssignSource.includes('isSafeAiExistingMatchEvidence(llm)'), 'Auto-assign bypasses safe semantic match evidence');
+const applyAssignStart = source.indexOf('    async function applyAiAssignSuggestion');
+const applyAssignEnd = source.indexOf('    async function applyAiSuggestion', applyAssignStart);
+const applyAssignSource = source.slice(applyAssignStart, applyAssignEnd);
+assert(applyAssignSource.includes('(auto && !isSafeAiExistingMatchEvidence(donation.llm))'), 'Automatic apply bypasses semantic evidence defense-in-depth');
 
 const viewModeStart = source.indexOf('    function hasDonationAlertsOAuthAccessToken');
 const viewModeEnd = source.indexOf('    function buildViewUrl', viewModeStart);

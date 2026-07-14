@@ -51,7 +51,7 @@ $script:MaxRequestHeaderChars = 32768
 $script:MaxRequestHeaderCount = 100
 $script:MaxRequestBodyBytes = 4MB
 $script:ClientIoTimeoutMs = 15000
-$script:LlmPipelineVersion = 3
+$script:LlmPipelineVersion = 4
 $script:LlmExistingSelectionThreshold = 0.90
 
 function Mask-SecretText {
@@ -76,7 +76,8 @@ function Mask-SecretText {
         '(?i)(local[_-]?app[_-]?token["''\s:=]+)([^"&''\s,}]+)',
         '(?i)(app[_-]?token["''\s:=]+)([^"&''\s,}]+)',
         '(?i)(authorization["''\s:=]+Bearer\s+)([^"&''\s,}]+)',
-        '(?i)(code["''\s:=]+)([^"&''\s,}]+)',
+        '(?i)([?&]code=)([^&#\s]+)',
+        '(?i)((?:authorizationCode|oauthCode)["''\s:=]+)([^"&''\s,}]+)',
         '(?i)(password["''\s:=]+)([^"&''\s,}]+)',
         '(?i)(token["''\s:=]+)([^"&''\s,}]+)',
         '(?i)(Bearer\s+)([A-Za-z0-9._~+/=-]+)'
@@ -942,6 +943,16 @@ $script:ServerState = @{
             BackoffUntil = $null
             LastPollAt = $null
             PollingIntervalSec = 10
+            ConsecutiveFailures = 0
+            FirstFailureAt = ""
+            LastFailureAt = ""
+            LastFailureKind = ""
+            LastFailureMessageSafe = ""
+            LastSuccessAt = ""
+            Degraded = $false
+            NextPollAt = ""
+            RecoveryLogged = $true
+            FailureEscalated = $false
         }
     }
 }
@@ -1513,6 +1524,65 @@ function Compare-LotTitles {
     }
 }
 
+function Get-LlmTitleInformation {
+    param([AllowNull()][string]$Text)
+
+    $Raw = ([string]$Text).Trim()
+    $Normalized = Normalize-LotTitle $Raw
+    $Comparable = @(Get-LotTitleTokens $Raw -IgnoreSafeArticles) -join ' '
+    $LetterCount = [System.Text.RegularExpressions.Regex]::Matches($Raw, '\p{L}').Count
+    $Placeholder = @('test', 'тест', 'lot', 'лот', 'game', 'игра', 'item', 'entry', 'unknown') -contains $Comparable
+    $Reason = if ([string]::IsNullOrWhiteSpace($Raw) -or [string]::IsNullOrWhiteSpace($Normalized)) { 'empty_title' }
+        elseif ($LetterCount -lt 2) { 'low_information_title' }
+        elseif ($Placeholder) { 'placeholder_title' }
+        else { '' }
+    return [pscustomobject]@{
+        usable = [string]::IsNullOrWhiteSpace($Reason)
+        normalized = $Normalized
+        letterCount = [int]$LetterCount
+        reason = $Reason
+    }
+}
+
+function Get-LlmExistingSelectionEvidence {
+    param(
+        [AllowNull()][string]$Query,
+        [AllowNull()][object]$Entry,
+        [AllowNull()][string]$TrustedSource = '',
+        [AllowNull()][string]$TrustedExternalId = ''
+    )
+
+    if (-not $Entry -or [bool]$Entry.eliminated) {
+        return [pscustomobject]@{ safe = $false; matchKind = ''; reason = 'entry_unavailable'; comparison = $null }
+    }
+    $EntryInfo = Get-LlmTitleInformation ([string]$Entry.name)
+    if (-not $EntryInfo.usable) {
+        return [pscustomobject]@{ safe = $false; matchKind = ''; reason = 'opaque_entry_name'; comparison = $null }
+    }
+    $QueryInfo = Get-LlmTitleInformation $Query
+    if (-not $QueryInfo.usable) {
+        return [pscustomobject]@{ safe = $false; matchKind = ''; reason = 'low_information_query'; comparison = $null }
+    }
+    if (
+        -not [string]::IsNullOrWhiteSpace($TrustedSource) -and
+        -not [string]::IsNullOrWhiteSpace($TrustedExternalId) -and
+        [string]$Entry.source -eq $TrustedSource -and
+        [string]$Entry.externalId -eq $TrustedExternalId
+    ) {
+        return [pscustomobject]@{ safe = $true; matchKind = 'exact_external_identity'; reason = ''; comparison = $null }
+    }
+    $Comparison = Compare-LotTitles $Query ([string]$Entry.name)
+    if ($Comparison.exact) {
+        return [pscustomobject]@{ safe = $true; matchKind = 'exact_title'; reason = ''; comparison = $Comparison }
+    }
+    return [pscustomobject]@{
+        safe = $false
+        matchKind = ''
+        reason = if ($Comparison.hasVariantConflict) { 'variant_conflict' } else { 'semantic_mismatch' }
+        comparison = $Comparison
+    }
+}
+
 function Get-TokenSimilarity {
     param(
         [AllowNull()][string]$Left,
@@ -1646,6 +1716,7 @@ function ConvertTo-LlmResult {
         [double]$FinalConfidence = 0,
         [string]$Query = "",
         [string]$MatchedBy = "none",
+        [string]$ExistingMatchKind = "",
         [string]$EntryId = "",
         [AllowNull()][object]$EntryFingerprint = $null,
         [AllowNull()][object]$Candidate = $null,
@@ -1664,6 +1735,7 @@ function ConvertTo-LlmResult {
         finalConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]$FinalConfidence))
         query = Limit-LogText $Query 200
         matchedBy = $MatchedBy
+        existingMatchKind = if (@('exact_title', 'exact_external_identity') -contains $ExistingMatchKind) { $ExistingMatchKind } else { '' }
         candidate = $Candidate
         candidates = @($Candidates | Select-Object -First 5)
         reason = Limit-LogText $Reason 400
@@ -1676,17 +1748,23 @@ function Resolve-LlmIntentDecision {
         [object[]]$Entries
     )
 
+    $ActiveEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
+    $HasActiveEntries = $ActiveEntries.Count -gt 0
+    # Provider Schema B forbids select_existing when there are no active
+    # entries. Keep the internal validator defensive: if a provider violates
+    # that schema, normalize the unsafe selection to ask_manual below instead
+    # of ever allowing an assignment.
     $AllowedDecisions = @('select_existing', 'search_catalog', 'ask_manual')
     $AllowedCategories = @('game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown')
     if (
         -not $Result -or
         -not $Result.PSObject.Properties['decision'] -or
-        -not $Result.PSObject.Properties['entryId'] -or
         -not $Result.PSObject.Properties['category'] -or
         -not $Result.PSObject.Properties['query'] -or
         -not $Result.PSObject.Properties['intentConfidence'] -or
-        -not $Result.PSObject.Properties['existingSelectionConfidence'] -or
         -not $Result.PSObject.Properties['reason'] -or
+        ($HasActiveEntries -and -not $Result.PSObject.Properties['entryId']) -or
+        ($HasActiveEntries -and -not $Result.PSObject.Properties['existingSelectionConfidence']) -or
         $AllowedDecisions -notcontains [string]$Result.decision -or
         $AllowedCategories -notcontains [string]$Result.category -or
         [string]::IsNullOrWhiteSpace([string]$Result.reason)
@@ -1698,6 +1776,10 @@ function Resolve-LlmIntentDecision {
     if ($null -eq $IntentConfidence) {
         Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter intent confidence is invalid."
     }
+    if (-not $HasActiveEntries) {
+        $Result | Add-Member -NotePropertyName entryId -NotePropertyValue '' -Force
+        $Result | Add-Member -NotePropertyName existingSelectionConfidence -NotePropertyValue 0.0 -Force
+    }
     $ExistingConfidence = ConvertTo-LlmConfidence $Result.existingSelectionConfidence
     if ($null -eq $ExistingConfidence) {
         Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter existing selection confidence is invalid."
@@ -1705,24 +1787,35 @@ function Resolve-LlmIntentDecision {
 
     $Result.intentConfidence = [double]$IntentConfidence
     $Result.existingSelectionConfidence = [double]$ExistingConfidence
-    $Result.entryId = Limit-LogText ([string]$Result.entryId) 300
+    $ProviderEntryId = Limit-LogText ([string]$Result.entryId) 300
+    if ($HasActiveEntries -and [string]$Result.decision -ne 'select_existing') {
+        if ($ProviderEntryId -ne '__none__' -or [double]$ExistingConfidence -ne 0.0) {
+            Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter non-selection intent fields are invalid."
+        }
+        $ProviderEntryId = ''
+    }
+    elseif ($ProviderEntryId -eq '__none__') {
+        $ProviderEntryId = ''
+    }
+    $Result.entryId = $ProviderEntryId
     $Result.query = Limit-LogText ([string]$Result.query) 200
     $Result.reason = Limit-LogText ([string]$Result.reason) 400
-    $ActiveEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
-
     if ([string]$Result.decision -eq 'select_existing') {
         $Selected = @($ActiveEntries | Where-Object { [string]$_.id -eq [string]$Result.entryId } | Select-Object -First 1)[0]
         $SelectionInvalid = -not $Selected -or
             [double]$ExistingConfidence -lt [double]$script:LlmExistingSelectionThreshold -or
             -not (Test-LotCategoriesCompatible ([string]$Result.category) ([string]$Selected.category))
         if ($SelectionInvalid) {
+            $FallbackDecision = if (Test-LlmIntentReadyForCatalog ([string]$Result.category) ([string]$Result.query) ([double]$IntentConfidence)) {
+                'search_catalog'
+            } else { 'ask_manual' }
             return [pscustomobject]@{
-                decision = 'ask_manual'
+                decision = $FallbackDecision
                 entryId = ''
                 category = [string]$Result.category
                 query = [string]$Result.query
                 intentConfidence = [double]$IntentConfidence
-                existingSelectionConfidence = [double]$ExistingConfidence
+                existingSelectionConfidence = 0.0
                 reason = 'AI не смог безопасно подтвердить существующий лот.'
             }
         }
@@ -2612,6 +2705,254 @@ function ConvertFrom-LlmStructuredJson {
     }
 }
 
+function Normalize-OpenRouterContentText {
+    param([AllowNull()][string]$Text)
+
+    if ($null -eq $Text) { return "" }
+    $Normalized = ([string]$Text).Trim()
+    while ($Normalized.Length -gt 0 -and $Normalized[0] -eq [char]0xFEFF) {
+        $Normalized = $Normalized.Substring(1).TrimStart()
+    }
+    return $Normalized.Trim()
+}
+
+function Get-OpenRouterMessageContentInfo {
+    param([AllowNull()][object]$Message)
+
+    $Content = if ($Message -and $Message.PSObject.Properties['content']) { $Message.content } else { $null }
+    $ContentType = if ($null -eq $Content) { "null" } else { $Content.GetType().FullName }
+    $PartCount = 0
+    $Text = ""
+
+    if ($Content -is [string]) {
+        $Text = [string]$Content
+    }
+    elseif ($Content -is [System.Array] -or $Content -is [System.Collections.IList]) {
+        $Parts = [System.Collections.Generic.List[string]]::new()
+        foreach ($Part in @($Content)) {
+            $PartCount++
+            if ($null -eq $Part) { continue }
+            if ($Part -is [string]) {
+                # OpenRouter text-part arrays are expected to use objects. A
+                # bare string is not a documented part and is ignored.
+                continue
+            }
+            $Candidate = ""
+            if (
+                $Part.PSObject.Properties['type'] -and
+                [string]$Part.type -eq 'text' -and
+                $Part.PSObject.Properties['text'] -and
+                $Part.text -is [string]
+            ) {
+                $Candidate = [string]$Part.text
+            }
+            elseif ($Part.PSObject.Properties['text'] -and $Part.text -is [string]) {
+                $Candidate = [string]$Part.text
+            }
+            elseif ($Part.PSObject.Properties['content'] -and $Part.content -is [string]) {
+                $Candidate = [string]$Part.content
+            }
+            if (-not [string]::IsNullOrEmpty($Candidate)) { $Parts.Add($Candidate) }
+        }
+        $Text = $Parts -join ''
+    }
+    elseif ($null -ne $Content) {
+        if ($Content.PSObject.Properties['text'] -and $Content.text -is [string]) {
+            $Text = [string]$Content.text
+        }
+        elseif ($Content.PSObject.Properties['content'] -and $Content.content -is [string]) {
+            $Text = [string]$Content.content
+        }
+    }
+
+    return [pscustomobject]@{
+        text = Normalize-OpenRouterContentText $Text
+        contentClrType = $ContentType
+        contentPartCount = $PartCount
+    }
+}
+
+function Get-OpenRouterMessageContentText {
+    param([AllowNull()][object]$Message)
+
+    $Refusal = if ($Message -and $Message.PSObject.Properties['refusal']) {
+        Normalize-OpenRouterContentText ([string]$Message.refusal)
+    } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($Refusal)) {
+        Throw-LlmError "LLM_RESPONSE_REFUSAL" "OpenRouter refused to produce the requested structured response."
+    }
+    $Info = Get-OpenRouterMessageContentInfo $Message
+    if ([string]::IsNullOrWhiteSpace([string]$Info.text)) {
+        Throw-LlmError "LLM_RESPONSE_CONTENT_MISSING" "OpenRouter returned no text content."
+    }
+    return [string]$Info.text
+}
+
+function Get-OpenRouterContentFingerprint {
+    param([AllowNull()][string]$Text)
+
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $Bytes = (Get-StrictUtf8Encoding).GetBytes([string]$Text)
+        $Hash = $Sha.ComputeHash($Bytes)
+        return (([BitConverter]::ToString($Hash)).Replace('-', '').ToLowerInvariant()).Substring(0, 16)
+    }
+    finally { $Sha.Dispose() }
+}
+
+function Test-OpenRouterStructuredObject {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [System.Array]) { return $false }
+    if ($Value -is [System.Collections.IDictionary]) { return $true }
+    return $Value.GetType().FullName -eq 'System.Management.Automation.PSCustomObject'
+}
+
+function Get-OpenRouterParsedTopLevelType {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [System.Array]) { return 'array' }
+    if (Test-OpenRouterStructuredObject $Value) { return 'object' }
+    if ($Value -is [string]) { return 'string' }
+    return $Value.GetType().FullName
+}
+
+function Get-OpenRouterSafeDiagnosticsText {
+    param([AllowNull()][object]$Diagnostics)
+
+    if (-not $Diagnostics) { return "" }
+    $Pairs = [System.Collections.Generic.List[string]]::new()
+    foreach ($Name in @(
+        'contentClrType', 'contentLength', 'contentPartCount', 'startsWithFence',
+        'looksDoubleEncoded', 'parsedTopLevelType', 'presentKeys', 'finishReason',
+        'model', 'provider', 'requestId', 'contentFingerprint'
+    )) {
+        if (-not $Diagnostics.PSObject.Properties[$Name]) { continue }
+        $Value = Limit-LogText (Mask-SecretText ([string]$Diagnostics.$Name)) 200
+        if ([string]::IsNullOrWhiteSpace($Value)) { continue }
+        $Pairs.Add("$Name=$Value")
+    }
+    return Limit-LogText ($Pairs -join ' ') 1000
+}
+
+function Add-LlmSafeDiagnostics {
+    param(
+        [AllowNull()][System.Exception]$Exception,
+        [AllowNull()][object]$Diagnostics
+    )
+
+    if (-not $Exception -or -not $Diagnostics) { return }
+    $SafeText = Get-OpenRouterSafeDiagnosticsText $Diagnostics
+    if (-not [string]::IsNullOrWhiteSpace($SafeText)) {
+        $Exception.Data['LlmSafeDiagnostics'] = $SafeText
+    }
+}
+
+function Throw-OpenRouterStructuredContentError {
+    param(
+        [string]$Code,
+        [string]$Message,
+        [AllowNull()][object]$Diagnostics
+    )
+
+    $Exception = New-LlmCodedException $Code $Message
+    Add-LlmSafeDiagnostics $Exception $Diagnostics
+    throw $Exception
+}
+
+function ConvertFrom-OpenRouterStructuredContent {
+    param(
+        [AllowNull()][object]$Message,
+        [AllowNull()][string]$FinishReason = "",
+        [AllowNull()][string]$Model = "",
+        [AllowNull()][string]$Provider = "",
+        [AllowNull()][string]$RequestId = "",
+        [ref]$Diagnostics
+    )
+
+    $Info = Get-OpenRouterMessageContentInfo $Message
+    $Text = [string]$Info.text
+    $Metadata = [pscustomobject]@{
+        contentClrType = Limit-LogText ([string]$Info.contentClrType) 120
+        contentLength = $Text.Length
+        contentPartCount = [int]$Info.contentPartCount
+        startsWithFence = $Text.StartsWith('```')
+        looksDoubleEncoded = $false
+        parsedTopLevelType = ''
+        presentKeys = ''
+        finishReason = Limit-LogText $FinishReason 80
+        model = Limit-LogText $Model 160
+        provider = Limit-LogText $Provider 120
+        requestId = Limit-LogText $RequestId 160
+        contentFingerprint = if ($Text.Length -gt 0) { Get-OpenRouterContentFingerprint $Text } else { '' }
+    }
+    if ($Diagnostics) { $Diagnostics.Value = $Metadata }
+
+    $Refusal = if ($Message -and $Message.PSObject.Properties['refusal']) {
+        Normalize-OpenRouterContentText ([string]$Message.refusal)
+    } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($Refusal)) {
+        Throw-OpenRouterStructuredContentError 'LLM_RESPONSE_REFUSAL' 'OpenRouter refused to produce the requested structured response.' $Metadata
+    }
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        Throw-OpenRouterStructuredContentError 'LLM_RESPONSE_CONTENT_MISSING' 'OpenRouter returned no text content.' $Metadata
+    }
+
+    $CandidateText = $Text
+    $Parsed = $null
+    $ParsedOk = $false
+    try {
+        $Parsed = $CandidateText | ConvertFrom-Json -ErrorAction Stop
+        $ParsedOk = $true
+    }
+    catch {}
+
+    if (-not $ParsedOk -and $Metadata.startsWithFence) {
+        $FenceMatch = [regex]::Match(
+            $CandidateText,
+            '\A```(?:json)?[ \t]*(?:\r?\n)?(?<body>[\s\S]*?)(?:\r?\n)?```\z',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        if ($FenceMatch.Success) {
+            $CandidateText = Normalize-OpenRouterContentText $FenceMatch.Groups['body'].Value
+            try {
+                $Parsed = $CandidateText | ConvertFrom-Json -ErrorAction Stop
+                $ParsedOk = $true
+            }
+            catch {}
+        }
+    }
+
+    if (-not $ParsedOk) {
+        Throw-OpenRouterStructuredContentError 'LLM_RESPONSE_PARSE_ERROR' 'OpenRouter returned malformed structured JSON.' $Metadata
+    }
+
+    $Metadata.parsedTopLevelType = Get-OpenRouterParsedTopLevelType $Parsed
+    if ($Parsed -is [string]) {
+        $InnerText = Normalize-OpenRouterContentText ([string]$Parsed)
+        if ($InnerText.StartsWith('{') -and $InnerText.EndsWith('}')) {
+            $Metadata.looksDoubleEncoded = $true
+            try { $Parsed = $InnerText | ConvertFrom-Json -ErrorAction Stop }
+            catch {
+                Throw-OpenRouterStructuredContentError 'LLM_RESPONSE_PARSE_ERROR' 'OpenRouter returned malformed double-encoded structured JSON.' $Metadata
+            }
+            $Metadata.parsedTopLevelType = Get-OpenRouterParsedTopLevelType $Parsed
+        }
+    }
+
+    if (-not (Test-OpenRouterStructuredObject $Parsed)) {
+        Throw-OpenRouterStructuredContentError 'LLM_SCHEMA_VALIDATION_ERROR' 'OpenRouter structured response must be a JSON object.' $Metadata
+    }
+    $SafeKeys = @($Parsed.PSObject.Properties.Name | ForEach-Object {
+        $Key = [string]$_
+        if ($Key -match '^[A-Za-z][A-Za-z0-9_]{0,63}$') { $Key } else { '<nonstandard>' }
+    } | Select-Object -Unique)
+    $Metadata.presentKeys = Limit-LogText (($SafeKeys -join ',')) 300
+    if ($Diagnostics) { $Diagnostics.Value = $Metadata }
+    return $Parsed
+}
+
 function ConvertTo-LlmConfidence {
     param([AllowNull()][object]$Value)
 
@@ -2854,7 +3195,7 @@ function Invoke-OpenRouterRequest {
         try {
             $Response = $Client.SendAsync(
                 $Request,
-                [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead,
+                [System.Net.Http.HttpCompletionOption]::ResponseContentRead,
                 $Cancellation.Token
             ).GetAwaiter().GetResult()
             $ResponseBytes = $Response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
@@ -2898,6 +3239,38 @@ function Invoke-OpenRouterRequest {
     }
 }
 
+function Get-OpenRouterIntentProviderSchema {
+    param([object[]]$CurrentEntries)
+
+    $Entries = @(Get-ActiveEntriesForLlmIntent $CurrentEntries)
+    $CommonProperties = @{
+        category = @{ type = "string"; enum = @("game", "anime", "movie", "tv_show", "cartoon", "other", "unknown") }
+        query = @{ type = "string" }
+        intentConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
+        reason = @{ type = "string" }
+    }
+    if ($Entries.Count -eq 0) {
+        $CommonProperties.decision = @{ type = "string"; enum = @("search_catalog", "ask_manual") }
+        return @{
+            type = "object"
+            properties = $CommonProperties
+            required = @("decision", "category", "query", "intentConfidence", "reason")
+            additionalProperties = $false
+        }
+    }
+
+    $AllowedEntryIds = @($Entries | ForEach-Object { [string]$_.id } | Select-Object -Unique)
+    $CommonProperties.decision = @{ type = "string"; enum = @("select_existing", "search_catalog", "ask_manual") }
+    $CommonProperties.entryId = @{ type = "string"; enum = @($AllowedEntryIds + "__none__") }
+    $CommonProperties.existingSelectionConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
+    return @{
+        type = "object"
+        properties = $CommonProperties
+        required = @("decision", "entryId", "category", "query", "intentConfidence", "existingSelectionConfidence", "reason")
+        additionalProperties = $false
+    }
+}
+
 function Invoke-OpenRouterIntentAnalysis {
     param(
         [object]$Donation,
@@ -2908,7 +3281,7 @@ function Invoke-OpenRouterIntentAnalysis {
 
     $Model = if ($Settings -and -not [string]::IsNullOrWhiteSpace([string]$Settings.model)) { [string]$Settings.model } else { "google/gemini-2.5-flash-lite" }
     $CurrentEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
-    $AllowedEntryIds = @($CurrentEntries | ForEach-Object { [string]$_.id } | Select-Object -Unique)
+    $HasCurrentEntries = $CurrentEntries.Count -gt 0
     $SystemPrompt = @"
 You analyze donation messages for a local auction. Extract what lot the donor probably meant.
 For query, return the canonical searchable title, preferably English or romaji, not a translated Russian phrase.
@@ -2933,6 +3306,11 @@ Examples:
 - Message "На Outlast Trials, смешной микровидос: [ссылка]", current entry The Outlast Trials => select_existing for The Outlast Trials; the rest is noise.
 - бабка 3, бабуся 3, гренни 3 => Granny 3, game. дбд => Dead by Daylight, game. атака титанов => Attack on Titan, anime. наруто => Naruto, anime; catalog selection resolves the exact series.
 "@
+    if ($HasCurrentEntries) {
+        $SystemPrompt += "`nFor search_catalog and ask_manual return entryId=__none__ and existingSelectionConfidence=0. For select_existing return one real entryId from currentEntries."
+    } else {
+        $SystemPrompt += "`nThere are no current entries. Return only search_catalog or ask_manual; do not return entryId or existingSelectionConfidence."
+    }
     $UserPayload = [pscustomobject]@{
         donation = [pscustomobject]@{
             username = [string]$Donation.username
@@ -2943,20 +3321,7 @@ Examples:
         }
         currentEntries = $CurrentEntries
     }
-    $Schema = @{
-        type = "object"
-        properties = @{
-            decision = @{ type = "string"; enum = @("select_existing", "search_catalog", "ask_manual") }
-            entryId = @{ type = "string"; enum = @($AllowedEntryIds + "") }
-            category = @{ type = "string"; enum = @("game", "anime", "movie", "tv_show", "cartoon", "other", "unknown") }
-            query = @{ type = "string" }
-            intentConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
-            existingSelectionConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
-            reason = @{ type = "string" }
-        }
-        required = @("decision", "entryId", "category", "query", "intentConfidence", "existingSelectionConfidence", "reason")
-        additionalProperties = $false
-    }
+    $Schema = Get-OpenRouterIntentProviderSchema $CurrentEntries
     $Payload = @{
         model = $Model
         temperature = 0
@@ -2977,9 +3342,19 @@ Examples:
     }
 
     $Response = Invoke-OpenRouterRequest $Payload 45
-    $Content = [string]$Response.choices[0].message.content
-    $Result = ConvertFrom-LlmStructuredJson $Content "OpenRouter returned an empty intent response."
-    return Resolve-LlmIntentDecision $Result $CurrentEntries
+    $Diagnostics = $null
+    $Result = ConvertFrom-OpenRouterStructuredContent `
+        -Message $Response.choices[0].message `
+        -FinishReason ([string]$Response.choices[0].finish_reason) `
+        -Model ([string]$Response.model) `
+        -Provider ([string]$Response.provider) `
+        -RequestId ([string]$Response.id) `
+        -Diagnostics ([ref]$Diagnostics)
+    try { return Resolve-LlmIntentDecision $Result $CurrentEntries }
+    catch {
+        Add-LlmSafeDiagnostics $_.Exception $Diagnostics
+        throw
+    }
 }
 
 function Invoke-OpenRouterCandidateSelection {
@@ -3030,46 +3405,47 @@ function Invoke-OpenRouterCandidateSelection {
         )
     }
     $Response = Invoke-OpenRouterRequest $Payload 45
-    $Content = [string]$Response.choices[0].message.content
-    $Selection = ConvertFrom-LlmStructuredJson $Content "OpenRouter returned an empty candidate selection."
-    if (
-        -not $Selection.PSObject.Properties['decision'] -or
-        -not $Selection.PSObject.Properties['candidateId'] -or
-        -not $Selection.PSObject.Properties['selectionConfidence'] -or
-        -not $Selection.PSObject.Properties['reason'] -or
-        @('select_candidate', 'ask_manual') -notcontains [string]$Selection.decision
-    ) {
-        Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter candidate selection did not match the required schema."
+    $Diagnostics = $null
+    $Selection = ConvertFrom-OpenRouterStructuredContent `
+        -Message $Response.choices[0].message `
+        -FinishReason ([string]$Response.choices[0].finish_reason) `
+        -Model ([string]$Response.model) `
+        -Provider ([string]$Response.provider) `
+        -RequestId ([string]$Response.id) `
+        -Diagnostics ([ref]$Diagnostics)
+    try {
+        if (
+            -not $Selection.PSObject.Properties['decision'] -or
+            -not $Selection.PSObject.Properties['candidateId'] -or
+            -not $Selection.PSObject.Properties['selectionConfidence'] -or
+            -not $Selection.PSObject.Properties['reason'] -or
+            @('select_candidate', 'ask_manual') -notcontains [string]$Selection.decision
+        ) {
+            Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter candidate selection did not match the required schema."
+        }
+        $SelectionConfidence = ConvertTo-LlmConfidence $Selection.selectionConfidence
+        if ($null -eq $SelectionConfidence) {
+            Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter selection confidence is invalid."
+        }
+        $Selection.selectionConfidence = [double]$SelectionConfidence
+        if ([string]$Selection.decision -eq "select_candidate" -and $AllowedIds -notcontains [string]$Selection.candidateId) {
+            Throw-LlmError "UNKNOWN_CANDIDATE_ID" "OpenRouter returned an unknown candidateId."
+        }
+        return $Selection
     }
-    $SelectionConfidence = ConvertTo-LlmConfidence $Selection.selectionConfidence
-    if ($null -eq $SelectionConfidence) {
-        Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter selection confidence is invalid."
+    catch {
+        Add-LlmSafeDiagnostics $_.Exception $Diagnostics
+        throw
     }
-    $Selection.selectionConfidence = [double]$SelectionConfidence
-    if ([string]$Selection.decision -eq "select_candidate" -and $AllowedIds -notcontains [string]$Selection.candidateId) {
-        Throw-LlmError "UNKNOWN_CANDIDATE_ID" "OpenRouter returned an unknown candidateId."
-    }
-    return $Selection
 }
 
 function Test-OpenRouterIntegration {
     param([string]$Model)
 
     if ([string]::IsNullOrWhiteSpace($Model)) { $Model = "google/gemini-2.5-flash-lite" }
-    $Schema = @{
-        type = "object"
-        properties = @{
-            decision = @{ type = "string"; enum = @("ask_manual") }
-            entryId = @{ type = "string"; enum = @("") }
-            category = @{ type = "string"; enum = @("unknown") }
-            query = @{ type = "string" }
-            intentConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
-            existingSelectionConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
-            reason = @{ type = "string" }
-        }
-        required = @("decision", "entryId", "category", "query", "intentConfidence", "existingSelectionConfidence", "reason")
-        additionalProperties = $false
-    }
+    $Schema = Get-OpenRouterIntentProviderSchema @()
+    $Schema.properties.decision.enum = @('ask_manual')
+    $Schema.properties.category.enum = @('unknown')
     $Payload = @{
         model = $Model
         temperature = 0
@@ -3081,14 +3457,20 @@ function Test-OpenRouterIntegration {
         }
         messages = @(
             @{ role = "system"; content = "Return the requested strict JSON object." },
-            @{ role = "user"; content = "Return decision ask_manual, empty entryId, category unknown, empty query, intentConfidence 0.5, existingSelectionConfidence 0, and a short Russian reason." }
+            @{ role = "user"; content = "Return decision ask_manual, category unknown, empty query, intentConfidence 0.5, and a short Russian reason." }
         )
     }
     $StartedAt = Get-Date
     try {
         $Response = Invoke-OpenRouterRequest $Payload 20
-        $Content = [string]$Response.choices[0].message.content
-        $Parsed = ConvertFrom-LlmStructuredJson $Content "OpenRouter returned an empty integration-test response."
+        $Diagnostics = $null
+        $Parsed = ConvertFrom-OpenRouterStructuredContent `
+            -Message $Response.choices[0].message `
+            -FinishReason ([string]$Response.choices[0].finish_reason) `
+            -Model ([string]$Response.model) `
+            -Provider ([string]$Response.provider) `
+            -RequestId ([string]$Response.id) `
+            -Diagnostics ([ref]$Diagnostics)
         $Parsed = Resolve-LlmIntentDecision $Parsed @()
         if ([string]$Parsed.decision -ne "ask_manual" -or [string]$Parsed.category -ne "unknown") {
             throw "Selected model returned invalid structured output."
@@ -3146,7 +3528,8 @@ function Test-LlmIntentReadyForCatalog {
         [double]$IntentConfidence
     )
 
-    return -not [string]::IsNullOrWhiteSpace([string]$Query) -and
+    $QueryInfo = Get-LlmTitleInformation $Query
+    return [bool]$QueryInfo.usable -and
         [string]$Category -ne 'unknown' -and
         $IntentConfidence -ge 0.50
 }
@@ -3197,34 +3580,52 @@ function Invoke-LlmDonationPipeline {
             -not [bool]$_.eliminated -and
             [string]$_.id -eq [string]$Llm.entryId
         } | Select-Object -First 1)[0]
-        if (
-            -not $SelectedEntry -or
-            $ExistingSelectionConfidence -lt [double]$script:LlmExistingSelectionThreshold -or
-            -not (Test-LotCategoriesCompatible $Category ([string]$SelectedEntry.category))
-        ) {
-            return [pscustomobject]@{
-                ok = $true
-                result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -SelectionConfidence $ExistingSelectionConfidence -Query $Query -MatchedBy "manual_required" -Reason "AI не смог безопасно подтвердить существующий лот."
+        $SelectionBasicsValid = $SelectedEntry -and
+            $ExistingSelectionConfidence -ge [double]$script:LlmExistingSelectionThreshold -and
+            (Test-LotCategoriesCompatible $Category ([string]$SelectedEntry.category))
+        $SelectionEvidence = if ($SelectionBasicsValid) {
+            Get-LlmExistingSelectionEvidence $Query $SelectedEntry
+        } else {
+            [pscustomobject]@{ safe = $false; matchKind = ''; reason = 'selection_validation_failed' }
+        }
+        if (-not $SelectionBasicsValid -or -not $SelectionEvidence.safe) {
+            if (Test-LlmIntentReadyForCatalog $Category $Query $IntentConfidence) {
+                $Decision = 'search_catalog'
+                $ExistingSelectionConfidence = 0.0
+                $Reason = if ([string]$SelectionEvidence.reason -eq 'opaque_entry_name') {
+                    'Выбранный лот имеет неинформативное название; выполняется поиск по распознанному произведению.'
+                } else {
+                    'Выбранный лот не совпадает с распознанным произведением; выполняется поиск по каталогу.'
+                }
+            }
+            else {
+                return [pscustomobject]@{
+                    ok = $true
+                    result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -SelectionConfidence $ExistingSelectionConfidence -Query $Query -MatchedBy "manual_required" -Reason "AI не смог безопасно подтвердить существующий лот."
+                }
             }
         }
-        if ($Category -eq 'unknown' -and (Normalize-LotCategory ([string]$SelectedEntry.category)) -ne 'unknown') {
-            $Category = Normalize-LotCategory ([string]$SelectedEntry.category)
-        }
-        if ([string]::IsNullOrWhiteSpace($Query)) { $Query = Limit-LogText ([string]$SelectedEntry.name) 200 }
-        $FinalConfidence = [Math]::Min([double]$IntentConfidence, [double]$ExistingSelectionConfidence)
-        return [pscustomobject]@{
-            ok = $true
-            result = ConvertTo-LlmResult `
-                -Action "assign_existing" `
-                -Category $Category `
-                -IntentConfidence $IntentConfidence `
-                -SelectionConfidence $ExistingSelectionConfidence `
-                -FinalConfidence $FinalConfidence `
-                -Query $Query `
-                -MatchedBy "llm_existing_entry" `
-                -EntryId ([string]$SelectedEntry.id) `
-                -EntryFingerprint (Get-EntryFingerprint $SelectedEntry) `
-                -Reason $Reason
+        else {
+            $SelectedEntryCategory = Normalize-LotCategory ([string]$SelectedEntry.category)
+            if ($Category -eq 'unknown' -and -not [string]::IsNullOrWhiteSpace($SelectedEntryCategory)) {
+                $Category = $SelectedEntryCategory
+            }
+            $FinalConfidence = [Math]::Min([double]$IntentConfidence, [double]$ExistingSelectionConfidence)
+            return [pscustomobject]@{
+                ok = $true
+                result = ConvertTo-LlmResult `
+                    -Action "assign_existing" `
+                    -Category $Category `
+                    -IntentConfidence $IntentConfidence `
+                    -SelectionConfidence $ExistingSelectionConfidence `
+                    -FinalConfidence $FinalConfidence `
+                    -Query $Query `
+                    -MatchedBy "llm_existing_entry_$([string]$SelectionEvidence.matchKind)" `
+                    -ExistingMatchKind ([string]$SelectionEvidence.matchKind) `
+                    -EntryId ([string]$SelectedEntry.id) `
+                    -EntryFingerprint (Get-EntryFingerprint $SelectedEntry) `
+                    -Reason $Reason
+            }
         }
     }
 
@@ -3252,7 +3653,8 @@ function Invoke-LlmDonationPipeline {
                 -CandidateScore ([double]$QueryMatch.confidence) `
                 -FinalConfidence $FinalConfidence `
                 -Query $Query `
-                -MatchedBy "llm_current_entries" `
+                -MatchedBy "llm_current_entries_exact_title" `
+                -ExistingMatchKind "exact_title" `
                 -EntryId ([string]$QueryMatch.entry.id) `
                 -EntryFingerprint (Get-EntryFingerprint $QueryMatch.entry) `
                 -Reason $Reason
@@ -3349,9 +3751,20 @@ function Invoke-LlmDonationPipeline {
     }
     $Existing = Search-ExistingEntryByCandidate $Candidate $Entries $Category
     if ($Existing) {
+        $ExistingEvidence = Get-LlmExistingSelectionEvidence `
+            $Query `
+            $Existing `
+            ([string]$Candidate.source) `
+            ([string]$Candidate.externalId)
+        if (-not $ExistingEvidence.safe) {
+            return [pscustomobject]@{
+                ok = $true
+                result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -CandidateScore $CandidateScore -SelectionConfidence $SelectionConfidence -FinalConfidence $FinalConfidence -Query $Query -MatchedBy "manual_required" -Candidate $Candidate -Candidates $Candidates -Reason "Найденный лот требует ручной проверки названия."
+            }
+        }
         return [pscustomobject]@{
             ok = $true
-            result = ConvertTo-LlmResult -Action "assign_existing" -Category $Category -IntentConfidence $IntentConfidence -CandidateScore $CandidateScore -SelectionConfidence $SelectionConfidence -FinalConfidence $FinalConfidence -Query $Query -MatchedBy "$($Candidate.source)_candidate_existing_entry" -EntryId ([string]$Existing.id) -EntryFingerprint (Get-EntryFingerprint $Existing) -Candidate $Candidate -Candidates $Candidates -Reason $Reason
+            result = ConvertTo-LlmResult -Action "assign_existing" -Category $Category -IntentConfidence $IntentConfidence -CandidateScore $CandidateScore -SelectionConfidence $SelectionConfidence -FinalConfidence $FinalConfidence -Query $Query -MatchedBy "$($Candidate.source)_candidate_existing_entry_$([string]$ExistingEvidence.matchKind)" -ExistingMatchKind ([string]$ExistingEvidence.matchKind) -EntryId ([string]$Existing.id) -EntryFingerprint (Get-EntryFingerprint $Existing) -Candidate $Candidate -Candidates $Candidates -Reason $Reason
         }
     }
     if (Test-EliminatedEntryByCandidate $Candidate $Entries $Category) {
@@ -3916,12 +4329,14 @@ function Get-LlmFailureInfo {
         } catch {}
     }
     $Classification = Get-LlmFailureClassification $ErrorRecord.Exception $Message $StatusCode $Attempt $RetryAfter
+    $Diagnostics = Limit-LogText (Get-MaskedText ([string](Get-LlmExceptionDataValue $ErrorRecord.Exception 'LlmSafeDiagnostics'))) 1000
     return [pscustomobject]@{
         message = Limit-LogText $Message 500
         code = [string]$Classification.code
         retry = [bool]$Classification.retry
         delaySec = [int]$Classification.delaySec
         statusCode = $StatusCode
+        diagnostics = $Diagnostics
     }
 }
 
@@ -4179,6 +4594,9 @@ function Start-LlmWorkerLoop {
             $Failure = Get-LlmFailureInfo $_ ([int]$Job.attempt)
             if (Test-LlmJobGenerationCurrent ([string]$Job.jobId) ([long]$Job.generation)) {
                 Write-AppLog -Level "WARN" -Message "AI job $([string]$Job.analysisKey) failed (attempt $([int]$Job.attempt), code $([string]$Failure.code), status $([int]$Failure.statusCode)): $([string]$Failure.message)"
+                if (-not [string]::IsNullOrWhiteSpace([string]$Failure.diagnostics)) {
+                    Write-AppLog -Level "WARN" -Message "AI parse diagnostics: $([string]$Failure.diagnostics)"
+                }
                 try {
                     Fail-OrRetryLlmJob ([string]$Job.jobId) ([long]$Job.generation) $Failure
                 }
@@ -4309,6 +4727,17 @@ function New-UpstreamError {
 
     $StatusCode = $null
     $Body = ""
+    $FailureTypes = [System.Collections.Generic.List[string]]::new()
+    $WebExceptionStatus = ""
+
+    $CurrentError = $Error
+    while ($CurrentError) {
+        $FailureTypes.Add($CurrentError.GetType().FullName)
+        if ([string]::IsNullOrWhiteSpace($WebExceptionStatus) -and $CurrentError -is [System.Net.WebException]) {
+            $WebExceptionStatus = [string]$CurrentError.Status
+        }
+        $CurrentError = $CurrentError.InnerException
+    }
 
     if ($Error.Response) {
         try { $StatusCode = [int]$Error.Response.StatusCode } catch {}
@@ -4330,6 +4759,8 @@ function New-UpstreamError {
         upstreamBody = Limit-LogText (Get-MaskedText $Body)
         error = $Message
         exceptionMessage = Limit-LogText (Get-MaskedText $Error.Message)
+        failureType = Limit-LogText ($FailureTypes -join ',') 500
+        webExceptionStatus = Limit-LogText $WebExceptionStatus 80
         status = 500
     }
 }
@@ -4346,16 +4777,17 @@ function Write-UpstreamErrorLog {
     $SafeUrl = Limit-LogText (Mask-SecretText ([string]$ErrorData.upstreamUrl))
     $SafeBody = Limit-LogText (Mask-SecretText ([string]$ErrorData.upstreamBody))
     $SafeException = Limit-LogText (Mask-SecretText ([string]$ErrorData.exceptionMessage))
+    $LogUpstreamBody = -not ([string]$Service).StartsWith('DonationAlerts', [StringComparison]::OrdinalIgnoreCase)
 
     if ($ErrorData.endpoint) { Write-Host "  endpoint: $SafeEndpoint" -ForegroundColor Yellow }
     if ($ErrorData.upstreamStatus) { Write-Host "  upstream status: $($ErrorData.upstreamStatus)" -ForegroundColor Yellow }
     if ($ErrorData.upstreamUrl) { Write-Host "  upstream url: $SafeUrl" -ForegroundColor Yellow }
-    if ($ErrorData.upstreamBody) { Write-Host "  upstream body: $SafeBody" -ForegroundColor Yellow }
+    if ($LogUpstreamBody -and $ErrorData.upstreamBody) { Write-Host "  upstream body: $SafeBody" -ForegroundColor Yellow }
     if ($ErrorData.exceptionMessage) { Write-Host "  exception: $SafeException" -ForegroundColor Yellow }
     if ($ErrorData.endpoint) { Write-AppLog -Level "ERROR" -Message "  endpoint: $SafeEndpoint" }
     if ($ErrorData.upstreamStatus) { Write-AppLog -Level "ERROR" -Message "  upstream status: $($ErrorData.upstreamStatus)" }
     if ($ErrorData.upstreamUrl) { Write-AppLog -Level "ERROR" -Message "  upstream url: $SafeUrl" }
-    if ($ErrorData.upstreamBody) { Write-AppLog -Level "ERROR" -Message "  upstream body: $SafeBody" }
+    if ($LogUpstreamBody -and $ErrorData.upstreamBody) { Write-AppLog -Level "ERROR" -Message "  upstream body: $SafeBody" }
     if ($ErrorData.exceptionMessage) { Write-AppLog -Level "ERROR" -Message "  exception: $SafeException" }
 }
 
@@ -4633,6 +5065,14 @@ function Get-ApiRows {
     return @()
 }
 
+function Test-DonationAlertsPollPayloadValid {
+    param([AllowNull()][object]$Payload)
+
+    if ($null -eq $Payload) { return $false }
+    if ($Payload -is [System.Array]) { return $true }
+    return $null -ne $Payload.PSObject.Properties['data']
+}
+
 function Get-DonationKey {
     param(
         [string]$Source,
@@ -4730,6 +5170,23 @@ function Add-ServerDonation {
     }
     if ($Changed -and -not $DeferPersistence) { [void](Save-CollectorState) }
     return $Added
+}
+
+function Test-ServerDonationKnown {
+    param(
+        [string]$Source,
+        [object]$ExternalId
+    )
+
+    $Key = Get-DonationKey $Source $ExternalId
+    [System.Threading.Monitor]::Enter($script:StateLock)
+    try {
+        if ($script:ServerState.SeenDonationKeys.ContainsKey($Key)) { return $true }
+        return @($script:ServerState.DonationsPending | Where-Object {
+            [string]$_.source -eq $Source -and [string]$_.externalId -eq [string]$ExternalId
+        } | Select-Object -First 1).Count -gt 0
+    }
+    finally { [System.Threading.Monitor]::Exit($script:StateLock) }
 }
 
 function Get-DonationAlertsProfileCurrency {
@@ -4849,25 +5306,171 @@ function Convert-DonatePayNotificationRow {
     }
 }
 
-function Set-CollectorBackoff {
+function Initialize-DonationAlertsRuntimeFields {
+    param([hashtable]$ServiceState)
+
+    $Defaults = @{
+        ConsecutiveFailures = 0
+        FirstFailureAt = ""
+        LastFailureAt = ""
+        LastFailureKind = ""
+        LastFailureMessageSafe = ""
+        LastSuccessAt = ""
+        Degraded = $false
+        NextPollAt = ""
+        RecoveryLogged = $true
+        FailureEscalated = $false
+    }
+    foreach ($Name in $Defaults.Keys) {
+        if (-not $ServiceState.ContainsKey($Name)) { $ServiceState[$Name] = $Defaults[$Name] }
+    }
+}
+
+function Get-DonationAlertsFailureClassification {
+    param([AllowNull()][object]$Result)
+
+    $StatusCode = 0
+    try { $StatusCode = [int]$Result.upstreamStatus } catch {}
+    $FailureType = ([string]$Result.failureType).ToLowerInvariant()
+    $WebStatus = ([string]$Result.webExceptionStatus).ToLowerInvariant()
+    $ExceptionText = ([string]$Result.exceptionMessage).ToLowerInvariant()
+
+    if ($StatusCode -in @(401, 403)) {
+        return [pscustomobject]@{ kind = 'auth'; transient = $false; auth = $true; statusCode = $StatusCode; safeMessage = 'Требуется переподключение DonationAlerts.' }
+    }
+    if ($StatusCode -eq 400) {
+        return [pscustomobject]@{ kind = 'upstream_contract'; transient = $false; auth = $false; statusCode = $StatusCode; safeMessage = 'DonationAlerts отклонил параметры подключения.' }
+    }
+    if ($StatusCode -eq 429) {
+        return [pscustomobject]@{ kind = 'rate_limit'; transient = $true; auth = $false; statusCode = $StatusCode; safeMessage = 'Временное ограничение DonationAlerts, выполняется повтор.' }
+    }
+    if ($StatusCode -in @(500, 502, 503, 504)) {
+        return [pscustomobject]@{ kind = 'upstream_unavailable'; transient = $true; auth = $false; statusCode = $StatusCode; safeMessage = 'DonationAlerts временно недоступен, выполняется повтор.' }
+    }
+
+    $TransportStatuses = @(
+        'connectfailure', 'nameresolutionfailure', 'proxynameresolutionfailure',
+        'timeout', 'receivefailure', 'sendfailure', 'connectionclosed', 'keepalivefailure'
+    )
+    $TransportText = @(
+        'connection reset', 'connection aborted', 'forcibly closed', 'transport connection',
+        'name resolution', 'timed out', 'timeout', 'соединение разорвано',
+        'транспортного соединения', 'принудительно разорвано'
+    )
+    $IsTransport = $StatusCode -le 0 -and (
+        $FailureType.Contains('system.io.ioexception') -or
+        $FailureType.Contains('system.net.http.httprequestexception') -or
+        $FailureType.Contains('system.net.sockets.socketexception') -or
+        $FailureType.Contains('system.net.webexception') -or
+        $TransportStatuses -contains $WebStatus
+    )
+    if (-not $IsTransport -and $StatusCode -le 0) {
+        foreach ($Fragment in $TransportText) {
+            if ($ExceptionText.Contains($Fragment)) { $IsTransport = $true; break }
+        }
+    }
+    if ($IsTransport) {
+        $Kind = if ($ExceptionText.Contains('timed out') -or $ExceptionText.Contains('timeout') -or $WebStatus -eq 'timeout') { 'timeout' }
+            elseif ($ExceptionText.Contains('name resolution') -or $WebStatus.Contains('nameresolution')) { 'dns_failure' }
+            else { 'connection_reset' }
+        return [pscustomobject]@{ kind = $Kind; transient = $true; auth = $false; statusCode = $StatusCode; safeMessage = 'Временная ошибка соединения DonationAlerts, выполняется повтор.' }
+    }
+    return [pscustomobject]@{ kind = 'collector_error'; transient = $false; auth = $false; statusCode = $StatusCode; safeMessage = 'Ошибка ответа DonationAlerts.' }
+}
+
+function Get-DonationAlertsBackoffSeconds {
+    param([int]$ConsecutiveFailures)
+
+    if ($ConsecutiveFailures -le 1) { return 10 }
+    if ($ConsecutiveFailures -eq 2) { return 30 }
+    return 60
+}
+
+function Set-DonationAlertsFailureState {
     param(
         [hashtable]$ServiceState,
-        [object]$Result
+        [object]$Result,
+        [AllowNull()][DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
     )
 
-    $Status = 0
-    try { $Status = [int]$Result.upstreamStatus } catch {}
-    $DelaySec = if ($Status -eq 429) { 120 } else { 45 }
-    $ServiceState.BackoffUntil = (Get-Date).AddSeconds($DelaySec).ToUniversalTime().ToString("o")
-    $ServiceState.Status = "error"
-    $ServiceState.LastError = [string](Get-FirstPresentValue @($Result.error, "Collector request failed."))
+    Initialize-DonationAlertsRuntimeFields $ServiceState
+    $Failure = Get-DonationAlertsFailureClassification $Result
+    $NowUtc = $Now.ToUniversalTime()
+    $ServiceState.ConsecutiveFailures = [int]$ServiceState.ConsecutiveFailures + 1
+    if ([string]::IsNullOrWhiteSpace([string]$ServiceState.FirstFailureAt)) {
+        $ServiceState.FirstFailureAt = $NowUtc.ToString('o')
+    }
+    $ServiceState.LastFailureAt = $NowUtc.ToString('o')
+    $ServiceState.LastFailureKind = [string]$Failure.kind
+    $ServiceState.LastFailureMessageSafe = [string]$Failure.safeMessage
+    $ServiceState.LastError = [string]$Failure.safeMessage
+    $ServiceState.RecoveryLogged = $false
+
+    $DelaySec = if ($Failure.transient) { Get-DonationAlertsBackoffSeconds ([int]$ServiceState.ConsecutiveFailures) } else { 300 }
+    $NextPoll = $NowUtc.AddSeconds($DelaySec).ToString('o')
+    $ServiceState.BackoffUntil = $NextPoll
+    $ServiceState.NextPollAt = $NextPoll
+    $ServiceState.Degraded = [bool]$Failure.transient
+    $ServiceState.Status = if ($Failure.auth) { 'auth_error' } elseif ($Failure.transient) { 'degraded' } else { 'error' }
+
+    if ($Failure.transient) {
+        if ([int]$ServiceState.ConsecutiveFailures -eq 1) {
+            Write-AppLog -Level 'WARN' -Message "[DonationAlerts] temporary transport failure; retrying kind=$([string]$Failure.kind) attempt=1 nextRetrySec=$DelaySec"
+        }
+        $OutageSeconds = 0
+        try { $OutageSeconds = ($NowUtc - [DateTimeOffset]::Parse([string]$ServiceState.FirstFailureAt)).TotalSeconds } catch {}
+        if (-not [bool]$ServiceState.FailureEscalated -and ([int]$ServiceState.ConsecutiveFailures -ge 3 -or $OutageSeconds -ge 120)) {
+            $ServiceState.FailureEscalated = $true
+            Write-AppLog -Level 'ERROR' -Message "[DonationAlerts] connection remains unavailable kind=$([string]$Failure.kind) attempts=$([int]$ServiceState.ConsecutiveFailures)"
+        }
+    }
+    else {
+        Write-AppLog -Level 'ERROR' -Message "[DonationAlerts] terminal collector failure kind=$([string]$Failure.kind) status=$([int]$Failure.statusCode)"
+    }
+    return $Failure
+}
+
+function Clear-DonationAlertsFailureState {
+    param(
+        [hashtable]$ServiceState,
+        [AllowNull()][DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
+    )
+
+    Initialize-DonationAlertsRuntimeFields $ServiceState
+    $FailureCount = [int]$ServiceState.ConsecutiveFailures
+    if ($FailureCount -gt 0 -and -not [bool]$ServiceState.RecoveryLogged) {
+        Write-AppLog -Level 'INFO' -Message "[DonationAlerts] connection recovered after $FailureCount failure(s)."
+    }
+    Reset-DonationAlertsFailureState $ServiceState
+    $ServiceState.LastSuccessAt = $Now.ToUniversalTime().ToString('o')
+}
+
+function Reset-DonationAlertsFailureState {
+    param([hashtable]$ServiceState)
+
+    Initialize-DonationAlertsRuntimeFields $ServiceState
+    $ServiceState.BackoffUntil = $null
+    $ServiceState.NextPollAt = ""
+    $ServiceState.LastError = ""
+    $ServiceState.ConsecutiveFailures = 0
+    $ServiceState.FirstFailureAt = ""
+    $ServiceState.LastFailureAt = ""
+    $ServiceState.LastFailureKind = ""
+    $ServiceState.LastFailureMessageSafe = ""
+    $ServiceState.LastSuccessAt = ""
+    $ServiceState.Degraded = $false
+    $ServiceState.RecoveryLogged = $true
+    $ServiceState.FailureEscalated = $false
+}
+
+function Set-CollectorBackoff {
+    param([hashtable]$ServiceState, [object]$Result)
+    [void](Set-DonationAlertsFailureState $ServiceState $Result)
 }
 
 function Clear-CollectorBackoff {
     param([hashtable]$ServiceState)
-
-    $ServiceState.BackoffUntil = $null
-    $ServiceState.LastError = ""
+    Clear-DonationAlertsFailureState $ServiceState
 }
 
 function Test-CollectorBackoff {
@@ -4901,14 +5504,28 @@ function Apply-DonationAlertsCollectorResult {
     ) { return $false }
 
     if ($Result -and $Result.ok -eq $false) {
-        Set-CollectorBackoff $Service $Result
-        Write-UpstreamErrorLog "DonationAlerts collector" $Result
+        [void](Set-DonationAlertsFailureState $Service $Result)
         return $false
     }
 
-    $Rows = Get-ApiRows $Result
+    if (-not (Test-DonationAlertsPollPayloadValid $Result)) {
+        $ContractFailure = [pscustomobject]@{
+            ok = $false
+            upstreamStatus = 400
+            failureType = 'DONATIONALERTS_UPSTREAM_CONTRACT'
+            webExceptionStatus = ''
+            exceptionMessage = ''
+            error = 'DonationAlerts returned an invalid polling payload.'
+        }
+        [void](Set-DonationAlertsFailureState $Service $ContractFailure)
+        return $false
+    }
+
+    $Rows = @(Get-ApiRows $Result)
     $MaxId = Get-LastSeenIdValue $Service
     if (-not $Service.BaselineReady) {
+        $PreviousCursor = $Service.LastSeenId
+        $PreviousBaselineReady = [bool]$Service.BaselineReady
         foreach ($Row in $Rows) {
             $Id = Get-NumericDonationId $Row.id
             if ($Id -gt $MaxId) { $MaxId = $Id }
@@ -4918,7 +5535,11 @@ function Apply-DonationAlertsCollectorResult {
         $Service.Status = "connected"
         $Service.LastEventAt = (Get-Date).ToUniversalTime().ToString("o")
         Clear-CollectorBackoff $Service
-        [void](Save-CollectorState)
+        if (-not (Save-CollectorState)) {
+            $Service.LastSeenId = $PreviousCursor
+            $Service.BaselineReady = $PreviousBaselineReady
+            return $false
+        }
         Write-Host "[DonationAlerts] baseline ready, lastSeenId=$MaxId" -ForegroundColor Green
         Write-AppLog -Level "INFO" -Message "[DonationAlerts] baseline ready, lastSeenId=$MaxId"
         return $true
@@ -4931,15 +5552,29 @@ function Apply-DonationAlertsCollectorResult {
     $Added = 0
     foreach ($Row in $NewRows) {
         $Donation = Convert-DonationAlertsRow $Row
-        if ($Donation -and (Add-ServerDonation $Donation -DeferPersistence)) { $Added++ }
-        $Id = Get-NumericDonationId $Row.id
-        if ($Id -gt $MaxId) { $MaxId = $Id }
+        $Accepted = $false
+        if ($Donation) {
+            if (Add-ServerDonation $Donation -DeferPersistence) {
+                $Added++
+                $Accepted = $true
+            }
+            elseif (Test-ServerDonationKnown 'donationalerts' ([string]$Donation.externalId)) {
+                $Accepted = $true
+            }
+        }
+        if ($Accepted) {
+            $Id = Get-NumericDonationId $Row.id
+            if ($Id -gt $MaxId) { $MaxId = $Id }
+        }
     }
     if ($MaxId -gt $CurrentCursor) { $Service.LastSeenId = $MaxId }
     $Service.Status = "connected"
     $Service.LastEventAt = (Get-Date).ToUniversalTime().ToString("o")
     Clear-CollectorBackoff $Service
-    [void](Save-CollectorState)
+    if (-not (Save-CollectorState)) {
+        $Service.LastSeenId = $CurrentCursor
+        return $false
+    }
     if ($Added -gt 0) {
         Write-Host "[DonationAlerts] received $($Rows.Count), new $Added" -ForegroundColor DarkCyan
         Write-AppLog -Level "INFO" -Message "[DonationAlerts] received $($Rows.Count), new $Added"
@@ -5114,7 +5749,13 @@ function Start-DonationAlertsPollRunspace {
     [void]$PowerShell.AddParameter("DonationAlertsPollInput", $PollInput)
     try {
         $AsyncResult = $PowerShell.BeginInvoke()
-        return [pscustomobject]@{ Runspace = $Runspace; PowerShell = $PowerShell; AsyncResult = $AsyncResult }
+        return [pscustomobject]@{
+            Runspace = $Runspace
+            PowerShell = $PowerShell
+            AsyncResult = $AsyncResult
+            Signature = [string]$PollInput.signature
+            RuntimeGeneration = [long]$PollInput.runtimeGeneration
+        }
     }
     catch {
         $PowerShell.Dispose()
@@ -5152,8 +5793,13 @@ function Complete-DonationAlertsPollRunspaceIfReady {
         else { throw "DonationAlerts poll worker returned no result." }
     }
     catch {
-        Write-Host "[Collector] poll worker failed: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-AppLog -Level "ERROR" -Message "[Collector] poll worker failed: $($_.Exception.Message)"
+        $Failure = New-UpstreamError `
+            'DonationAlerts poll worker failed.' `
+            '/api/collector/donationalerts' `
+            'GET' `
+            'https://www.donationalerts.com/api/v1/alerts/donations' `
+            $_.Exception
+        [void](Apply-DonationAlertsCollectorResult $Failure ([string]$Handle.Signature) ([long]$Handle.RuntimeGeneration))
     }
     finally {
         try { $Handle.PowerShell.Dispose() } catch {}
@@ -5458,10 +6104,9 @@ function Update-CollectorConfig {
             if ($Changed) {
                 $DA.LastSeenId = $null
                 $DA.BaselineReady = $false
-                $DA.BackoffUntil = $null
                 $DA.LastPollAt = $null
+                Reset-DonationAlertsFailureState $DA
                 $DA.Status = if ($DA.Enabled) { "connecting" } else { "disconnected" }
-                $DA.LastError = ""
             }
             else {
                 $DA.AccessToken = $PreviousAccessToken
@@ -5503,6 +6148,7 @@ function Get-CollectorStatus {
     try {
         $DP = $script:ServerState.Integrations.DonatePay
         $DA = $script:ServerState.Integrations.DonationAlerts
+        Initialize-DonationAlertsRuntimeFields $DA
         $DPSecretStatus = Get-DonatePaySecretStatus
         $DASecretStatus = Get-DonationAlertsSecretStatus
         return [pscustomobject]@{
@@ -5521,10 +6167,17 @@ function Get-CollectorStatus {
                 }
                 donationalerts = [pscustomobject]@{
                     enabled = [bool]$DA.Enabled
+                    running = [bool]($DA.Enabled -and $script:CollectorEnabled -and -not $script:CollectorPausedPreserveCursor)
                     status = [string]$DA.Status
                     lastError = [string]$DA.LastError
                     lastEventAt = [string]$DA.LastEventAt
                     baselineReady = [bool]$DA.BaselineReady
+                    degraded = [bool]$DA.Degraded
+                    consecutiveFailures = [int]$DA.ConsecutiveFailures
+                    lastSuccessAt = [string]$DA.LastSuccessAt
+                    lastFailureAt = [string]$DA.LastFailureAt
+                    lastFailureKind = [string]$DA.LastFailureKind
+                    nextPollAt = [string]$DA.NextPollAt
                     hasAccessToken = (-not [string]::IsNullOrWhiteSpace([string]$DA.AccessToken)) -or [bool]$DASecretStatus.hasAccessToken
                     connected = (-not [string]::IsNullOrWhiteSpace([string]$DA.AccessToken)) -or [bool]$DASecretStatus.hasAccessToken
                 }
@@ -5557,6 +6210,7 @@ function Stop-CollectorRuntime {
             $Service.BaselineReady = $false
             $Service.Signature = ""
         }
+        Reset-DonationAlertsFailureState $script:ServerState.Integrations.DonationAlerts
     }
     finally {
         [System.Threading.Monitor]::Exit($script:StateLock)

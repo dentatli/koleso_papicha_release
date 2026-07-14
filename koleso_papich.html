@@ -4056,7 +4056,7 @@
     let serverCollectorStatusTimer = null;
     const SERVER_COLLECTOR_POLL_INTERVAL_MS = 10000;
     const AI_ANALYSIS_ALLOWED_CATEGORIES = ['game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown'];
-    const LLM_PIPELINE_VERSION = 3;
+    const LLM_PIPELINE_VERSION = 4;
     const MAX_LOT_NAME_LENGTH = 200;
     const MAX_DONATION_MESSAGE_LENGTH = 1000;
     let llmJobsRevision = 0;
@@ -6634,6 +6634,9 @@
         selectionConfidence: Math.max(0, Math.min(1, Number(llm.selectionConfidence) || 0)),
         finalConfidence: Math.max(0, Math.min(1, Number(llm.finalConfidence) || legacyConfidence)),
         matchedBy: limitStoredText(llm.matchedBy, 100),
+        existingMatchKind: ['exact_title', 'exact_external_identity'].includes(llm.existingMatchKind)
+          ? llm.existingMatchKind
+          : '',
         candidate: llm.candidate && typeof llm.candidate === 'object' ? llm.candidate : null,
         candidates: Array.isArray(llm.candidates) ? llm.candidates.slice(0, 5) : [],
         reason: limitStoredText(llm.reason, 400),
@@ -7135,6 +7138,7 @@
         const entry = getEntryById(llm.entryId);
         return llmSettings.autoAssignExisting
           && llm.finalConfidence >= llmSettings.confidenceAssignThreshold
+          && isSafeAiExistingMatchEvidence(llm)
           && !!entry
           && !entry.eliminated
           && doesEntryMatchAiFingerprint(entry, llm.entryFingerprint, { auto: true })
@@ -7148,6 +7152,17 @@
           && (llm.candidates.length <= 1 || llm.selectionConfidence > 0);
       }
       return false;
+    }
+
+    function isSafeAiExistingMatchEvidence(llm) {
+      if (!llm || typeof llm !== 'object') return false;
+      if (['exact_title', 'exact_external_identity'].includes(String(llm.existingMatchKind || ''))) return true;
+      return [
+        'llm_existing_entry_exact_title',
+        'llm_existing_entry_exact_external_identity',
+        'llm_current_entries_exact_title',
+        'llm_current_entries_exact_external_identity'
+      ].includes(String(llm.matchedBy || ''));
     }
 
     function normalizeAiComparableText(value) {
@@ -7352,6 +7367,7 @@
       if (
         !entry
         || entry.eliminated
+        || (auto && !isSafeAiExistingMatchEvidence(donation.llm))
         || !doesEntryMatchAiFingerprint(entry, donation.llm.entryFingerprint, { auto })
         || isDonationKnownOutsidePending(donation)
       ) {
@@ -7507,9 +7523,15 @@
         return box;
       }
       if (llm.status === 'error') {
+        const structuredResponseErrors = [
+          'LLM_RESPONSE_PARSE_ERROR',
+          'LLM_RESPONSE_CONTENT_MISSING',
+          'LLM_RESPONSE_REFUSAL',
+          'LLM_SCHEMA_VALIDATION_ERROR'
+        ];
         if (llm.errorCode === 'LLM_RESPONSE_ENCODING_ERROR') {
           title.textContent = 'Ответ AI получен в неверной кодировке';
-        } else if (['LLM_RESPONSE_PARSE_ERROR', 'LLM_SCHEMA_VALIDATION_ERROR'].includes(llm.errorCode)) {
+        } else if (structuredResponseErrors.includes(llm.errorCode)) {
           title.textContent = 'Ответ AI не удалось обработать';
         } else {
           title.textContent = 'AI недоступен';
@@ -7517,7 +7539,7 @@
         box.appendChild(title);
         const displayError = llm.errorCode === 'LLM_RESPONSE_ENCODING_ERROR'
           ? 'Повторите запрос после проверки подключения.'
-          : (['LLM_RESPONSE_PARSE_ERROR', 'LLM_SCHEMA_VALIDATION_ERROR'].includes(llm.errorCode)
+          : (structuredResponseErrors.includes(llm.errorCode)
             ? 'Некорректный структурированный ответ.'
             : getSafeAiDisplayText(llm.error, 'Не удалось выполнить AI-анализ.'));
         if (displayError) {
@@ -8345,6 +8367,48 @@
         || !!serverCollectorStatus?.services?.donationalerts?.hasAccessToken;
     }
 
+    function getDonationAlertsServerDisplayState(serverService, fallbackLastEventAt = '') {
+      if (!serverService) return null;
+      if (serverService.status === 'auth_error') {
+        return {
+          status: 'error',
+          label: 'Требуется переподключение',
+          message: 'Требуется переподключение DonationAlerts.'
+        };
+      }
+      if (serverService.degraded || serverService.status === 'degraded') {
+        return {
+          status: 'connecting',
+          label: 'Временная ошибка соединения',
+          message: 'Временная ошибка соединения, выполняется повтор.'
+        };
+      }
+      if (serverService.status === 'connected') {
+        return {
+          status: 'connected',
+          label: 'Подключено — собирает local_server.ps1',
+          message: `Последнее событие: ${formatIntegrationEventTime(serverService.lastEventAt || fallbackLastEventAt)}`
+        };
+      }
+      if (serverService.status === 'error') {
+        return {
+          status: 'error',
+          label: 'Ошибка',
+          message: serverService.lastError || 'Ошибка серверного collector.'
+        };
+      }
+      if (serverService.status === 'connecting') {
+        return {
+          status: 'connecting',
+          label: 'Подключается — выполняет local_server.ps1',
+          message: serverService.baselineReady
+            ? `Последнее событие: ${formatIntegrationEventTime(serverService.lastEventAt || fallbackLastEventAt)}`
+            : 'Сервер готовит baseline и начнёт принимать только новые донаты.'
+        };
+      }
+      return null;
+    }
+
     function getEffectiveIntegrationState(service) {
       const settings = donationIntegrations[service] || {};
       const credentials = hasIntegrationCredentials(service, settings);
@@ -8388,31 +8452,8 @@
       const serverService = service === 'donationalerts'
         ? serverCollectorStatus?.services?.[service]
         : null;
-      if (serverService) {
-        if (serverService.status === 'connected') {
-          return {
-            status: 'connected',
-            label: 'Подключено — собирает local_server.ps1',
-            message: `Последнее событие: ${formatIntegrationEventTime(serverService.lastEventAt || settings.lastEventAt)}`
-          };
-        }
-        if (serverService.status === 'error') {
-          return {
-            status: 'error',
-            label: 'Ошибка',
-            message: serverService.lastError || settings.lastError || 'Ошибка серверного collector.'
-          };
-        }
-        if (serverService.status === 'connecting') {
-          return {
-            status: 'connecting',
-            label: 'Подключается — выполняет local_server.ps1',
-            message: serverService.baselineReady
-              ? `Последнее событие: ${formatIntegrationEventTime(serverService.lastEventAt || settings.lastEventAt)}`
-              : 'Сервер готовит baseline и начнёт принимать только новые донаты.'
-          };
-        }
-      }
+      const donationAlertsServerState = getDonationAlertsServerDisplayState(serverService, settings.lastEventAt);
+      if (donationAlertsServerState) return donationAlertsServerState;
 
       if (settings.status === 'error') {
         return {

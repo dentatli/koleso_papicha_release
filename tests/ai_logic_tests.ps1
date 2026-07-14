@@ -26,6 +26,8 @@ $FunctionNames = @(
     'Get-LotVariantTokens',
     'Get-NormalizedEditSimilarity',
     'Compare-LotTitles',
+    'Get-LlmTitleInformation',
+    'Get-LlmExistingSelectionEvidence',
     'Normalize-LotCategory',
     'Test-LotCategoriesCompatible',
     'Get-TokenSimilarity',
@@ -48,6 +50,16 @@ $FunctionNames = @(
     'New-LlmCodedException',
     'Throw-LlmError',
     'ConvertFrom-LlmStructuredJson',
+    'Normalize-OpenRouterContentText',
+    'Get-OpenRouterMessageContentInfo',
+    'Get-OpenRouterMessageContentText',
+    'Get-OpenRouterContentFingerprint',
+    'Test-OpenRouterStructuredObject',
+    'Get-OpenRouterParsedTopLevelType',
+    'Get-OpenRouterSafeDiagnosticsText',
+    'Add-LlmSafeDiagnostics',
+    'Throw-OpenRouterStructuredContentError',
+    'ConvertFrom-OpenRouterStructuredContent',
     'ConvertTo-LlmConfidence',
     'Get-StrictUtf8Encoding',
     'ConvertTo-Utf8JsonBytes',
@@ -58,6 +70,7 @@ $FunctionNames = @(
     'Get-LlmExceptionDataValue',
     'Get-LlmHttpStatusCode',
     'Get-LlmRetryAfterSeconds',
+    'Get-OpenRouterIntentProviderSchema',
     'Get-MaskedText',
     'Get-LlmExceptionCode',
     'Test-LlmTransientNetworkException',
@@ -111,11 +124,14 @@ $FunctionNames = @(
     'Test-LlmGenerationCurrent',
     'Test-LlmJobGenerationCurrent',
     'Complete-LlmJob',
+    'Repair-InterruptedLlmJobs',
     'Invoke-LlmDonationPipeline',
     'Clear-LlmSearchCaches',
     'Get-NumericDonationId',
     'Get-LastSeenIdValue',
     'Get-DonationKey',
+    'Get-ApiRows',
+    'Test-DonationAlertsPollPayloadValid',
     'Get-FirstPresentValue',
     'Get-DonationAmountValue',
     'Convert-DonationDateToIso',
@@ -123,6 +139,16 @@ $FunctionNames = @(
     'Get-DonationAlertsUserCurrency',
     'Convert-DonationAlertsRow',
     'Convert-DonatePayNotificationRow',
+    'Add-ServerDonation',
+    'Test-ServerDonationKnown',
+    'Initialize-DonationAlertsRuntimeFields',
+    'Get-DonationAlertsFailureClassification',
+    'Get-DonationAlertsBackoffSeconds',
+    'Set-DonationAlertsFailureState',
+    'Reset-DonationAlertsFailureState',
+    'Clear-DonationAlertsFailureState',
+    'Clear-CollectorBackoff',
+    'Test-CollectorBackoff',
     'Apply-DonationAlertsCollectorResult',
     'Get-DonatePayRecoveryRequestContext',
     'Get-CollectorIdentitySignature',
@@ -159,7 +185,7 @@ function Assert-Equal {
     if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'" }
 }
 
-$script:LlmPipelineVersion = 3
+$script:LlmPipelineVersion = 4
 $script:LlmExistingSelectionThreshold = 0.90
 
 $OriginalTestCulture = [Threading.Thread]::CurrentThread.CurrentCulture
@@ -228,6 +254,83 @@ catch {
 }
 Assert-True $InvalidSurrogateRejected 'Invalid UTF-16 surrogate sequence was sent to OpenRouter.'
 
+$StructuredFixture = '{"decision":"search_catalog","category":"game","query":"The Outlast Trials","intentConfidence":0.95,"reason":"Распознана игра The Outlast Trials."}'
+$StringMessage = [pscustomobject]@{ content = $StructuredFixture; refusal = $null }
+$StringParsed = ConvertFrom-OpenRouterStructuredContent $StringMessage
+Assert-Equal $StringParsed.query 'The Outlast Trials' 'String OpenRouter content was not parsed.'
+
+$SplitAt = [Math]::Floor($StructuredFixture.Length / 2)
+$ArrayMessage = [pscustomobject]@{ content = @(
+    [pscustomobject]@{ type = 'text'; text = $StructuredFixture.Substring(0, $SplitAt) },
+    [pscustomobject]@{ type = 'text'; text = $StructuredFixture.Substring($SplitAt) },
+    [pscustomobject]@{ type = 'image'; image_url = 'https://example.invalid/not-read' }
+) }
+$ArrayDiagnostics = $null
+$ArrayParsed = ConvertFrom-OpenRouterStructuredContent $ArrayMessage -Diagnostics ([ref]$ArrayDiagnostics)
+Assert-Equal $ArrayParsed.reason 'Распознана игра The Outlast Trials.' 'Text-part array content was not joined in order.'
+Assert-Equal $ArrayDiagnostics.contentPartCount 3 'OpenRouter content part count is incorrect.'
+Assert-False ((Get-OpenRouterMessageContentText $ArrayMessage).Contains('image_url')) 'Non-text content leaked into structured JSON.'
+
+$ObjectMessage = [pscustomobject]@{ content = [pscustomobject]@{ text = $StructuredFixture } }
+Assert-Equal (ConvertFrom-OpenRouterStructuredContent $ObjectMessage).category 'game' 'Object text content was not parsed.'
+$FencedJson = [pscustomobject]@{ content = ('```json' + "`n" + $StructuredFixture + "`n" + '```') }
+Assert-Equal (ConvertFrom-OpenRouterStructuredContent $FencedJson).query 'The Outlast Trials' 'JSON markdown fence was not normalized.'
+$FencedPlain = [pscustomobject]@{ content = ('```' + "`n" + $StructuredFixture + "`n" + '```') }
+Assert-Equal (ConvertFrom-OpenRouterStructuredContent $FencedPlain).query 'The Outlast Trials' 'Plain markdown fence was not normalized.'
+$DoubleEncodedContent = $StructuredFixture | ConvertTo-Json -Compress
+Assert-Equal (ConvertFrom-OpenRouterStructuredContent ([pscustomobject]@{ content = $DoubleEncodedContent })).query 'The Outlast Trials' 'One double-encoded JSON object was not normalized.'
+
+$RefusalCode = ''
+try { [void](ConvertFrom-OpenRouterStructuredContent ([pscustomobject]@{ content = ''; refusal = 'Cannot comply.' })) }
+catch { $RefusalCode = Get-LlmExceptionCode $_.Exception }
+Assert-Equal $RefusalCode 'LLM_RESPONSE_REFUSAL' 'OpenRouter refusal was not classified separately.'
+$EmptyContentCode = ''
+try { [void](ConvertFrom-OpenRouterStructuredContent ([pscustomobject]@{ content = @() })) }
+catch { $EmptyContentCode = Get-LlmExceptionCode $_.Exception }
+Assert-Equal $EmptyContentCode 'LLM_RESPONSE_CONTENT_MISSING' 'Empty OpenRouter content has the wrong error code.'
+$ProseParseCode = ''
+try { [void](ConvertFrom-OpenRouterStructuredContent ([pscustomobject]@{ content = "Answer: $StructuredFixture" })) }
+catch { $ProseParseCode = Get-LlmExceptionCode $_.Exception }
+Assert-Equal $ProseParseCode 'LLM_RESPONSE_PARSE_ERROR' 'Prose plus JSON was repaired unsafely.'
+$MalformedDiagnostics = ''
+$MalformedCode = ''
+try { [void](ConvertFrom-OpenRouterStructuredContent ([pscustomobject]@{ content = 'private-donation-text {broken'; refusal = $null }) -Model 'test-model' -FinishReason 'stop') }
+catch {
+    $MalformedCode = Get-LlmExceptionCode $_.Exception
+    $MalformedDiagnostics = [string]$_.Exception.Data['LlmSafeDiagnostics']
+}
+Assert-Equal $MalformedCode 'LLM_RESPONSE_PARSE_ERROR' 'Malformed JSON has the wrong error code.'
+Assert-False $MalformedDiagnostics.Contains('private-donation-text') 'Safe OpenRouter diagnostics contain raw model content.'
+Assert-True ($MalformedDiagnostics -match 'contentFingerprint=[0-9a-f]{16}') 'Safe diagnostics do not contain a bounded content fingerprint.'
+foreach ($InvalidTopLevel in @('42', '[]')) {
+    $TopLevelCode = ''
+    try { [void](ConvertFrom-OpenRouterStructuredContent ([pscustomobject]@{ content = $InvalidTopLevel })) }
+    catch { $TopLevelCode = Get-LlmExceptionCode $_.Exception }
+    Assert-Equal $TopLevelCode 'LLM_SCHEMA_VALIDATION_ERROR' 'Scalar/array structured response was not rejected as a schema error.'
+}
+
+$SchemaB = Get-OpenRouterIntentProviderSchema @()
+Assert-False ($null -ne $SchemaB.properties.entryId) 'Empty-entry provider schema still contains entryId.'
+Assert-False ($null -ne $SchemaB.properties.existingSelectionConfidence) 'Empty-entry provider schema still contains existingSelectionConfidence.'
+Assert-False (@($SchemaB.properties.decision.enum) -contains 'select_existing') 'Empty-entry provider schema permits select_existing.'
+$SchemaBResolved = Resolve-LlmIntentDecision ($StructuredFixture | ConvertFrom-Json) @()
+Assert-Equal $SchemaBResolved.entryId '' 'Schema B was not normalized to the internal entryId contract.'
+Assert-Equal $SchemaBResolved.existingSelectionConfidence ([double]0) 'Schema B was not normalized to internal existing confidence.'
+$SchemaEntry = [pscustomobject]@{ id = 'entry-1'; name = 'Bully'; category = 'game'; source = 'steam'; externalId = '12200'; eliminated = $false }
+$SchemaA = Get-OpenRouterIntentProviderSchema @($SchemaEntry)
+Assert-True (@($SchemaA.properties.entryId.enum) -contains '__none__') 'Active-entry provider schema does not use the non-empty sentinel.'
+Assert-False (@($SchemaA.properties.entryId.enum) -contains '') 'Active-entry provider schema uses an empty provider enum sentinel.'
+$SchemaANonSelection = [pscustomobject]@{
+    decision = 'ask_manual'
+    entryId = '__none__'
+    category = 'game'
+    query = 'Bully'
+    intentConfidence = 0.7
+    existingSelectionConfidence = 0
+    reason = 'Требуется ручная проверка.'
+}
+Assert-Equal (Resolve-LlmIntentDecision $SchemaANonSelection @($SchemaEntry)).entryId '' 'Schema A sentinel was not normalized to the internal contract.'
+
 $IntentFunctionStart = $ServerSource.IndexOf('function Invoke-OpenRouterIntentAnalysis')
 $IntentFunctionEnd = $ServerSource.IndexOf('function Invoke-OpenRouterCandidateSelection', $IntentFunctionStart)
 $IntentFunctionSource = $ServerSource.Substring($IntentFunctionStart, $IntentFunctionEnd - $IntentFunctionStart)
@@ -257,6 +360,7 @@ $OpenRouterRequestSource = $ServerSource.Substring($OpenRouterRequestStart, $Ope
 Assert-True ($OpenRouterRequestSource.Contains('ConvertTo-Utf8JsonBytes $Payload 30')) 'OpenRouter request is not explicitly serialized to UTF-8 bytes.'
 Assert-True ($OpenRouterRequestSource.Contains('[System.Net.Http.ByteArrayContent]::new($RequestBytes)')) 'OpenRouter request does not send UTF-8 byte content.'
 Assert-True ($OpenRouterRequestSource.Contains('ReadAsByteArrayAsync()')) 'OpenRouter response is not read as bytes.'
+Assert-True ($OpenRouterRequestSource.Contains('[System.Net.Http.HttpCompletionOption]::ResponseContentRead')) 'OpenRouter response body is not covered by the request timeout.'
 Assert-True ($OpenRouterRequestSource.Contains('ConvertFrom-Utf8JsonBytes $ResponseBytes')) 'OpenRouter response bypasses strict UTF-8 decoding.'
 Assert-False ($OpenRouterRequestSource.Contains('Invoke-RestMethod')) 'OpenRouter request still relies on implicit PowerShell string-body encoding.'
 
@@ -297,6 +401,9 @@ Assert-False (Test-RequestContentLengthAllowed 1025 1024) 'Oversized request bod
 $MaskedProxy = Mask-SecretText 'proxy=http://alice:super-secret@127.0.0.1:7890'
 Assert-False ($MaskedProxy.Contains('super-secret')) 'Proxy password was not masked.'
 Assert-True ($MaskedProxy.Contains('alice:***@')) 'Proxy userinfo masking removed the safe username or marker.'
+Assert-True ((Mask-SecretText 'code LLM_RESPONSE_PARSE_ERROR') -eq 'code LLM_RESPONSE_PARSE_ERROR') 'Safe diagnostic error code was masked.'
+Assert-False ((Mask-SecretText 'https://callback.test/?code=super-secret').Contains('super-secret')) 'OAuth query code was not masked.'
+Assert-False ((Mask-SecretText 'authorizationCode=super-secret').Contains('super-secret')) 'Authorization code field was not masked.'
 Assert-True ($ServerSource.Contains('Cache-Control: no-store, max-age=0')) 'Sensitive local responses may still be cached.'
 Assert-True ($ServerSource.Contains('X-Content-Type-Options: nosniff')) 'nosniff is missing from local responses.'
 Assert-True ($ServerSource.Contains('$Stream.ReadTimeout = $script:ClientIoTimeoutMs')) 'Local HTTP clients can hold the single request loop open indefinitely.'
@@ -670,7 +777,8 @@ $UnavailableSteamSearcher = {
 $BullyPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на булли... МЯУ!' @($BullyEntry)) $StrictUtf8IntentAnalyzer $UnavailableSteamSearcher
 Assert-Equal $BullyPipeline.result.action 'assign_existing' 'Existing Bully was not assigned by the first LLM stage.'
 Assert-Equal $BullyPipeline.result.entryId 'bully-entry' 'First LLM stage selected the wrong existing entry.'
-Assert-Equal $BullyPipeline.result.matchedBy 'llm_existing_entry' 'Existing-entry selection lost its match type.'
+Assert-Equal $BullyPipeline.result.matchedBy 'llm_existing_entry_exact_title' 'Existing-entry selection lost its safe match evidence.'
+Assert-Equal $BullyPipeline.result.existingMatchKind 'exact_title' 'Existing-entry selection lacks exact-title evidence.'
 Assert-Equal $script:SteamSearchCalls 0 'Existing Bully selection performed a Steam request.'
 Assert-Equal $BullyPipeline.result.finalConfidence ([double]0.96) 'Existing-entry final confidence is not min(intent, selection).'
 Assert-Equal $BullyPipeline.result.entryFingerprint.normalizedName 'bully' 'Existing-entry selection did not retain a validation fingerprint.'
@@ -694,25 +802,28 @@ $FnafFourPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на фн
 Assert-Equal $FnafFourPipeline.result.entryId 'fnaf-4' 'Explicit FNAF part selected the wrong existing entry.'
 $FnafAmbiguousIntent = {
     param($Donation, $Settings, $Normalized, $Entries)
-    Resolve-LlmIntentDecision (New-TestIntentResult 'ask_manual' '' 'game' 'Five Nights at Freddy''s' 0.95 0 'Не указана конкретная часть серии.') $Entries
+    Resolve-LlmIntentDecision (New-TestIntentResult 'ask_manual' '__none__' 'game' 'Five Nights at Freddy''s' 0.95 0 'Не указана конкретная часть серии.') $Entries
 }
 $FnafAmbiguousPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на фнафыч' @($Fnaf4, $Fnaf2)) $FnafAmbiguousIntent $UnavailableSteamSearcher
 Assert-Equal $FnafAmbiguousPipeline.result.action 'ask_manual' 'Ambiguous franchise was assigned to a random existing entry.'
 
 $InventedSelection = Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'invented-id' 'game' 'Bully' 0.99 0.99 'Выбран существующий лот.') @($BullyEntry)
-Assert-Equal $InventedSelection.decision 'ask_manual' 'Invented entryId passed server validation.'
+Assert-Equal $InventedSelection.decision 'search_catalog' 'Invented entryId did not fall back to safe catalog search.'
 $EliminatedBully = New-TestEntry 'gone-bully' 'Bully' $true 'steam' '12200' 'game'
 $EliminatedSelection = Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'gone-bully' 'game' 'Bully' 0.99 0.99 'Выбран существующий лот.') @($EliminatedBully)
-Assert-Equal $EliminatedSelection.decision 'ask_manual' 'Eliminated entryId passed server validation.'
+Assert-Equal $EliminatedSelection.decision 'search_catalog' 'Eliminated entryId did not fall back to safe catalog search.'
 $WrongCategorySelection = Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'bully-entry' 'anime' 'Bully' 0.99 0.99 'Выбран существующий лот.') @($BullyEntry)
-Assert-Equal $WrongCategorySelection.decision 'ask_manual' 'Category-incompatible existing entry passed server validation.'
+Assert-Equal $WrongCategorySelection.decision 'search_catalog' 'Category-incompatible existing entry did not fall back to safe catalog search.'
 $LowConfidenceSelection = Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'bully-entry' 'game' 'Bully' 0.99 0.89 'Выбран существующий лот.') @($BullyEntry)
-Assert-Equal $LowConfidenceSelection.decision 'ask_manual' 'Low-confidence existing selection was accepted.'
+Assert-Equal $LowConfidenceSelection.decision 'search_catalog' 'Low-confidence existing selection did not fall back to safe catalog search.'
 
 $script:SteamSearchCalls = 0
 $CatalogIntent = {
     param($Donation, $Settings, $Normalized, $Entries)
-    Resolve-LlmIntentDecision (New-TestIntentResult 'search_catalog' '' 'game' 'Bully' 0.96 0 'Распознана игра Bully.') $Entries
+    $MockMessage = [pscustomobject]@{
+        content = '{"decision":"search_catalog","category":"game","query":"The Outlast Trials","intentConfidence":0.96,"reason":"Распознана игра The Outlast Trials."}'
+    }
+    Resolve-LlmIntentDecision (ConvertFrom-OpenRouterStructuredContent $MockMessage) $Entries
 }
 $RegionLimitedSteamSearcher = {
     param($Query, $JobId, $Generation)
@@ -720,9 +831,9 @@ $RegionLimitedSteamSearcher = {
     return [pscustomobject]@{
         candidateId = 'steam:12200'
         source = 'steam'
-        externalId = '12200'
-        title = 'Bully'
-        sourceUrl = 'https://store.steampowered.com/app/12200'
+        externalId = '1304930'
+        title = 'The Outlast Trials'
+        sourceUrl = 'https://store.steampowered.com/app/1304930'
         imageUrl = ''
         sourceMode = 'store_search'
         availability = 'region_unavailable'
@@ -730,19 +841,99 @@ $RegionLimitedSteamSearcher = {
         score = 0.98
     }
 }
-$CatalogPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на булли' @()) $CatalogIntent $RegionLimitedSteamSearcher
+
+$SemanticGuardSteamSearcher = {
+    param($Query, $JobId, $Generation)
+    $script:SteamSearchCalls++
+    return [pscustomobject]@{
+        candidateId = 'steam:1304930'
+        source = 'steam'
+        externalId = '1304930'
+        title = 'The Outlast Trials'
+        sourceUrl = 'https://store.steampowered.com/app/1304930'
+        imageUrl = ''
+        score = 0.99
+    }
+}
+$OpaqueEntry = New-TestEntry 'opaque-entry' '1' $false '' '' 'game'
+$OpaqueEntry | Add-Member -NotePropertyName price -NotePropertyValue 0 -Force
+$OpaqueOutlastIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'opaque-entry' 'game' 'The Outlast Trials' 0.99 0.99 'Выбран существующий лот.') $Entries
+}
+$script:SteamSearchCalls = 0
+$OpaqueOutlastPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials, смешной микровидос: https://example.test/video' @($OpaqueEntry)) $OpaqueOutlastIntent $SemanticGuardSteamSearcher
+Assert-False ($OpaqueOutlastPipeline.result.action -eq 'assign_existing') 'Opaque entry name received an AI assignment.'
+Assert-Equal $script:SteamSearchCalls 1 'Semantic mismatch with a meaningful query did not continue to Steam search.'
+Assert-Equal $OpaqueEntry.price 0 'Rejected AI selection changed the opaque lot price.'
+
+$OpaqueQueryIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'opaque-entry' 'game' '1' 0.99 0.99 'Выбран существующий лот.') $Entries
+}
+$script:SteamSearchCalls = 0
+$OpaqueQueryPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials' @($OpaqueEntry)) $OpaqueQueryIntent $SemanticGuardSteamSearcher
+Assert-Equal $OpaqueQueryPipeline.result.action 'ask_manual' 'Low-information model query did not fall back to manual review.'
+Assert-Equal $script:SteamSearchCalls 0 'Low-information query was sent to Steam.'
+
+$BullyMismatchIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'bully-entry' 'game' 'The Outlast Trials' 0.99 0.99 'Выбран существующий лот.') $Entries
+}
+$script:SteamSearchCalls = 0
+$BullyMismatchPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials' @($BullyEntry)) $BullyMismatchIntent $SemanticGuardSteamSearcher
+Assert-False ($BullyMismatchPipeline.result.action -eq 'assign_existing') 'Bully received a donation intended for The Outlast Trials.'
+Assert-Equal $script:SteamSearchCalls 1 'Informative mismatched title did not fall back to catalog search.'
+
+$ExactOutlastIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'outlast-entry' 'game' 'The Outlast Trials' 0.99 0.99 'Название совпадает точно.') $Entries
+}
+$script:SteamSearchCalls = 0
+$ExactOutlastPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials' @($OutlastEntry)) $ExactOutlastIntent $UnavailableSteamSearcher
+Assert-Equal $ExactOutlastPipeline.result.action 'assign_existing' 'Exact Outlast title was rejected by the semantic guard.'
+Assert-Equal $ExactOutlastPipeline.result.existingMatchKind 'exact_title' 'Exact Outlast title lacks safe evidence.'
+Assert-Equal $script:SteamSearchCalls 0 'Exact local title unnecessarily called Steam.'
+
+$OutlastWithoutArticle = New-TestEntry 'outlast-no-article' 'Outlast Trials' $false 'steam' '1304930' 'game'
+$ArticleIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'outlast-no-article' 'game' 'The Outlast Trials' 0.99 0.99 'Различается только артикль.') $Entries
+}
+$ArticlePipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials' @($OutlastWithoutArticle)) $ArticleIntent $UnavailableSteamSearcher
+Assert-Equal $ArticlePipeline.result.action 'assign_existing' 'Safe English article normalization was rejected.'
+
+$FnafVariantMismatchIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'fnaf-2' 'game' "Five Nights at Freddy's 4" 0.99 0.99 'Выбрана часть серии.') $Entries
+}
+$script:SteamSearchCalls = 0
+$FnafVariantPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на фнафыч 4' @($Fnaf2)) $FnafVariantMismatchIntent $SemanticGuardSteamSearcher
+Assert-False ($FnafVariantPipeline.result.action -eq 'assign_existing') 'FNAF 4 was assigned to FNAF 2.'
+Assert-Equal $script:SteamSearchCalls 1 'Variant conflict did not continue to safe catalog handling.'
+
+foreach ($OpaqueName in @('1', '???', 'test', 'лот')) {
+    $OpaqueEvidence = Get-LlmExistingSelectionEvidence 'The Outlast Trials' (New-TestEntry "opaque-$OpaqueName" $OpaqueName $false '' '' 'game')
+    Assert-False $OpaqueEvidence.safe "Placeholder/opaque title '$OpaqueName' was accepted for AI assignment."
+}
+$ExternalEvidenceEntry = New-TestEntry 'external-evidence' 'Bully Scholarship Edition' $false 'steam' '12200' 'game'
+$ExternalEvidence = Get-LlmExistingSelectionEvidence 'Bully' $ExternalEvidenceEntry 'steam' '12200'
+Assert-True $ExternalEvidence.safe 'Locally proven external identity was rejected.'
+Assert-Equal $ExternalEvidence.matchKind 'exact_external_identity' 'External identity evidence has the wrong match kind.'
+$script:SteamSearchCalls = 0
+$CatalogPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials, смешной микровидос: https://example.test/video' @()) $CatalogIntent $RegionLimitedSteamSearcher
 Assert-Equal $CatalogPipeline.result.action 'create_lot_candidate' 'Metadata-limited Steam identity was discarded.'
 Assert-Equal $CatalogPipeline.result.category 'game' 'Region-limited Steam candidate changed the recognized category.'
-Assert-Equal $CatalogPipeline.result.query 'Bully' 'Region-limited Steam candidate changed the canonical query.'
-Assert-Equal $CatalogPipeline.result.candidate.externalId '12200' 'Region-limited Steam candidate identity was replaced.'
+Assert-Equal $CatalogPipeline.result.query 'The Outlast Trials' 'Region-limited Steam candidate changed the canonical query.'
+Assert-Equal $CatalogPipeline.result.candidate.externalId '1304930' 'Region-limited Steam candidate identity was replaced.'
 Assert-True $CatalogPipeline.result.candidate.metadataIncomplete 'Region-limited Steam candidate lost its metadata marker.'
 Assert-Equal $script:SteamSearchCalls 1 'Catalog search did not perform exactly one Steam lookup.'
 
 $script:SteamSearchCalls = 0
-$CatalogUnavailablePipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на булли' @()) $CatalogIntent $UnavailableSteamSearcher
+$CatalogUnavailablePipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials' @()) $CatalogIntent $UnavailableSteamSearcher
 Assert-Equal $CatalogUnavailablePipeline.result.action 'ask_manual' 'Unavailable Steam search did not fall back to manual selection.'
 Assert-Equal $CatalogUnavailablePipeline.result.category 'game' 'Unavailable Steam search changed a recognized game to unknown.'
-Assert-Equal $CatalogUnavailablePipeline.result.query 'Bully' 'Unavailable Steam search lost the canonical query.'
+Assert-Equal $CatalogUnavailablePipeline.result.query 'The Outlast Trials' 'Unavailable Steam search lost the canonical query.'
 Assert-Equal $script:SteamSearchCalls 1 'Unavailable catalog transport call count is incorrect.'
 
 $RecognizedManualIntent = {
@@ -758,8 +949,8 @@ $IdentityInput = [pscustomobject]@{
     entries = @($BullyEntry)
 }
 $IdentityKey = Get-LlmAnalysisKey $IdentityInput
-Assert-True $IdentityKey.StartsWith('v3:donatepay:identity-1:') 'Current analysis key does not include pipeline version.'
-Assert-Equal $IdentityKey 'v3:donatepay:identity-1:5fd03456' 'Server analysisKey no longer matches the frontend UTF-16 fingerprint contract.'
+Assert-True $IdentityKey.StartsWith('v4:donatepay:identity-1:') 'Current analysis key does not include pipeline version.'
+Assert-Equal $IdentityKey 'v4:donatepay:identity-1:c1033163' 'Server analysisKey no longer matches the frontend UTF-16 fingerprint contract.'
 $ChangedMessageInput = [pscustomobject]@{
     donation = [pscustomobject]@{ source = 'donatepay'; externalId = 'identity-1'; message = 'на другую игру' }
     entries = @($BullyEntry)
@@ -772,7 +963,7 @@ $ChangedEntriesInput = [pscustomobject]@{
 Assert-False ((Get-LlmAnalysisKey $ChangedEntriesInput) -eq $IdentityKey) 'Changing active entries did not invalidate analysisKey.'
 $OriginalPipelineVersion = $script:LlmPipelineVersion
 try {
-    $script:LlmPipelineVersion = 4
+    $script:LlmPipelineVersion = 5
     Assert-False ((Get-LlmAnalysisKey $IdentityInput) -eq $IdentityKey) 'Changing pipelineVersion did not invalidate analysisKey.'
 }
 finally {
@@ -834,6 +1025,67 @@ Assert-True ($script:ServerState.Integrations.DonationAlerts.LastSeenId -eq 100L
 Assert-True $script:ServerState.Integrations.DonationAlerts.BaselineReady 'DonationAlerts baseline did not survive restart simulation.'
 Assert-True ($script:ServerState.Integrations.DonationAlerts.Signature -eq 'da') 'DonationAlerts collector signature did not survive restart simulation.'
 
+$script:CapturedAppLogs = [System.Collections.ArrayList]::new()
+function Write-AppLog {
+    param([string]$Level = 'INFO', [string]$Message = '')
+    [void]$script:CapturedAppLogs.Add("$Level|$Message")
+}
+$TransientDaFailure = [pscustomobject]@{
+    ok = $false
+    upstreamStatus = $null
+    failureType = 'System.Net.WebException,System.IO.IOException'
+    webExceptionStatus = 'ReceiveFailure'
+    exceptionMessage = 'Unable to read data from the transport connection: connection reset.'
+    error = 'DonationAlerts request failed.'
+}
+$DaState = $script:ServerState.Integrations.DonationAlerts
+$DaAccessTokenBeforeFailure = [string]$DaState.AccessToken
+$DaSignatureBeforeFailure = [string]$DaState.Signature
+Assert-False (Apply-DonationAlertsCollectorResult $TransientDaFailure 'da' 2L) 'Transient DonationAlerts transport failure was accepted as a poll success.'
+Assert-True $DaState.BaselineReady 'Transient DonationAlerts failure reset the baseline.'
+Assert-Equal $DaState.LastSeenId 100L 'Transient DonationAlerts failure changed the cursor.'
+Assert-Equal $DaState.AccessToken $DaAccessTokenBeforeFailure 'Transient DonationAlerts failure changed the token.'
+Assert-Equal $DaState.Signature $DaSignatureBeforeFailure 'Transient DonationAlerts failure changed the identity signature.'
+Assert-Equal $DaState.Status 'degraded' 'Transient DonationAlerts failure was classified as terminal.'
+Assert-Equal $DaState.ConsecutiveFailures 1 'DonationAlerts failure counter did not increment.'
+Assert-Equal (Get-DonationAlertsBackoffSeconds $DaState.ConsecutiveFailures) 10 'First DonationAlerts backoff is incorrect.'
+Assert-True (-not [string]::IsNullOrWhiteSpace([string]$DaState.NextPollAt)) 'DonationAlerts transient failure has no next poll time.'
+Assert-True (@($script:CapturedAppLogs | Where-Object { $_ -like 'WARN|*temporary transport failure*' }).Count -eq 1) 'First DonationAlerts transient failure did not produce one WARN.'
+
+$DaSuccessRows = [pscustomobject]@{ data = @([pscustomobject]@{
+    id = 101
+    amount = 100
+    currency = 'RUB'
+    username = 'test-user'
+    message = 'test donation'
+    created_at = [DateTimeOffset]::UtcNow.ToString('o')
+}) }
+Assert-True (Apply-DonationAlertsCollectorResult $DaSuccessRows 'da' 2L) 'DonationAlerts did not recover on the next successful poll.'
+Assert-Equal $DaState.LastSeenId 101L 'DonationAlerts did not advance to safely accepted ID 101.'
+Assert-Equal $DaState.ConsecutiveFailures 0 'DonationAlerts failure counter did not reset after recovery.'
+Assert-False $DaState.Degraded 'DonationAlerts remained degraded after recovery.'
+Assert-True (-not [string]::IsNullOrWhiteSpace([string]$DaState.LastSuccessAt)) 'DonationAlerts recovery did not record lastSuccessAt.'
+Assert-True (@($script:CapturedAppLogs | Where-Object { $_ -like 'INFO|*connection recovered after 1 failure*' }).Count -eq 1) 'DonationAlerts recovery was not logged exactly once.'
+$Pending101BeforeRepeat = @($script:ServerState.DonationsPending | Where-Object { [string]$_.source -eq 'donationalerts' -and [string]$_.externalId -eq '101' }).Count
+Assert-True (Apply-DonationAlertsCollectorResult $DaSuccessRows 'da' 2L) 'Repeated DonationAlerts poll failed.'
+$Pending101AfterRepeat = @($script:ServerState.DonationsPending | Where-Object { [string]$_.source -eq 'donationalerts' -and [string]$_.externalId -eq '101' }).Count
+Assert-Equal $Pending101AfterRepeat $Pending101BeforeRepeat 'DonationAlerts ID 101 was queued more than once.'
+
+foreach ($Attempt in 1..3) { [void](Apply-DonationAlertsCollectorResult $TransientDaFailure 'da' 2L) }
+Assert-Equal $DaState.ConsecutiveFailures 3 'Consecutive DonationAlerts failures were not counted.'
+Assert-Equal (Get-DonationAlertsBackoffSeconds $DaState.ConsecutiveFailures) 60 'DonationAlerts bounded backoff did not reach 60 seconds.'
+Assert-True $DaState.Degraded 'DonationAlerts did not remain degraded after repeated transient failures.'
+Assert-True $DaState.FailureEscalated 'Three DonationAlerts failures did not escalate once.'
+Assert-True (@($script:CapturedAppLogs | Where-Object { $_ -like 'ERROR|*connection remains unavailable*' }).Count -eq 1) 'Repeated DonationAlerts outage did not produce exactly one escalation log.'
+
+$AuthDaFailure = [pscustomobject]@{ ok = $false; upstreamStatus = 401; failureType = ''; webExceptionStatus = ''; exceptionMessage = 'unauthorized'; error = 'Unauthorized' }
+[void](Apply-DonationAlertsCollectorResult $AuthDaFailure 'da' 2L)
+Assert-Equal $DaState.Status 'auth_error' 'DonationAlerts 401 was not classified as an auth failure.'
+Assert-False $DaState.Degraded 'DonationAlerts auth failure was marked transient.'
+Assert-True (@($script:CapturedAppLogs | Where-Object { $_ -match 'test-runtime-secret' }).Count -eq 0) 'DonationAlerts failure logs contain the access token.'
+Reset-DonationAlertsFailureState $DaState
+$DaState.Status = 'connected'
+
 Assert-True ([string]::IsNullOrWhiteSpace((Get-AppResetEpoch))) 'Reset epoch should be empty before the first full reset marker.'
 $FirstResetEpoch = Set-NewAppResetEpoch
 Assert-True (-not [string]::IsNullOrWhiteSpace($FirstResetEpoch)) 'Full reset marker was not created.'
@@ -845,14 +1097,14 @@ Assert-True ((Get-AppResetEpoch) -eq $SecondResetEpoch) 'Full reset marker was n
 $PauseResult = Pause-CollectorRuntimePreserveCursor
 Assert-True $PauseResult.pausedPreserveCursor 'Collector preserve-cursor pause did not activate.'
 Assert-False $script:CollectorEnabled 'Collector continued polling while preserve-cursor pause was active.'
-Assert-True ($script:ServerState.Integrations.DonationAlerts.LastSeenId -eq 100L) 'Pause reset DonationAlerts LastSeenId.'
+Assert-True ($script:ServerState.Integrations.DonationAlerts.LastSeenId -eq 101L) 'Pause reset DonationAlerts LastSeenId.'
 Assert-True $script:ServerState.Integrations.DonationAlerts.BaselineReady 'Pause reset DonationAlerts baseline.'
 $ResumeResult = Resume-CollectorRuntimePreserveCursor
 Assert-False $ResumeResult.pausedPreserveCursor 'Collector preserve-cursor resume did not clear pause state.'
 Assert-True $script:CollectorEnabled 'Collector did not resume polling.'
-Assert-True ($script:ServerState.Integrations.DonationAlerts.LastSeenId -eq 100L) 'Resume changed DonationAlerts LastSeenId.'
+Assert-True ($script:ServerState.Integrations.DonationAlerts.LastSeenId -eq 101L) 'Resume changed DonationAlerts LastSeenId.'
 Assert-True $script:ServerState.Integrations.DonationAlerts.BaselineReady 'Resume forced a new DonationAlerts baseline.'
-Assert-True (101L -gt (Get-LastSeenIdValue $script:ServerState.Integrations.DonationAlerts)) 'DonationAlerts ID 101 was not considered newer than preserved cursor 100.'
+Assert-True (102L -gt (Get-LastSeenIdValue $script:ServerState.Integrations.DonationAlerts)) 'DonationAlerts ID 102 was not considered newer than preserved cursor 101.'
 $DaIdentity = Get-CollectorIdentitySignature 'donationalerts' 'token-a' '' '100'
 Assert-True ($DaIdentity -eq (Get-CollectorIdentitySignature 'donationalerts' 'token-a' '' '100')) 'DonationAlerts identity signature is unstable across pause/resume.'
 Assert-False ($DaIdentity -eq (Get-CollectorIdentitySignature 'donationalerts' 'token-b' '' '100')) 'DonationAlerts token replacement did not change collector identity.'
@@ -942,10 +1194,28 @@ try {
     $CurrentPipelineJob = Add-OrGet-LlmJob $CurrentPipelineInput
     Assert-True $CurrentPipelineJob.ok 'Current pipeline could not replace a legacy analysis.'
     Assert-False $CurrentPipelineJob.existing 'Legacy pipeline result was reused as a current job.'
-    Assert-True $CurrentPipelineJob.analysisKey.StartsWith('v3:') 'Replacement job did not use the current pipeline key.'
+    Assert-True $CurrentPipelineJob.analysisKey.StartsWith('v4:') 'Replacement job did not use the current pipeline key.'
     $JobsAfterLegacyReplacement = @((Read-LlmJobsStoreUnsafe).jobs)
     Assert-True ($JobsAfterLegacyReplacement.Count -eq 2) 'Legacy job was not preserved safely alongside the replacement job.'
-    Assert-True (@($JobsAfterLegacyReplacement | Where-Object { [int]$_.pipelineVersion -eq 3 }).Count -eq 1) 'Current pipeline replacement job was not persisted.'
+    Assert-True (@($JobsAfterLegacyReplacement | Where-Object { [int]$_.pipelineVersion -eq 4 }).Count -eq 1) 'Current pipeline replacement job was not persisted.'
+
+    $LegacyQueueStore = New-EmptyLlmJobsStore
+    $LegacyQueueStore.auctionGeneration = 2
+    $LegacyQueueStore.jobs = @([pscustomobject]@{
+        jobId = 'legacy-v3-queued'
+        analysisKey = 'v3:donatepay:legacy-queued:old'
+        pipelineVersion = 3
+        generation = 2
+        status = 'queued'
+        stage = 'waiting'
+        revision = 1
+        updatedAt = [DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('o')
+        finishedAt = ''
+    })
+    Assert-True (Write-LlmJobsStoreUnsafe $LegacyQueueStore) 'Legacy v3 queue setup failed.'
+    Repair-InterruptedLlmJobs
+    $LegacyQueuedAfterRepair = @((Read-LlmJobsStoreUnsafe).jobs)[0]
+    Assert-Equal $LegacyQueuedAfterRepair.status 'cancelled' 'Legacy v3 queued job was reused by pipeline v4.'
 
     $ResetJobStore = New-EmptyLlmJobsStore
     $ResetJobStore.auctionGeneration = 2
@@ -984,6 +1254,7 @@ try {
     Assert-True ($null -eq $script:ServerState.Integrations.DonationAlerts.LastSeenId) 'Full collector stop did not reset DonationAlerts cursor.'
     Assert-False $script:ServerState.Integrations.DonationAlerts.BaselineReady 'Full collector stop did not reset DonationAlerts baseline.'
     Assert-True ($null -eq $script:ServerState.Integrations.DonatePay.LastSeenId) 'Full collector stop did not reset DonatePay cursor.'
+    Assert-Equal $script:ServerState.Integrations.DonationAlerts.ConsecutiveFailures 0 'Full collector stop did not reset DonationAlerts failure state.'
 }
 finally {
     if ([System.IO.Directory]::Exists($TestRoot)) {
