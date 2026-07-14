@@ -1,11 +1,12 @@
-*.log
+.agents/
+.codex/
+.git/
+.papich_git/
+.ssh_codex/
+dist/
+server.log
+assets/server.log
 *.tmp
 *.bak
-*.zip
-*.7z
-*.rar
-.DS_Store
-.vscode/
-.idea/
-node_modules/
-dist/
+API donationalerts.html
+API dotatepay.md

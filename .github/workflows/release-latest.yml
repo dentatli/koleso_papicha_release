@@ -21,6 +21,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Run frontend logic tests
+        shell: pwsh
+        run: |
+          node tests/ai_frontend_logic_tests.js
+          if ($LASTEXITCODE -ne 0) {
+            throw "Frontend logic tests failed."
+          }
+
+      - name: Run PowerShell logic tests
+        shell: powershell
+        run: |
+          .\tests\ai_logic_tests.ps1
+
+      - name: Run local server API contract tests
+        shell: powershell
+        run: |
+          .\tests\runtime_api_tests.ps1
+
       - name: Build setup BAT
         shell: pwsh
         run: |
@@ -60,15 +78,19 @@ jobs:
 
           Коммит: $env:GITHUB_SHA
 
-          Как запустить:
-            1. Скачайте PapichWheel_Setup.bat
-            2. Положите его в нужную папку и запустите.
+          Как установить:
+            1. Скачайте PapichWheel_Setup.bat.
+            2. Поместите его в отдельную папку и запустите.
             3. После распаковки запустите start_koleso.bat.
-            4. В трее появится иконка активного сервера.
-            
+            4. Работающий сервер отображается значком в системном трее.
+
           Как обновить:
-            1. Скачайте PapichWheel_Setup.bat
-            2. Положите рядом с файлом start_koleso.bat и запустить            
+            1. Закройте PapichWheel через значок в трее.
+            2. Скачайте новый PapichWheel_Setup.bat.
+            3. Поместите его рядом со start_koleso.bat и запустите.
+            4. Снова запустите start_koleso.bat.
+
+          Пользовательские данные и ключи хранятся отдельно и при обновлении не удаляются.
           "@ | Set-Content -LiteralPath "release-notes.md" -Encoding utf8
 
           gh release create latest `
