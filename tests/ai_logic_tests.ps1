@@ -1,4 +1,4 @@
-param()
+﻿param()
 
 $ErrorActionPreference = 'Stop'
 $ServerPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'local_server.ps1'
@@ -29,8 +29,14 @@ $FunctionNames = @(
     'Normalize-LotCategory',
     'Test-LotCategoriesCompatible',
     'Get-TokenSimilarity',
+    'Normalize-LlmText',
+    'Get-SafeEntriesForLlm',
+    'Get-ActiveEntriesForLlmIntent',
     'Find-ExistingEntryMatch',
+    'Get-EntryFingerprint',
     'Find-EliminatedEntryMatch',
+    'ConvertTo-LlmResult',
+    'Resolve-LlmIntentDecision',
     'Search-ExistingEntryByCandidate',
     'Test-EliminatedEntryByCandidate',
     'Get-CandidateComparableTitles',
@@ -41,7 +47,18 @@ $FunctionNames = @(
     'Test-LlmIntentReadyForCatalog',
     'New-LlmCodedException',
     'Throw-LlmError',
+    'ConvertFrom-LlmStructuredJson',
     'ConvertTo-LlmConfidence',
+    'Get-StrictUtf8Encoding',
+    'ConvertTo-Utf8JsonBytes',
+    'ConvertFrom-Utf8JsonBytes',
+    'Get-OpenRouterSafeUpstreamError',
+    'Get-OpenRouterRetryAfterSeconds',
+    'New-OpenRouterHttpException',
+    'Get-LlmExceptionDataValue',
+    'Get-LlmHttpStatusCode',
+    'Get-LlmRetryAfterSeconds',
+    'Get-MaskedText',
     'Get-LlmExceptionCode',
     'Test-LlmTransientNetworkException',
     'Get-LlmFailureClassification',
@@ -87,13 +104,14 @@ $FunctionNames = @(
     'Write-LlmJobsStoreOrThrow',
     'Get-NextLlmRevision',
     'Get-LlmAnalysisKey',
+    'Get-LlmInputFingerprint',
     'New-LlmJobId',
-    'Get-SafeEntriesForLlm',
     'New-LlmJobFromInput',
     'Add-OrGet-LlmJob',
     'Test-LlmGenerationCurrent',
     'Test-LlmJobGenerationCurrent',
     'Complete-LlmJob',
+    'Invoke-LlmDonationPipeline',
     'Clear-LlmSearchCaches',
     'Get-NumericDonationId',
     'Get-LastSeenIdValue',
@@ -141,6 +159,9 @@ function Assert-Equal {
     if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'" }
 }
 
+$script:LlmPipelineVersion = 3
+$script:LlmExistingSelectionThreshold = 0.90
+
 $OriginalTestCulture = [Threading.Thread]::CurrentThread.CurrentCulture
 try {
     [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('ru-RU')
@@ -163,11 +184,62 @@ finally {
 }
 Assert-Equal ([Threading.Thread]::CurrentThread.CurrentCulture.Name) $OriginalTestCulture.Name 'Confidence tests did not restore the original culture.'
 
+$Utf8Fixture = [pscustomobject]@{
+    message = "на булли... МЯУ!`nКавычки: `"тест`"; emoji: 😺; цена: 500 ₽"
+    url = 'https://example.test/путь?q=игра'
+}
+$ExpectedUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+$Utf8RoundTrips = @{}
+$OriginalUtf8Culture = [Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    foreach ($CultureName in @('ru-RU', 'en-US')) {
+        [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($CultureName)
+        $Bytes = ConvertTo-Utf8JsonBytes $Utf8Fixture
+        $DecodedJson = $ExpectedUtf8.GetString($Bytes)
+        $Parsed = ConvertFrom-Utf8JsonBytes $Bytes
+        Assert-Equal $Parsed.message $Utf8Fixture.message "UTF-8 donation message changed under $CultureName."
+        Assert-Equal $Parsed.url $Utf8Fixture.url "UTF-8 URL changed under $CultureName."
+        Assert-Equal ([Convert]::ToBase64String($Bytes)) ([Convert]::ToBase64String($ExpectedUtf8.GetBytes($DecodedJson))) "Request bytes are not strict UTF-8 under $CultureName."
+        $Utf8RoundTrips[$CultureName] = [Convert]::ToBase64String($Bytes)
+    }
+}
+finally {
+    [Threading.Thread]::CurrentThread.CurrentCulture = $OriginalUtf8Culture
+}
+Assert-Equal $Utf8RoundTrips['ru-RU'] $Utf8RoundTrips['en-US'] 'UTF-8 JSON serialization depends on the Windows culture.'
+Assert-Equal ([Threading.Thread]::CurrentThread.CurrentCulture.Name) $OriginalUtf8Culture.Name 'UTF-8 tests did not restore the original culture.'
+
+$ResponseFixture = [pscustomobject]@{ query = 'Bully'; reason = 'Сообщение указывает на игру Bully' }
+$ParsedResponseFixture = ConvertFrom-Utf8JsonBytes (ConvertTo-Utf8JsonBytes $ResponseFixture)
+Assert-Equal $ParsedResponseFixture.reason $ResponseFixture.reason 'Russian OpenRouter reason was corrupted during UTF-8 response parsing.'
+$InvalidUtf8Rejected = $false
+try { [void](ConvertFrom-Utf8JsonBytes ([byte[]](0xC3, 0x28))) }
+catch {
+    $InvalidUtf8Rejected = (Get-LlmExceptionCode $_.Exception) -eq 'LLM_RESPONSE_ENCODING_ERROR'
+}
+Assert-True $InvalidUtf8Rejected 'Invalid UTF-8 response bytes were accepted.'
+$InvalidSurrogateRejected = $false
+try {
+    $InvalidSurrogate = [string][char]0xD800
+    [void](ConvertTo-Utf8JsonBytes ([pscustomobject]@{ message = $InvalidSurrogate }))
+}
+catch {
+    $InvalidSurrogateRejected = (Get-LlmExceptionCode $_.Exception) -eq 'LLM_REQUEST_ENCODING_ERROR'
+}
+Assert-True $InvalidSurrogateRejected 'Invalid UTF-16 surrogate sequence was sent to OpenRouter.'
+
 $IntentFunctionStart = $ServerSource.IndexOf('function Invoke-OpenRouterIntentAnalysis')
 $IntentFunctionEnd = $ServerSource.IndexOf('function Invoke-OpenRouterCandidateSelection', $IntentFunctionStart)
 $IntentFunctionSource = $ServerSource.Substring($IntentFunctionStart, $IntentFunctionEnd - $IntentFunctionStart)
-Assert-True ($IntentFunctionSource.Contains('ConvertTo-LlmConfidence $Result.intentConfidence')) 'Intent analysis does not use the shared confidence validator.'
-Assert-True ($IntentFunctionSource.Contains('$Result.intentConfidence = [double]$Confidence')) 'Intent confidence is not normalized back to double.'
+Assert-True ($IntentFunctionSource.Contains('Resolve-LlmIntentDecision $Result $CurrentEntries')) 'Intent analysis bypasses shared decision and confidence validation.'
+Assert-True ($IntentFunctionSource.Contains('currentEntries = $CurrentEntries')) 'Intent analysis does not send active current entries.'
+$ResolveIntentStart = $ServerSource.IndexOf('function Resolve-LlmIntentDecision')
+$ResolveIntentEnd = $ServerSource.IndexOf('function Read-JsonFileSafe', $ResolveIntentStart)
+$ResolveIntentSource = $ServerSource.Substring($ResolveIntentStart, $ResolveIntentEnd - $ResolveIntentStart)
+Assert-True ($ResolveIntentSource.Contains('ConvertTo-LlmConfidence $Result.intentConfidence')) 'Intent decision does not use the shared confidence validator.'
+Assert-True ($ResolveIntentSource.Contains('$Result.intentConfidence = [double]$IntentConfidence')) 'Intent confidence is not normalized back to double.'
+Assert-True ($ResolveIntentSource.Contains('ConvertTo-LlmConfidence $Result.existingSelectionConfidence')) 'Existing-entry confidence bypasses the shared validator.'
+Assert-True ($ResolveIntentSource.Contains('$Result.existingSelectionConfidence = [double]$ExistingConfidence')) 'Existing-entry confidence is not normalized back to double.'
 $SelectionFunctionStart = $IntentFunctionEnd
 $SelectionFunctionEnd = $ServerSource.IndexOf('function Test-OpenRouterIntegration', $SelectionFunctionStart)
 $SelectionFunctionSource = $ServerSource.Substring($SelectionFunctionStart, $SelectionFunctionEnd - $SelectionFunctionStart)
@@ -177,7 +249,16 @@ $OpenRouterTestStart = $SelectionFunctionEnd
 $OpenRouterTestEnd = $ServerSource.IndexOf('function Assert-LlmJobGenerationCurrent', $OpenRouterTestStart)
 $OpenRouterTestSource = $ServerSource.Substring($OpenRouterTestStart, $OpenRouterTestEnd - $OpenRouterTestStart)
 Assert-True ($OpenRouterTestSource.Contains('intentConfidence 0.5')) 'OpenRouter integration test does not request fractional confidence.'
-Assert-True ($OpenRouterTestSource.Contains('ConvertTo-LlmConfidence $Parsed.intentConfidence')) 'OpenRouter integration test bypasses the shared confidence validator.'
+Assert-True ($OpenRouterTestSource.Contains('Resolve-LlmIntentDecision $Parsed @()')) 'OpenRouter integration test bypasses the production intent validator.'
+
+$OpenRouterRequestStart = $ServerSource.IndexOf('function Invoke-OpenRouterRequest')
+$OpenRouterRequestEnd = $ServerSource.IndexOf('function Invoke-OpenRouterIntentAnalysis', $OpenRouterRequestStart)
+$OpenRouterRequestSource = $ServerSource.Substring($OpenRouterRequestStart, $OpenRouterRequestEnd - $OpenRouterRequestStart)
+Assert-True ($OpenRouterRequestSource.Contains('ConvertTo-Utf8JsonBytes $Payload 30')) 'OpenRouter request is not explicitly serialized to UTF-8 bytes.'
+Assert-True ($OpenRouterRequestSource.Contains('[System.Net.Http.ByteArrayContent]::new($RequestBytes)')) 'OpenRouter request does not send UTF-8 byte content.'
+Assert-True ($OpenRouterRequestSource.Contains('ReadAsByteArrayAsync()')) 'OpenRouter response is not read as bytes.'
+Assert-True ($OpenRouterRequestSource.Contains('ConvertFrom-Utf8JsonBytes $ResponseBytes')) 'OpenRouter response bypasses strict UTF-8 decoding.'
+Assert-False ($OpenRouterRequestSource.Contains('Invoke-RestMethod')) 'OpenRouter request still relies on implicit PowerShell string-body encoding.'
 
 function Write-AppLog {
     param([string]$Level = 'INFO', [string]$Message = '')
@@ -509,9 +590,195 @@ foreach ($Code in @('LLM_RESPONSE_PARSE_ERROR', 'UNKNOWN_CANDIDATE_ID', 'PIPELIN
 }
 $ProgrammingError = Get-LlmFailureClassification ([InvalidOperationException]::new('local bug')) 'local bug' 0 1 0
 Assert-False $ProgrammingError.retry 'Unknown status-free programming errors must not retry.'
+Add-Type -AssemblyName System.Net.Http
+$HttpRateLimitException = New-OpenRouterHttpException 'rate limited' 429 7 'rate_limit'
+$HttpRateLimit = Get-LlmFailureClassification $HttpRateLimitException $HttpRateLimitException.Message (Get-LlmHttpStatusCode $HttpRateLimitException) 1 (Get-LlmRetryAfterSeconds $HttpRateLimitException)
+Assert-True ($HttpRateLimit.retry -and $HttpRateLimit.code -eq 'OPENROUTER_RATE_LIMIT') 'HttpClient 429 lost retry classification.'
+Assert-Equal (Get-LlmRetryAfterSeconds $HttpRateLimitException) 7 'HttpClient Retry-After metadata was lost.'
+$HttpUnprocessableException = New-OpenRouterHttpException 'unprocessable response' 422 0 'unprocessable_entity'
+$HttpUnprocessable = Get-LlmFailureClassification $HttpUnprocessableException $HttpUnprocessableException.Message (Get-LlmHttpStatusCode $HttpUnprocessableException) 1 0
+Assert-False $HttpUnprocessable.retry 'A non-transient HttpClient response without a retryable status was retried.'
+$InvalidModel400 = Get-LlmFailureClassification $null 'OpenRouter model not found' 400 1 0
+Assert-Equal $InvalidModel400.code 'OPENROUTER_INVALID_MODEL' 'HTTP 400 invalid-model response lost its specific classification.'
+Assert-False $InvalidModel400.retry 'Invalid OpenRouter model must not retry.'
+$Schema400 = Get-LlmFailureClassification $null 'Provider rejected JSON Schema structured output' 400 1 0
+Assert-Equal $Schema400.code 'LLM_SCHEMA_VALIDATION_ERROR' 'HTTP 400 schema response lost its specific classification.'
+Assert-False $Schema400.retry 'Invalid JSON Schema must not retry.'
+$EncodingFailure = New-LlmCodedException 'LLM_RESPONSE_ENCODING_ERROR' 'invalid UTF-8'
+Assert-False (Get-LlmFailureClassification $EncodingFailure $EncodingFailure.Message 0 1 0).retry 'Invalid UTF-8 response must be terminal.'
 
 function Write-AppLog { param([string]$Level, [string]$Message) }
-function Limit-LogText { param([AllowNull()][string]$Text, [int]$MaxLength = 500); $Value = [string]$Text; if ($Value.Length -le $MaxLength) { return $Value }; return $Value.Substring(0, $MaxLength) }
+
+function New-TestIntentResult {
+    param(
+        [string]$Decision,
+        [string]$EntryId = '',
+        [string]$Category = 'unknown',
+        [string]$Query = '',
+        [double]$IntentConfidence = 0.95,
+        [double]$ExistingSelectionConfidence = 0,
+        [string]$Reason = 'Результат определён безопасно.'
+    )
+    return [pscustomobject]@{
+        decision = $Decision
+        entryId = $EntryId
+        category = $Category
+        query = $Query
+        intentConfidence = $IntentConfidence
+        existingSelectionConfidence = $ExistingSelectionConfidence
+        reason = $Reason
+    }
+}
+
+function New-TestPipelineInput {
+    param([string]$Message, [object[]]$Entries = @())
+    return [pscustomobject]@{
+        donation = [pscustomobject]@{
+            id = 'test-donation'
+            source = 'manual_test'
+            externalId = 'test-donation'
+            username = 'viewer'
+            amount = 100
+            currency = 'RUB'
+            message = $Message
+        }
+        entries = @($Entries)
+        settings = [pscustomobject]@{ allowSteam = $true; allowAnime = $true }
+    }
+}
+
+$BullyEntry = New-TestEntry 'bully-entry' 'Bully' $false 'steam' '12200' 'game'
+$IntentEntrySnapshot = @(Get-ActiveEntriesForLlmIntent @($BullyEntry, (New-TestEntry 'gone-intent' 'Gone' $true 'steam' '9' 'game')))
+Assert-Equal $IntentEntrySnapshot.Count 1 'Eliminated entry was sent to first-stage LLM.'
+Assert-False ($null -ne $IntentEntrySnapshot[0].PSObject.Properties['sourceUrl']) 'First-stage LLM received unnecessary sourceUrl metadata.'
+Assert-True ($null -ne $IntentEntrySnapshot[0].PSObject.Properties['externalId']) 'First-stage LLM did not receive the bounded external identity.'
+$script:SteamSearchCalls = 0
+$StrictUtf8IntentAnalyzer = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    $RequestBytes = ConvertTo-Utf8JsonBytes ([pscustomobject]@{ message = [string]$Donation.message; normalizedMessage = $Normalized })
+    $DecodedRequest = ConvertFrom-Utf8JsonBytes $RequestBytes
+    Assert-Equal $DecodedRequest.message 'на булли... МЯУ!' 'Mock OpenRouter transport received corrupted Cyrillic request bytes.'
+    $MockResponse = New-TestIntentResult 'select_existing' 'bully-entry' 'game' 'Bully' 0.97 0.96 'Сообщение однозначно указывает на игру Bully.'
+    $ResponseBytes = ConvertTo-Utf8JsonBytes $MockResponse
+    return Resolve-LlmIntentDecision (ConvertFrom-Utf8JsonBytes $ResponseBytes) $Entries
+}
+$UnavailableSteamSearcher = {
+    param($Query, $JobId, $Generation)
+    $script:SteamSearchCalls++
+    throw 'Steam unavailable in this region.'
+}
+$BullyPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на булли... МЯУ!' @($BullyEntry)) $StrictUtf8IntentAnalyzer $UnavailableSteamSearcher
+Assert-Equal $BullyPipeline.result.action 'assign_existing' 'Existing Bully was not assigned by the first LLM stage.'
+Assert-Equal $BullyPipeline.result.entryId 'bully-entry' 'First LLM stage selected the wrong existing entry.'
+Assert-Equal $BullyPipeline.result.matchedBy 'llm_existing_entry' 'Existing-entry selection lost its match type.'
+Assert-Equal $script:SteamSearchCalls 0 'Existing Bully selection performed a Steam request.'
+Assert-Equal $BullyPipeline.result.finalConfidence ([double]0.96) 'Existing-entry final confidence is not min(intent, selection).'
+Assert-Equal $BullyPipeline.result.entryFingerprint.normalizedName 'bully' 'Existing-entry selection did not retain a validation fingerprint.'
+
+$OutlastEntry = New-TestEntry 'outlast-entry' 'The Outlast Trials' $false 'steam' '1304930' 'game'
+$OutlastIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'outlast-entry' 'game' 'The Outlast Trials' 0.98 0.97 'Сообщение указывает на The Outlast Trials.') $Entries
+}
+$OutlastPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials, смешной микровидос: https://example.test/video' @($OutlastEntry)) $OutlastIntent $UnavailableSteamSearcher
+Assert-Equal $OutlastPipeline.result.entryId 'outlast-entry' 'Noise and a URL prevented safe existing Outlast selection.'
+Assert-Equal $script:SteamSearchCalls 0 'Existing Outlast selection performed a Steam request.'
+
+$Fnaf4 = New-TestEntry 'fnaf-4' "Five Nights at Freddy's 4" $false 'steam' '388090' 'game'
+$Fnaf2 = New-TestEntry 'fnaf-2' "Five Nights at Freddy's 2" $false 'steam' '332800' 'game'
+$FnafFourIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'fnaf-4' 'game' "Five Nights at Freddy's 4" 0.97 0.96 'Указана четвёртая часть серии.') $Entries
+}
+$FnafFourPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на фнафыч 4' @($Fnaf4, $Fnaf2)) $FnafFourIntent $UnavailableSteamSearcher
+Assert-Equal $FnafFourPipeline.result.entryId 'fnaf-4' 'Explicit FNAF part selected the wrong existing entry.'
+$FnafAmbiguousIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'ask_manual' '' 'game' 'Five Nights at Freddy''s' 0.95 0 'Не указана конкретная часть серии.') $Entries
+}
+$FnafAmbiguousPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на фнафыч' @($Fnaf4, $Fnaf2)) $FnafAmbiguousIntent $UnavailableSteamSearcher
+Assert-Equal $FnafAmbiguousPipeline.result.action 'ask_manual' 'Ambiguous franchise was assigned to a random existing entry.'
+
+$InventedSelection = Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'invented-id' 'game' 'Bully' 0.99 0.99 'Выбран существующий лот.') @($BullyEntry)
+Assert-Equal $InventedSelection.decision 'ask_manual' 'Invented entryId passed server validation.'
+$EliminatedBully = New-TestEntry 'gone-bully' 'Bully' $true 'steam' '12200' 'game'
+$EliminatedSelection = Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'gone-bully' 'game' 'Bully' 0.99 0.99 'Выбран существующий лот.') @($EliminatedBully)
+Assert-Equal $EliminatedSelection.decision 'ask_manual' 'Eliminated entryId passed server validation.'
+$WrongCategorySelection = Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'bully-entry' 'anime' 'Bully' 0.99 0.99 'Выбран существующий лот.') @($BullyEntry)
+Assert-Equal $WrongCategorySelection.decision 'ask_manual' 'Category-incompatible existing entry passed server validation.'
+$LowConfidenceSelection = Resolve-LlmIntentDecision (New-TestIntentResult 'select_existing' 'bully-entry' 'game' 'Bully' 0.99 0.89 'Выбран существующий лот.') @($BullyEntry)
+Assert-Equal $LowConfidenceSelection.decision 'ask_manual' 'Low-confidence existing selection was accepted.'
+
+$script:SteamSearchCalls = 0
+$CatalogIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'search_catalog' '' 'game' 'Bully' 0.96 0 'Распознана игра Bully.') $Entries
+}
+$RegionLimitedSteamSearcher = {
+    param($Query, $JobId, $Generation)
+    $script:SteamSearchCalls++
+    return [pscustomobject]@{
+        candidateId = 'steam:12200'
+        source = 'steam'
+        externalId = '12200'
+        title = 'Bully'
+        sourceUrl = 'https://store.steampowered.com/app/12200'
+        imageUrl = ''
+        sourceMode = 'store_search'
+        availability = 'region_unavailable'
+        metadataIncomplete = $true
+        score = 0.98
+    }
+}
+$CatalogPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на булли' @()) $CatalogIntent $RegionLimitedSteamSearcher
+Assert-Equal $CatalogPipeline.result.action 'create_lot_candidate' 'Metadata-limited Steam identity was discarded.'
+Assert-Equal $CatalogPipeline.result.category 'game' 'Region-limited Steam candidate changed the recognized category.'
+Assert-Equal $CatalogPipeline.result.query 'Bully' 'Region-limited Steam candidate changed the canonical query.'
+Assert-Equal $CatalogPipeline.result.candidate.externalId '12200' 'Region-limited Steam candidate identity was replaced.'
+Assert-True $CatalogPipeline.result.candidate.metadataIncomplete 'Region-limited Steam candidate lost its metadata marker.'
+Assert-Equal $script:SteamSearchCalls 1 'Catalog search did not perform exactly one Steam lookup.'
+
+$script:SteamSearchCalls = 0
+$CatalogUnavailablePipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на булли' @()) $CatalogIntent $UnavailableSteamSearcher
+Assert-Equal $CatalogUnavailablePipeline.result.action 'ask_manual' 'Unavailable Steam search did not fall back to manual selection.'
+Assert-Equal $CatalogUnavailablePipeline.result.category 'game' 'Unavailable Steam search changed a recognized game to unknown.'
+Assert-Equal $CatalogUnavailablePipeline.result.query 'Bully' 'Unavailable Steam search lost the canonical query.'
+Assert-Equal $script:SteamSearchCalls 1 'Unavailable catalog transport call count is incorrect.'
+
+$RecognizedManualIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    Resolve-LlmIntentDecision (New-TestIntentResult 'ask_manual' '' 'game' 'Bully' 0.88 0 'Недостаточно данных для безопасного выбора.') $Entries
+}
+$RecognizedManualPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'возможно булли' @()) $RecognizedManualIntent $UnavailableSteamSearcher
+Assert-Equal $RecognizedManualPipeline.result.category 'game' 'ask_manual discarded a recognized category.'
+Assert-Equal $RecognizedManualPipeline.result.query 'Bully' 'ask_manual discarded a canonical query.'
+
+$IdentityInput = [pscustomobject]@{
+    donation = [pscustomobject]@{ source = 'donatepay'; externalId = 'identity-1'; message = 'на булли... МЯУ!' }
+    entries = @($BullyEntry)
+}
+$IdentityKey = Get-LlmAnalysisKey $IdentityInput
+Assert-True $IdentityKey.StartsWith('v3:donatepay:identity-1:') 'Current analysis key does not include pipeline version.'
+Assert-Equal $IdentityKey 'v3:donatepay:identity-1:5fd03456' 'Server analysisKey no longer matches the frontend UTF-16 fingerprint contract.'
+$ChangedMessageInput = [pscustomobject]@{
+    donation = [pscustomobject]@{ source = 'donatepay'; externalId = 'identity-1'; message = 'на другую игру' }
+    entries = @($BullyEntry)
+}
+Assert-False ((Get-LlmAnalysisKey $ChangedMessageInput) -eq $IdentityKey) 'Changing donation message did not invalidate analysisKey.'
+$ChangedEntriesInput = [pscustomobject]@{
+    donation = $IdentityInput.donation
+    entries = @($BullyEntry, (New-TestEntry 'other-entry' 'Other Game' $false 'steam' '2' 'game'))
+}
+Assert-False ((Get-LlmAnalysisKey $ChangedEntriesInput) -eq $IdentityKey) 'Changing active entries did not invalidate analysisKey.'
+$OriginalPipelineVersion = $script:LlmPipelineVersion
+try {
+    $script:LlmPipelineVersion = 4
+    Assert-False ((Get-LlmAnalysisKey $IdentityInput) -eq $IdentityKey) 'Changing pipelineVersion did not invalidate analysisKey.'
+}
+finally {
+    $script:LlmPipelineVersion = $OriginalPipelineVersion
+}
+
 $TestRoot = Join-Path ([System.IO.Path]::GetTempPath()) "papich-ai-tests-$([Guid]::NewGuid().ToString('N'))"
 $script:CacheDir = Join-Path $TestRoot 'cache'
 $script:SecretsDir = $TestRoot
@@ -654,9 +921,39 @@ try {
     Assert-True (Set-SteamSearchCachedCandidates 'Granny 3' @($Candidate) 2) 'New-generation cache write failed.'
     Assert-True (@(Get-SteamSearchCachedCandidates 'Granny 3' 2).Count -eq 1) 'New-generation cache read failed.'
 
+    $LegacyStore = New-EmptyLlmJobsStore
+    $LegacyStore.auctionGeneration = 2
+    $LegacyStore.jobs = @([pscustomobject]@{
+        jobId = 'legacy-pipeline-job'
+        analysisKey = 'donatepay:legacy'
+        generation = 2
+        status = 'done'
+        revision = 1
+        createdAt = [DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('o')
+    })
+    Assert-True (Write-LlmJobsStoreUnsafe $LegacyStore) 'Legacy pipeline job setup failed.'
+    $CurrentPipelineInput = [pscustomobject]@{
+        pipelineVersion = $script:LlmPipelineVersion
+        auctionGeneration = 2
+        donation = [pscustomobject]@{ id = 'legacy'; source = 'donatepay'; externalId = 'legacy'; username = 'test'; amount = 100; currency = 'RUB'; message = 'Bully' }
+        entries = @($BullyEntry)
+        settings = [pscustomobject]@{}
+    }
+    $CurrentPipelineJob = Add-OrGet-LlmJob $CurrentPipelineInput
+    Assert-True $CurrentPipelineJob.ok 'Current pipeline could not replace a legacy analysis.'
+    Assert-False $CurrentPipelineJob.existing 'Legacy pipeline result was reused as a current job.'
+    Assert-True $CurrentPipelineJob.analysisKey.StartsWith('v3:') 'Replacement job did not use the current pipeline key.'
+    $JobsAfterLegacyReplacement = @((Read-LlmJobsStoreUnsafe).jobs)
+    Assert-True ($JobsAfterLegacyReplacement.Count -eq 2) 'Legacy job was not preserved safely alongside the replacement job.'
+    Assert-True (@($JobsAfterLegacyReplacement | Where-Object { [int]$_.pipelineVersion -eq 3 }).Count -eq 1) 'Current pipeline replacement job was not persisted.'
+
+    $ResetJobStore = New-EmptyLlmJobsStore
+    $ResetJobStore.auctionGeneration = 2
+    Assert-True (Write-LlmJobsStoreUnsafe $ResetJobStore) 'Job store reset after legacy migration test failed.'
+
     $StaleJobInput = [pscustomobject]@{
+        pipelineVersion = $script:LlmPipelineVersion
         auctionGeneration = 1
-        analysisKey = 'donatepay:stale'
         donation = [pscustomobject]@{ id = 'stale'; source = 'donatepay'; externalId = 'stale'; username = 'test'; amount = 100; currency = 'RUB'; message = 'Naruto' }
         entries = @()
         settings = [pscustomobject]@{}

@@ -51,6 +51,8 @@ $script:MaxRequestHeaderChars = 32768
 $script:MaxRequestHeaderCount = 100
 $script:MaxRequestBodyBytes = 4MB
 $script:ClientIoTimeoutMs = 15000
+$script:LlmPipelineVersion = 3
+$script:LlmExistingSelectionThreshold = 0.90
 
 function Mask-SecretText {
     param([AllowNull()][string]$Text)
@@ -1549,6 +1551,29 @@ function Get-SafeEntriesForLlm {
     })
 }
 
+function Get-ActiveEntriesForLlmIntent {
+    param([object]$Entries)
+
+    return @(
+        Get-SafeEntriesForLlm $Entries |
+            Where-Object {
+                -not [bool]$_.eliminated -and
+                -not [string]::IsNullOrWhiteSpace([string]$_.id) -and
+                -not [string]::IsNullOrWhiteSpace([string]$_.name)
+            } |
+            Select-Object -First 200 |
+            ForEach-Object {
+                [pscustomobject]@{
+                    id = Limit-LogText ([string]$_.id) 300
+                    name = Limit-LogText ([string]$_.name) 200
+                    category = Limit-LogText ([string]$_.category) 40
+                    source = Limit-LogText ([string]$_.source) 40
+                    externalId = Limit-LogText ([string]$_.externalId) 200
+                }
+            }
+    )
+}
+
 function Find-ExistingEntryMatch {
     param(
         [AllowNull()][string]$Text,
@@ -1633,16 +1658,97 @@ function ConvertTo-LlmResult {
         entryId = $EntryId
         entryFingerprint = $EntryFingerprint
         category = $Category
-        intentConfidence = [Math]::Max(0, [Math]::Min(1, $IntentConfidence))
-        candidateScore = [Math]::Max(0, [Math]::Min(1, $CandidateScore))
-        selectionConfidence = [Math]::Max(0, [Math]::Min(1, $SelectionConfidence))
-        finalConfidence = [Math]::Max(0, [Math]::Min(1, $FinalConfidence))
+        intentConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]$IntentConfidence))
+        candidateScore = [Math]::Max(0.0, [Math]::Min(1.0, [double]$CandidateScore))
+        selectionConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]$SelectionConfidence))
+        finalConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]$FinalConfidence))
         query = Limit-LogText $Query 200
         matchedBy = $MatchedBy
         candidate = $Candidate
         candidates = @($Candidates | Select-Object -First 5)
         reason = Limit-LogText $Reason 400
     }
+}
+
+function Resolve-LlmIntentDecision {
+    param(
+        [AllowNull()][object]$Result,
+        [object[]]$Entries
+    )
+
+    $AllowedDecisions = @('select_existing', 'search_catalog', 'ask_manual')
+    $AllowedCategories = @('game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown')
+    if (
+        -not $Result -or
+        -not $Result.PSObject.Properties['decision'] -or
+        -not $Result.PSObject.Properties['entryId'] -or
+        -not $Result.PSObject.Properties['category'] -or
+        -not $Result.PSObject.Properties['query'] -or
+        -not $Result.PSObject.Properties['intentConfidence'] -or
+        -not $Result.PSObject.Properties['existingSelectionConfidence'] -or
+        -not $Result.PSObject.Properties['reason'] -or
+        $AllowedDecisions -notcontains [string]$Result.decision -or
+        $AllowedCategories -notcontains [string]$Result.category -or
+        [string]::IsNullOrWhiteSpace([string]$Result.reason)
+    ) {
+        Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter intent response did not match the required schema."
+    }
+
+    $IntentConfidence = ConvertTo-LlmConfidence $Result.intentConfidence
+    if ($null -eq $IntentConfidence) {
+        Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter intent confidence is invalid."
+    }
+    $ExistingConfidence = ConvertTo-LlmConfidence $Result.existingSelectionConfidence
+    if ($null -eq $ExistingConfidence) {
+        Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter existing selection confidence is invalid."
+    }
+
+    $Result.intentConfidence = [double]$IntentConfidence
+    $Result.existingSelectionConfidence = [double]$ExistingConfidence
+    $Result.entryId = Limit-LogText ([string]$Result.entryId) 300
+    $Result.query = Limit-LogText ([string]$Result.query) 200
+    $Result.reason = Limit-LogText ([string]$Result.reason) 400
+    $ActiveEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
+
+    if ([string]$Result.decision -eq 'select_existing') {
+        $Selected = @($ActiveEntries | Where-Object { [string]$_.id -eq [string]$Result.entryId } | Select-Object -First 1)[0]
+        $SelectionInvalid = -not $Selected -or
+            [double]$ExistingConfidence -lt [double]$script:LlmExistingSelectionThreshold -or
+            -not (Test-LotCategoriesCompatible ([string]$Result.category) ([string]$Selected.category))
+        if ($SelectionInvalid) {
+            return [pscustomobject]@{
+                decision = 'ask_manual'
+                entryId = ''
+                category = [string]$Result.category
+                query = [string]$Result.query
+                intentConfidence = [double]$IntentConfidence
+                existingSelectionConfidence = [double]$ExistingConfidence
+                reason = 'AI не смог безопасно подтвердить существующий лот.'
+            }
+        }
+        return $Result
+    }
+
+    if ([string]$Result.decision -eq 'search_catalog') {
+        if (
+            -not [string]::IsNullOrWhiteSpace([string]$Result.entryId) -or
+            -not (Test-LlmIntentReadyForCatalog ([string]$Result.category) ([string]$Result.query) ([double]$IntentConfidence))
+        ) {
+            return [pscustomobject]@{
+                decision = 'ask_manual'
+                entryId = ''
+                category = [string]$Result.category
+                query = [string]$Result.query
+                intentConfidence = [double]$IntentConfidence
+                existingSelectionConfidence = [double]$ExistingConfidence
+                reason = [string]$Result.reason
+            }
+        }
+        return $Result
+    }
+
+    $Result.entryId = ''
+    return $Result
 }
 
 function Read-JsonFileSafe {
@@ -2172,8 +2278,10 @@ function Search-SteamStoreCandidates {
                 externalId = $AppId
                 title = $Name
                 sourceUrl = "https://store.steampowered.com/app/$AppId"
-                imageUrl = if ($_.tiny_image) { [string]$_.tiny_image } else { "https://cdn.cloudflare.steamstatic.com/steam/apps/$AppId/header.jpg" }
+                imageUrl = if ($_.tiny_image) { [string]$_.tiny_image } else { "" }
                 sourceMode = "store_search"
+                availability = "search_result"
+                metadataIncomplete = [string]::IsNullOrWhiteSpace([string]$_.tiny_image)
                 score = [Math]::Round([double]$Score, 4)
             }
         }
@@ -2554,6 +2662,141 @@ function ConvertTo-LlmConfidence {
     return [double]$Parsed
 }
 
+function Get-StrictUtf8Encoding {
+    return [System.Text.UTF8Encoding]::new($false, $true)
+}
+
+function ConvertTo-Utf8JsonBytes {
+    param(
+        [AllowNull()][object]$Value,
+        [int]$Depth = 30
+    )
+
+    try {
+        $Json = $Value | ConvertTo-Json -Depth $Depth -Compress
+        return (Get-StrictUtf8Encoding).GetBytes($Json)
+    }
+    catch {
+        Throw-LlmError "LLM_REQUEST_ENCODING_ERROR" "OpenRouter request could not be encoded as UTF-8."
+    }
+}
+
+function ConvertFrom-Utf8JsonBytes {
+    param(
+        [AllowNull()][byte[]]$Bytes,
+        [string]$EmptyMessage = "OpenRouter returned an empty response."
+    )
+
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) {
+        Throw-LlmError "LLM_RESPONSE_PARSE_ERROR" $EmptyMessage
+    }
+    try {
+        $Json = (Get-StrictUtf8Encoding).GetString($Bytes)
+    }
+    catch {
+        Throw-LlmError "LLM_RESPONSE_ENCODING_ERROR" "OpenRouter returned invalid UTF-8."
+    }
+    return ConvertFrom-LlmStructuredJson $Json $EmptyMessage
+}
+
+function Get-OpenRouterSafeUpstreamError {
+    param(
+        [AllowNull()][object]$Payload,
+        [int]$StatusCode
+    )
+
+    $Message = "OpenRouter returned HTTP $StatusCode."
+    if ($Payload) {
+        $Candidate = ""
+        if ($Payload.PSObject.Properties['error'] -and $Payload.error) {
+            if ($Payload.error -is [string]) { $Candidate = [string]$Payload.error }
+            elseif ($Payload.error.PSObject.Properties['message']) { $Candidate = [string]$Payload.error.message }
+        }
+        elseif ($Payload.PSObject.Properties['message']) {
+            $Candidate = [string]$Payload.message
+        }
+        if (-not [string]::IsNullOrWhiteSpace($Candidate)) {
+            $Message = Limit-LogText (Get-MaskedText $Candidate) 300
+        }
+    }
+    return $Message
+}
+
+function Get-OpenRouterRetryAfterSeconds {
+    param([AllowNull()][object]$Response)
+
+    if (-not $Response -or -not $Response.Headers -or -not $Response.Headers.RetryAfter) { return 0 }
+    try {
+        if ($Response.Headers.RetryAfter.Delta) {
+            return [Math]::Max(1, [int][Math]::Ceiling($Response.Headers.RetryAfter.Delta.TotalSeconds))
+        }
+        if ($Response.Headers.RetryAfter.Date) {
+            return [Math]::Max(1, [int][Math]::Ceiling(($Response.Headers.RetryAfter.Date - [DateTimeOffset]::UtcNow).TotalSeconds))
+        }
+    }
+    catch {}
+    return 0
+}
+
+function New-OpenRouterHttpException {
+    param(
+        [string]$Message,
+        [int]$StatusCode = 0,
+        [int]$RetryAfterSeconds = 0,
+        [string]$OpenRouterErrorCode = ""
+    )
+
+    $Exception = [System.Net.Http.HttpRequestException]::new((Limit-LogText (Get-MaskedText $Message) 500))
+    $Exception.Data['HttpStatusCode'] = $StatusCode
+    $Exception.Data['RetryAfterSeconds'] = $RetryAfterSeconds
+    if (-not [string]::IsNullOrWhiteSpace($OpenRouterErrorCode)) {
+        $Exception.Data['OpenRouterErrorCode'] = Limit-LogText $OpenRouterErrorCode 100
+    }
+    return $Exception
+}
+
+function Get-LlmExceptionDataValue {
+    param(
+        [AllowNull()][System.Exception]$Exception,
+        [string]$Name
+    )
+
+    $Current = $Exception
+    while ($Current) {
+        try {
+            if ($Current.Data.Contains($Name)) { return $Current.Data[$Name] }
+        }
+        catch {}
+        $Current = $Current.InnerException
+    }
+    return $null
+}
+
+function Get-LlmHttpStatusCode {
+    param([AllowNull()][System.Exception]$Exception)
+
+    $Stored = Get-LlmExceptionDataValue $Exception 'HttpStatusCode'
+    if ($null -ne $Stored) {
+        try { return [int]$Stored } catch {}
+    }
+    $Current = $Exception
+    while ($Current) {
+        try { return [int]$Current.Response.StatusCode } catch {}
+        $Current = $Current.InnerException
+    }
+    return 0
+}
+
+function Get-LlmRetryAfterSeconds {
+    param([AllowNull()][System.Exception]$Exception)
+
+    $Stored = Get-LlmExceptionDataValue $Exception 'RetryAfterSeconds'
+    if ($null -ne $Stored) {
+        try { return [Math]::Max(0, [int]$Stored) } catch {}
+    }
+    return 0
+}
+
 function Invoke-OpenRouterRequest {
     param(
         [object]$Payload,
@@ -2564,38 +2807,116 @@ function Invoke-OpenRouterRequest {
     if ([string]::IsNullOrWhiteSpace($ApiKey)) {
         Throw-LlmError "OPENROUTER_KEY_MISSING" "OpenRouter API key is not configured."
     }
+    try { Add-Type -AssemblyName System.Net.Http -ErrorAction Stop } catch {
+        Throw-LlmError "OPENROUTER_HTTP_UNAVAILABLE" "System.Net.Http is unavailable."
+    }
+
     $ProxyUrl = Get-OpenRouterStoredProxyUrl
-    $Parameters = @{
-        Uri = "https://openrouter.ai/api/v1/chat/completions"
-        Method = "Post"
-        Headers = @{
-            Authorization = "Bearer $ApiKey"
-            Accept = "application/json"
-            "HTTP-Referer" = "http://127.0.0.1:5500"
-            "X-Title" = "PapichWheel"
+    $Handler = $null
+    $Client = $null
+    $Request = $null
+    $Content = $null
+    $Response = $null
+    $Cancellation = $null
+    try {
+        $RequestBytes = ConvertTo-Utf8JsonBytes $Payload 30
+        $Handler = [System.Net.Http.HttpClientHandler]::new()
+        $Handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+        if (-not [string]::IsNullOrWhiteSpace($ProxyUrl)) {
+            $ProxyUri = [Uri]$ProxyUrl
+            $Proxy = [System.Net.WebProxy]::new($ProxyUri)
+            if (-not [string]::IsNullOrWhiteSpace($ProxyUri.UserInfo)) {
+                $Parts = $ProxyUri.UserInfo.Split(':', 2)
+                $UserName = [Uri]::UnescapeDataString($Parts[0])
+                $Password = if ($Parts.Count -gt 1) { [Uri]::UnescapeDataString($Parts[1]) } else { "" }
+                $Proxy.Credentials = [System.Net.NetworkCredential]::new($UserName, $Password)
+            }
+            $Handler.Proxy = $Proxy
+            $Handler.UseProxy = $true
         }
-        ContentType = "application/json; charset=utf-8"
-        Body = ($Payload | ConvertTo-Json -Depth 30)
-        TimeoutSec = $TimeoutSec
+
+        $Client = [System.Net.Http.HttpClient]::new($Handler, $false)
+        $Request = [System.Net.Http.HttpRequestMessage]::new(
+            [System.Net.Http.HttpMethod]::Post,
+            "https://openrouter.ai/api/v1/chat/completions"
+        )
+        $Request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new("Bearer", $ApiKey)
+        $Request.Headers.Accept.Add([System.Net.Http.Headers.MediaTypeWithQualityHeaderValue]::new("application/json"))
+        [void]$Request.Headers.TryAddWithoutValidation("HTTP-Referer", "http://127.0.0.1:5500")
+        [void]$Request.Headers.TryAddWithoutValidation("X-Title", "PapichWheel")
+        $Content = [System.Net.Http.ByteArrayContent]::new($RequestBytes)
+        $Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new("application/json")
+        $Content.Headers.ContentType.CharSet = "utf-8"
+        $Request.Content = $Content
+
+        $Cancellation = [System.Threading.CancellationTokenSource]::new()
+        $Cancellation.CancelAfter([TimeSpan]::FromSeconds([Math]::Max(1, $TimeoutSec)))
+        try {
+            $Response = $Client.SendAsync(
+                $Request,
+                [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead,
+                $Cancellation.Token
+            ).GetAwaiter().GetResult()
+            $ResponseBytes = $Response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        }
+        catch [System.OperationCanceledException] {
+            if ($Cancellation.IsCancellationRequested) {
+                Throw-LlmError "OPENROUTER_TIMEOUT" "OpenRouter request timed out."
+            }
+            throw
+        }
+
+        if (-not $Response.IsSuccessStatusCode) {
+            $StatusCode = [int]$Response.StatusCode
+            $RetryAfter = Get-OpenRouterRetryAfterSeconds $Response
+            $ErrorPayload = $null
+            $ErrorCode = ""
+            try {
+                $ErrorPayload = ConvertFrom-Utf8JsonBytes $ResponseBytes "OpenRouter returned an empty error response."
+                if ($ErrorPayload -and $ErrorPayload.error -and $ErrorPayload.error.PSObject.Properties['code']) {
+                    $ErrorCode = [string]$ErrorPayload.error.code
+                }
+            }
+            catch {
+                if ((Get-LlmExceptionCode $_.Exception) -eq 'LLM_RESPONSE_ENCODING_ERROR') { throw }
+            }
+            throw (New-OpenRouterHttpException `
+                (Get-OpenRouterSafeUpstreamError $ErrorPayload $StatusCode) `
+                $StatusCode `
+                $RetryAfter `
+                $ErrorCode)
+        }
+        return ConvertFrom-Utf8JsonBytes $ResponseBytes "OpenRouter returned an empty HTTP response."
     }
-    if (-not [string]::IsNullOrWhiteSpace($ProxyUrl)) {
-        $Parameters.Proxy = $ProxyUrl
+    finally {
+        if ($Cancellation) { $Cancellation.Dispose() }
+        if ($Response) { $Response.Dispose() }
+        if ($Request) { $Request.Dispose() }
+        elseif ($Content) { $Content.Dispose() }
+        if ($Client) { $Client.Dispose() }
+        if ($Handler) { $Handler.Dispose() }
     }
-    return Invoke-RestMethod @Parameters
 }
 
 function Invoke-OpenRouterIntentAnalysis {
     param(
         [object]$Donation,
         [object]$Settings,
-        [string]$NormalizedMessage
+        [string]$NormalizedMessage,
+        [object[]]$Entries
     )
 
     $Model = if ($Settings -and -not [string]::IsNullOrWhiteSpace([string]$Settings.model)) { [string]$Settings.model } else { "google/gemini-2.5-flash-lite" }
+    $CurrentEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
+    $AllowedEntryIds = @($CurrentEntries | ForEach-Object { [string]$_.id } | Select-Object -Unique)
     $SystemPrompt = @"
 You analyze donation messages for a local auction. Extract what lot the donor probably meant.
 For query, return the canonical searchable title, preferably English or romaji, not a translated Russian phrase.
-Return only structured JSON. Do not choose catalog items and do not invent identifiers.
+Return only structured JSON. Never invent entryId or external identifiers. Reason must always be short and written in Russian.
+Choose select_existing only when the message unambiguously identifies exactly one current entry. Treat greetings, interjections, jokes, links, streamer mentions and unrelated phrases as noise.
+Pay close attention to franchise part, season, year, remake/remaster, movie and special. If several current entries are parts of the same franchise and the message does not identify the part, use ask_manual or search_catalog; never choose one at random.
+Do not match works merely because they have a similar theme. For example, Дальнобойщики 2 is not Euro Truck Simulator 2.
+Use search_catalog when no current entry safely matches but the work and category are known. Use ask_manual when the intended work cannot be determined safely.
 Use unknown only when you cannot identify either the work/franchise or its category. If the work or franchise is known but the exact season, part, version, remake, or adaptation is not specified, return the known category and the franchise title as query with normal/high intentConfidence. Catalog search and a later selection step will resolve that ambiguity. Do not lower intentConfidence merely because a part or season is missing.
 Categories:
 - game: video games only.
@@ -2605,7 +2926,12 @@ Categories:
 - cartoon: non-anime cartoons/animated series.
 - other: books, music, people, memes, or other known media that are not covered above.
 - unknown: the work/franchise or category cannot be identified at all.
-Examples: бабка 3, бабуся 3, гренни 3 => Granny 3, game. дбд => Dead by Daylight, game. ведьмак третий => The Witcher 3, game. атака титанов => Attack on Titan, anime. магическая битва => Jujutsu Kaisen, anime. ван пис => One Piece, anime. интерстеллар => Interstellar, movie. поле чудес => Pole Chudes, tv_show. гравити фолз => Gravity Falls, cartoon. наруто => Naruto, anime with sufficiently high intentConfidence; the catalog-selection stage decides which Naruto series.
+Examples:
+- Message "на булли... МЯУ!", current entry Bully => select_existing for Bully with high existingSelectionConfidence.
+- Message "на фнафыч 4", current entries Five Nights at Freddy's 4 and Five Nights at Freddy's 2 => select_existing for part 4.
+- Message "на фнафыч", current entries for parts 4 and 2 => ask_manual or search_catalog, not a random entry.
+- Message "На Outlast Trials, смешной микровидос: [ссылка]", current entry The Outlast Trials => select_existing for The Outlast Trials; the rest is noise.
+- бабка 3, бабуся 3, гренни 3 => Granny 3, game. дбд => Dead by Daylight, game. атака титанов => Attack on Titan, anime. наруто => Naruto, anime; catalog selection resolves the exact series.
 "@
     $UserPayload = [pscustomobject]@{
         donation = [pscustomobject]@{
@@ -2615,16 +2941,20 @@ Examples: бабка 3, бабуся 3, гренни 3 => Granny 3, game. дбд
             message = [string]$Donation.message
             normalizedMessage = $NormalizedMessage
         }
+        currentEntries = $CurrentEntries
     }
     $Schema = @{
         type = "object"
         properties = @{
+            decision = @{ type = "string"; enum = @("select_existing", "search_catalog", "ask_manual") }
+            entryId = @{ type = "string"; enum = @($AllowedEntryIds + "") }
             category = @{ type = "string"; enum = @("game", "anime", "movie", "tv_show", "cartoon", "other", "unknown") }
             query = @{ type = "string" }
             intentConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
+            existingSelectionConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
             reason = @{ type = "string" }
         }
-        required = @("category", "query", "intentConfidence", "reason")
+        required = @("decision", "entryId", "category", "query", "intentConfidence", "existingSelectionConfidence", "reason")
         additionalProperties = $false
     }
     $Payload = @{
@@ -2649,22 +2979,7 @@ Examples: бабка 3, бабуся 3, гренни 3 => Granny 3, game. дбд
     $Response = Invoke-OpenRouterRequest $Payload 45
     $Content = [string]$Response.choices[0].message.content
     $Result = ConvertFrom-LlmStructuredJson $Content "OpenRouter returned an empty intent response."
-    $AllowedCategories = @("game", "anime", "movie", "tv_show", "cartoon", "other", "unknown")
-    if (
-        -not $Result.PSObject.Properties['category'] -or
-        -not $Result.PSObject.Properties['query'] -or
-        -not $Result.PSObject.Properties['intentConfidence'] -or
-        -not $Result.PSObject.Properties['reason'] -or
-        $AllowedCategories -notcontains [string]$Result.category
-    ) {
-        Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter intent response did not match the required schema."
-    }
-    $Confidence = ConvertTo-LlmConfidence $Result.intentConfidence
-    if ($null -eq $Confidence) {
-        Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter intent confidence is invalid."
-    }
-    $Result.intentConfidence = [double]$Confidence
-    return $Result
+    return Resolve-LlmIntentDecision $Result $CurrentEntries
 }
 
 function Invoke-OpenRouterCandidateSelection {
@@ -2744,12 +3059,15 @@ function Test-OpenRouterIntegration {
     $Schema = @{
         type = "object"
         properties = @{
+            decision = @{ type = "string"; enum = @("ask_manual") }
+            entryId = @{ type = "string"; enum = @("") }
             category = @{ type = "string"; enum = @("unknown") }
             query = @{ type = "string" }
             intentConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
+            existingSelectionConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
             reason = @{ type = "string" }
         }
-        required = @("category", "query", "intentConfidence", "reason")
+        required = @("decision", "entryId", "category", "query", "intentConfidence", "existingSelectionConfidence", "reason")
         additionalProperties = $false
     }
     $Payload = @{
@@ -2763,19 +3081,18 @@ function Test-OpenRouterIntegration {
         }
         messages = @(
             @{ role = "system"; content = "Return the requested strict JSON object." },
-            @{ role = "user"; content = "Return category unknown, empty query, intentConfidence 0.5, and a short reason." }
+            @{ role = "user"; content = "Return decision ask_manual, empty entryId, category unknown, empty query, intentConfidence 0.5, existingSelectionConfidence 0, and a short Russian reason." }
         )
     }
     $StartedAt = Get-Date
     try {
         $Response = Invoke-OpenRouterRequest $Payload 20
         $Content = [string]$Response.choices[0].message.content
-        $Parsed = $Content | ConvertFrom-Json
-        $TestConfidence = ConvertTo-LlmConfidence $Parsed.intentConfidence
-        if ([string]$Parsed.category -ne "unknown" -or $null -eq $TestConfidence) {
+        $Parsed = ConvertFrom-LlmStructuredJson $Content "OpenRouter returned an empty integration-test response."
+        $Parsed = Resolve-LlmIntentDecision $Parsed @()
+        if ([string]$Parsed.decision -ne "ask_manual" -or [string]$Parsed.category -ne "unknown") {
             throw "Selected model returned invalid structured output."
         }
-        $Parsed.intentConfidence = [double]$TestConfidence
         $ElapsedMs = [int]((Get-Date) - $StartedAt).TotalMilliseconds
         return [pscustomobject]@{
             ok = $true
@@ -2789,8 +3106,7 @@ function Test-OpenRouterIntegration {
     }
     catch {
         $RawError = Get-MaskedText $_.Exception.Message
-        $StatusCode = 0
-        try { $StatusCode = [int]$_.Exception.Response.StatusCode } catch {}
+        $StatusCode = Get-LlmHttpStatusCode $_.Exception
         $LowerError = $RawError.ToLowerInvariant()
         $FriendlyError = if ([string]::IsNullOrWhiteSpace((Get-OpenRouterStoredApiKey))) { "OpenRouter key is not configured." }
             elseif ($StatusCode -eq 401 -or $StatusCode -eq 403) { "OpenRouter rejected the API key." }
@@ -2836,7 +3152,13 @@ function Test-LlmIntentReadyForCatalog {
 }
 
 function Invoke-LlmDonationPipeline {
-    param([object]$InputData)
+    param(
+        [object]$InputData,
+        [AllowNull()][scriptblock]$IntentAnalyzer = $null,
+        [AllowNull()][scriptblock]$SteamSearcher = $null,
+        [AllowNull()][scriptblock]$AnimeSearcher = $null,
+        [AllowNull()][scriptblock]$CandidateSelector = $null
+    )
 
     $Donation = $InputData.donation
     $Settings = if ($InputData.settings) { $InputData.settings } else { [pscustomobject]@{} }
@@ -2853,23 +3175,74 @@ function Invoke-LlmDonationPipeline {
         Assert-LlmJobGenerationCurrent $JobId $Generation
         Update-LlmJobStage $JobId "analyzing_intent" $Generation
     }
-    $Llm = Invoke-OpenRouterIntentAnalysis $Donation $Settings $Normalized
+    $Llm = if ($IntentAnalyzer) {
+        & $IntentAnalyzer $Donation $Settings $Normalized $Entries
+    } else {
+        Invoke-OpenRouterIntentAnalysis $Donation $Settings $Normalized $Entries
+    }
     if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
 
     $AllowedCategories = @("game", "anime", "movie", "tv_show", "cartoon", "other", "unknown")
     $Category = if ($AllowedCategories -contains [string]$Llm.category) { [string]$Llm.category } else { "unknown" }
     $Query = Limit-LogText ([string]$Llm.query) 200
-    $IntentConfidence = [Math]::Max(0, [Math]::Min(1, [double]($Llm.intentConfidence)))
+    $IntentConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]($Llm.intentConfidence)))
+    $ExistingSelectionConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]($Llm.existingSelectionConfidence)))
     $Reason = Limit-LogText ([string]$Llm.reason) 400
+    $Decision = [string]$Llm.decision
+
+    if ($Decision -eq 'select_existing') {
+        if ($JobId) { Update-LlmJobStage $JobId "checking_entries" $Generation }
+        $SelectedEntry = @($Entries | Where-Object {
+            $_ -and
+            -not [bool]$_.eliminated -and
+            [string]$_.id -eq [string]$Llm.entryId
+        } | Select-Object -First 1)[0]
+        if (
+            -not $SelectedEntry -or
+            $ExistingSelectionConfidence -lt [double]$script:LlmExistingSelectionThreshold -or
+            -not (Test-LotCategoriesCompatible $Category ([string]$SelectedEntry.category))
+        ) {
+            return [pscustomobject]@{
+                ok = $true
+                result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -SelectionConfidence $ExistingSelectionConfidence -Query $Query -MatchedBy "manual_required" -Reason "AI не смог безопасно подтвердить существующий лот."
+            }
+        }
+        if ($Category -eq 'unknown' -and (Normalize-LotCategory ([string]$SelectedEntry.category)) -ne 'unknown') {
+            $Category = Normalize-LotCategory ([string]$SelectedEntry.category)
+        }
+        if ([string]::IsNullOrWhiteSpace($Query)) { $Query = Limit-LogText ([string]$SelectedEntry.name) 200 }
+        $FinalConfidence = [Math]::Min([double]$IntentConfidence, [double]$ExistingSelectionConfidence)
+        return [pscustomobject]@{
+            ok = $true
+            result = ConvertTo-LlmResult `
+                -Action "assign_existing" `
+                -Category $Category `
+                -IntentConfidence $IntentConfidence `
+                -SelectionConfidence $ExistingSelectionConfidence `
+                -FinalConfidence $FinalConfidence `
+                -Query $Query `
+                -MatchedBy "llm_existing_entry" `
+                -EntryId ([string]$SelectedEntry.id) `
+                -EntryFingerprint (Get-EntryFingerprint $SelectedEntry) `
+                -Reason $Reason
+        }
+    }
+
+    if ($Decision -eq 'ask_manual') {
+        return [pscustomobject]@{
+            ok = $true
+            result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -SelectionConfidence $ExistingSelectionConfidence -Query $Query -MatchedBy "manual_required" -Reason $Reason
+        }
+    }
 
     if (-not (Test-LlmIntentReadyForCatalog $Category $Query $IntentConfidence)) {
-        return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category "unknown" -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason $Reason }
+        return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason $Reason }
     }
 
     if ($JobId) { Update-LlmJobStage $JobId "checking_entries" $Generation }
     $QueryMatch = Find-ExistingEntryMatch $Query $Entries $Category
     if ($QueryMatch -and $QueryMatch.confidence -ge 0.80) {
-        $FinalConfidence = [Math]::Min($IntentConfidence, [double]$QueryMatch.confidence)
+        $FinalConfidence = [Math]::Min([double]$IntentConfidence, [double]$QueryMatch.confidence)
         return [pscustomobject]@{
             ok = $true
             result = ConvertTo-LlmResult `
@@ -2896,7 +3269,11 @@ function Invoke-LlmDonationPipeline {
         }
         if ($JobId) { Update-LlmJobStage $JobId "searching_steam" $Generation }
         try {
-            $Candidates = @(Search-SteamStoreCandidates $Query $JobId $Generation)
+            $Candidates = if ($SteamSearcher) {
+                @(& $SteamSearcher $Query $JobId $Generation)
+            } else {
+                @(Search-SteamStoreCandidates $Query $JobId $Generation)
+            }
         }
         catch {
             Write-AppLog -Level "WARN" -Message "Steam search failed for AI job: $($_.Exception.Message)"
@@ -2909,7 +3286,11 @@ function Invoke-LlmDonationPipeline {
         }
         if ($JobId) { Update-LlmJobStage $JobId "searching_anime" $Generation }
         try {
-            $Candidates = @(Search-AnimeCandidates $Query $JobId $Generation)
+            $Candidates = if ($AnimeSearcher) {
+                @(& $AnimeSearcher $Query $JobId $Generation)
+            } else {
+                @(Search-AnimeCandidates $Query $JobId $Generation)
+            }
         }
         catch {
             Write-AppLog -Level "WARN" -Message "Anime search failed for AI job: $($_.Exception.Message)"
@@ -2943,7 +3324,11 @@ function Invoke-LlmDonationPipeline {
             Assert-LlmJobGenerationCurrent $JobId $Generation
             Update-LlmJobStage $JobId "llm_candidate_selection" $Generation
         }
-        $Selection = Invoke-OpenRouterCandidateSelection $Donation $Category $Query $IntentConfidence $Entries $Candidates $Settings
+        $Selection = if ($CandidateSelector) {
+            & $CandidateSelector $Donation $Category $Query $IntentConfidence $Entries $Candidates $Settings
+        } else {
+            Invoke-OpenRouterCandidateSelection $Donation $Category $Query $IntentConfidence $Entries $Candidates $Settings
+        }
         if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
         if (-not $Selection -or [string]$Selection.decision -ne "select_candidate" -or [double]$Selection.selectionConfidence -lt 0.70) {
             $ManualConfidence = if ($Selection) { [double]$Selection.selectionConfidence } else { 0.0 }
@@ -2952,15 +3337,15 @@ function Invoke-LlmDonationPipeline {
         }
         $Candidate = @($Candidates | Where-Object { [string]$_.candidateId -eq [string]$Selection.candidateId })[0]
         if (-not $Candidate) { Throw-LlmError "UNKNOWN_CANDIDATE_ID" "Selected candidate is not present in the catalog result." }
-        $SelectionConfidence = [Math]::Max(0, [Math]::Min(1, [double]$Selection.selectionConfidence))
+        $SelectionConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]$Selection.selectionConfidence))
         $Reason = [string]$Selection.reason
     }
 
-    $CandidateScore = [Math]::Max(0, [Math]::Min(1, [double]$Candidate.score))
+    $CandidateScore = [Math]::Max(0.0, [Math]::Min(1.0, [double]$Candidate.score))
     $FinalConfidence = if ($SelectionConfidence -gt 0) {
-        [Math]::Min($IntentConfidence, [Math]::Min($CandidateScore, $SelectionConfidence))
+        [Math]::Min([double]$IntentConfidence, [Math]::Min([double]$CandidateScore, [double]$SelectionConfidence))
     } else {
-        [Math]::Min($IntentConfidence, $CandidateScore)
+        [Math]::Min([double]$IntentConfidence, [double]$CandidateScore)
     }
     $Existing = Search-ExistingEntryByCandidate $Candidate $Entries $Category
     if ($Existing) {
@@ -2980,7 +3365,7 @@ function Invoke-LlmDonationPipeline {
 
 function New-EmptyLlmJobsStore {
     return [pscustomobject]@{
-        version = 2
+        version = 3
         revision = 0
         auctionGeneration = 1
         jobs = @()
@@ -2991,9 +3376,9 @@ function Read-LlmJobsStoreUnsafe {
     $Store = Read-JsonFileSafe $script:LlmJobsPath (New-EmptyLlmJobsStore)
     if (-not $Store) { $Store = New-EmptyLlmJobsStore }
     if (-not $Store.PSObject.Properties["version"]) {
-        $Store | Add-Member -NotePropertyName version -NotePropertyValue 2 -Force
+        $Store | Add-Member -NotePropertyName version -NotePropertyValue 3 -Force
     } else {
-        $Store.version = 2
+        $Store.version = 3
     }
     if (-not $Store.PSObject.Properties["revision"]) { $Store | Add-Member -NotePropertyName revision -NotePropertyValue 0 -Force }
     if (-not $Store.PSObject.Properties["auctionGeneration"] -or [long]$Store.auctionGeneration -lt 1) {
@@ -3001,6 +3386,9 @@ function Read-LlmJobsStoreUnsafe {
     }
     if (-not $Store.PSObject.Properties["jobs"]) { $Store | Add-Member -NotePropertyName jobs -NotePropertyValue @() -Force }
     foreach ($Job in @($Store.jobs)) {
+        if (-not $Job.PSObject.Properties["pipelineVersion"]) {
+            $Job | Add-Member -NotePropertyName pipelineVersion -NotePropertyValue 0 -Force
+        }
         if (-not $Job.PSObject.Properties["generation"]) {
             $Job | Add-Member -NotePropertyName generation -NotePropertyValue ([long]$Store.auctionGeneration) -Force
         }
@@ -3038,10 +3426,40 @@ function Get-LlmAnalysisKey {
     $Source = [string]$Donation.source
     $ExternalId = [string]$Donation.externalId
     if ([string]::IsNullOrWhiteSpace($Source) -or [string]::IsNullOrWhiteSpace($ExternalId)) { return "" }
-    $Expected = "${Source}:${ExternalId}"
+    $Fingerprint = Get-LlmInputFingerprint $InputData
+    if ([string]::IsNullOrWhiteSpace($Fingerprint)) { return "" }
+    $Expected = "v$($script:LlmPipelineVersion):${Source}:${ExternalId}:$Fingerprint"
     $Provided = if ($InputData.PSObject.Properties["analysisKey"]) { [string]$InputData.analysisKey } else { "" }
     if (-not [string]::IsNullOrWhiteSpace($Provided) -and $Provided -ne $Expected) { return "" }
     return Limit-LogText $Expected 300
+}
+
+function Get-LlmInputFingerprint {
+    param([object]$InputData)
+
+    if (-not $InputData -or -not $InputData.donation) { return "" }
+    $Donation = $InputData.donation
+    $Values = [System.Collections.Generic.List[string]]::new()
+    $Values.Add([string]$script:LlmPipelineVersion)
+    $Values.Add((Limit-LogText ([string]$Donation.source) 40))
+    $Values.Add((Limit-LogText ([string]$Donation.externalId) 200))
+    $Values.Add((Limit-LogText ([string]$Donation.message) 500))
+    $ActiveEntries = @(Get-ActiveEntriesForLlmIntent $InputData.entries)
+    $Values.Add([string]$ActiveEntries.Count)
+    foreach ($Entry in $ActiveEntries) {
+        $Values.Add([string]$Entry.id)
+        $Values.Add([string]$Entry.name)
+        $Values.Add([string]$Entry.category)
+        $Values.Add([string]$Entry.source)
+        $Values.Add([string]$Entry.externalId)
+    }
+    $Canonical = ($Values | ForEach-Object { "$($_.Length):$_" }) -join '|'
+    [uint64]$Hash = 2166136261
+    foreach ($Character in $Canonical.ToCharArray()) {
+        [uint64]$Mixed = $Hash -bxor [uint64][int][char]$Character
+        $Hash = ($Mixed * 16777619) % 4294967296
+    }
+    return ([uint32]$Hash).ToString('x8', [Globalization.CultureInfo]::InvariantCulture)
 }
 
 function New-LlmJobId {
@@ -3067,6 +3485,7 @@ function New-LlmJobFromInput {
     return [pscustomobject]@{
         jobId = New-LlmJobId
         analysisKey = $AnalysisKey
+        pipelineVersion = [int]$script:LlmPipelineVersion
         generation = $Generation
         source = [string]$Donation.source
         externalId = [string]$Donation.externalId
@@ -3108,6 +3527,19 @@ function Add-OrGet-LlmJob {
     if (-not $InputData) {
         return [pscustomobject]@{ ok = $false; error = "Missing job data."; status = 400 }
     }
+    $RequestedPipelineVersion = 0
+    if ($InputData.PSObject.Properties['pipelineVersion']) {
+        try { $RequestedPipelineVersion = [int]$InputData.pipelineVersion } catch { $RequestedPipelineVersion = 0 }
+    }
+    if ($RequestedPipelineVersion -ne [int]$script:LlmPipelineVersion) {
+        return [pscustomobject]@{
+            ok = $false
+            error = "AI pipeline version is stale. Reload the application."
+            code = "LLM_PIPELINE_VERSION_MISMATCH"
+            status = 409
+            pipelineVersion = [int]$script:LlmPipelineVersion
+        }
+    }
     $AnalysisKey = Get-LlmAnalysisKey $InputData
     if ([string]::IsNullOrWhiteSpace($AnalysisKey)) {
         return [pscustomobject]@{ ok = $false; error = "Invalid analysisKey or donation identity."; status = 400 }
@@ -3130,7 +3562,9 @@ function Add-OrGet-LlmJob {
             }
         }
         $Existing = @($Store.jobs | Where-Object {
-            [string]$_.analysisKey -eq $AnalysisKey -and [long]$_.generation -eq $Generation
+            [string]$_.analysisKey -eq $AnalysisKey -and
+            [long]$_.generation -eq $Generation -and
+            [int]$_.pipelineVersion -eq [int]$script:LlmPipelineVersion
         } | Sort-Object createdAt -Descending | Select-Object -First 1)
         if ($Existing.Count -gt 0) {
             $Job = $Existing[0]
@@ -3153,17 +3587,18 @@ function Add-OrGet-LlmJob {
                 $Job.donation = $Template.donation
                 $Job.entriesSnapshot = @($Template.entriesSnapshot)
                 $Job.settings = $Template.settings
+                $Job.pipelineVersion = [int]$script:LlmPipelineVersion
                 [void](Write-LlmJobsStoreOrThrow $Store)
-                return [pscustomobject]@{ ok = $true; jobId = [string]$Job.jobId; analysisKey = $AnalysisKey; status = "queued"; revision = $Revision; generation = $Generation; auctionGeneration = $Generation; existing = $true }
+                return [pscustomobject]@{ ok = $true; jobId = [string]$Job.jobId; analysisKey = $AnalysisKey; pipelineVersion = [int]$script:LlmPipelineVersion; status = "queued"; revision = $Revision; generation = $Generation; auctionGeneration = $Generation; existing = $true }
             }
-            return [pscustomobject]@{ ok = $true; jobId = [string]$Job.jobId; analysisKey = $AnalysisKey; status = [string]$Job.status; stage = [string]$Job.stage; revision = [long]$Store.revision; generation = $Generation; auctionGeneration = $Generation; existing = $true }
+            return [pscustomobject]@{ ok = $true; jobId = [string]$Job.jobId; analysisKey = $AnalysisKey; pipelineVersion = [int]$script:LlmPipelineVersion; status = [string]$Job.status; stage = [string]$Job.stage; revision = [long]$Store.revision; generation = $Generation; auctionGeneration = $Generation; existing = $true }
         }
 
         $Revision = Get-NextLlmRevision $Store
         $Job = New-LlmJobFromInput $InputData $AnalysisKey $Revision $Generation
         $Store.jobs = @($Store.jobs) + @($Job)
         [void](Write-LlmJobsStoreOrThrow $Store)
-        return [pscustomobject]@{ ok = $true; jobId = [string]$Job.jobId; analysisKey = $AnalysisKey; status = "queued"; stage = "waiting"; revision = $Revision; generation = $Generation; auctionGeneration = $Generation; existing = $false }
+        return [pscustomobject]@{ ok = $true; jobId = [string]$Job.jobId; analysisKey = $AnalysisKey; pipelineVersion = [int]$script:LlmPipelineVersion; status = "queued"; stage = "waiting"; revision = $Revision; generation = $Generation; auctionGeneration = $Generation; existing = $false }
     }
     finally {
         Exit-NamedMutex $Mutex
@@ -3175,7 +3610,10 @@ function Get-LlmJobsSummary {
     try {
         $Store = Read-LlmJobsStoreUnsafe
         $Generation = [long]$Store.auctionGeneration
-        $Jobs = @($Store.jobs | Where-Object { [long]$_.generation -eq $Generation })
+        $Jobs = @($Store.jobs | Where-Object {
+            [long]$_.generation -eq $Generation -and
+            [int]$_.pipelineVersion -eq [int]$script:LlmPipelineVersion
+        })
         return [pscustomobject]@{
             revision = [long]$Store.revision
             auctionGeneration = $Generation
@@ -3215,6 +3653,7 @@ function Test-LlmJobGenerationCurrent {
         return @($Store.jobs | Where-Object {
             [string]$_.jobId -eq $JobId -and
             [long]$_.generation -eq $Generation -and
+            [int]$_.pipelineVersion -eq [int]$script:LlmPipelineVersion -and
             [string]$_.status -ne "cancelled"
         }).Count -gt 0
     }
@@ -3237,12 +3676,14 @@ function Get-LlmJobResults {
         }
         $Jobs = @($Store.jobs | Where-Object {
             [long]$_.generation -eq [long]$Store.auctionGeneration -and
+            [int]$_.pipelineVersion -eq [int]$script:LlmPipelineVersion -and
             ($Keys -contains [string]$_.analysisKey) -and
             [long]$_.revision -gt $AfterRevision
         } | ForEach-Object {
             [pscustomobject]@{
                 jobId = [string]$_.jobId
                 analysisKey = [string]$_.analysisKey
+                pipelineVersion = [int]$_.pipelineVersion
                 status = [string]$_.status
                 stage = [string]$_.stage
                 revision = [long]$_.revision
@@ -3273,7 +3714,8 @@ function Update-LlmJobStage {
         $Job = @($Store.jobs | Where-Object {
             [string]$_.jobId -eq $JobId -and
             ($Generation -le 0 -or [long]$_.generation -eq $Generation) -and
-            [long]$_.generation -eq [long]$Store.auctionGeneration
+            [long]$_.generation -eq [long]$Store.auctionGeneration -and
+            [int]$_.pipelineVersion -eq [int]$script:LlmPipelineVersion
         } | Select-Object -First 1)[0]
         if (-not $Job -or [string]$Job.status -ne "running" -or [string]$Job.stage -eq $Stage) { return }
         $Job.stage = $Stage
@@ -3290,7 +3732,23 @@ function Repair-InterruptedLlmJobs {
         $Store = Read-LlmJobsStoreUnsafe
         $Changed = $false
         foreach ($Job in @($Store.jobs)) {
-            if ([long]$Job.generation -eq [long]$Store.auctionGeneration -and [string]$Job.status -eq "running") {
+            if (
+                [long]$Job.generation -eq [long]$Store.auctionGeneration -and
+                [int]$Job.pipelineVersion -ne [int]$script:LlmPipelineVersion -and
+                @('queued', 'running', 'retry_wait') -contains [string]$Job.status
+            ) {
+                $Job.status = 'cancelled'
+                $Job.stage = 'finished'
+                $Job.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+                $Job.finishedAt = $Job.updatedAt
+                $Job.revision = Get-NextLlmRevision $Store
+                $Changed = $true
+            }
+            elseif (
+                [long]$Job.generation -eq [long]$Store.auctionGeneration -and
+                [int]$Job.pipelineVersion -eq [int]$script:LlmPipelineVersion -and
+                [string]$Job.status -eq "running"
+            ) {
                 $Job.status = "queued"
                 $Job.stage = "waiting"
                 $Job.updatedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -3310,6 +3768,7 @@ function Take-NextLlmJob {
         $Now = (Get-Date).ToUniversalTime()
         $Ready = @($Store.jobs | Where-Object {
             if ([long]$_.generation -ne [long]$Store.auctionGeneration) { return $false }
+            if ([int]$_.pipelineVersion -ne [int]$script:LlmPipelineVersion) { return $false }
             if ([string]$_.status -eq "queued") { return $true }
             if ([string]$_.status -ne "retry_wait") { return $false }
             if ([string]::IsNullOrWhiteSpace([string]$_.nextAttemptAt)) { return $true }
@@ -3351,9 +3810,14 @@ function Test-LlmTransientNetworkException {
     $Current = $Exception
     while ($Current) {
         $TypeName = $Current.GetType().FullName
-        if ($TypeName -in @(
+        if ($TypeName -eq 'System.Net.Http.HttpRequestException') {
+            # HttpClient also uses HttpRequestException for non-2xx responses
+            # created above. A response with a real status is not a transport
+            # failure and must be classified by that status instead.
+            if ((Get-LlmHttpStatusCode $Current) -le 0) { return $true }
+        }
+        elseif ($TypeName -in @(
             'System.TimeoutException',
-            'System.Net.Http.HttpRequestException',
             'System.Net.Sockets.SocketException',
             'System.Threading.Tasks.TaskCanceledException'
         )) { return $true }
@@ -3398,9 +3862,9 @@ function Get-LlmFailureClassification {
             $RetryableType = $true
         }
         elseif ($StatusCode -in @(401, 403)) { $Code = 'OPENROUTER_AUTH_ERROR' }
-        elseif ($StatusCode -eq 400) { $Code = 'OPENROUTER_BAD_REQUEST' }
         elseif ($StatusCode -eq 404 -or $Lower.Contains('invalid model') -or $Lower.Contains('model not found')) { $Code = 'OPENROUTER_INVALID_MODEL' }
         elseif ($Lower.Contains('json schema') -or $Lower.Contains('structured output')) { $Code = 'LLM_SCHEMA_VALIDATION_ERROR' }
+        elseif ($StatusCode -eq 400) { $Code = 'OPENROUTER_BAD_REQUEST' }
         elseif ($Lower.Contains('timed out') -or $Lower.Contains('timeout')) {
             $Code = 'OPENROUTER_TIMEOUT'
             $RetryableType = $true
@@ -3438,18 +3902,19 @@ function Get-LlmFailureInfo {
     param([System.Management.Automation.ErrorRecord]$ErrorRecord, [int]$Attempt)
 
     $Message = Get-MaskedText $ErrorRecord.Exception.Message
-    $StatusCode = 0
-    $RetryAfter = 0
-    try { $StatusCode = [int]$ErrorRecord.Exception.Response.StatusCode } catch {}
-    try {
-        $RetryHeader = [string]$ErrorRecord.Exception.Response.Headers["Retry-After"]
-        if (-not [int]::TryParse($RetryHeader, [ref]$RetryAfter) -and -not [string]::IsNullOrWhiteSpace($RetryHeader)) {
-            try {
-                $RetryAt = [DateTimeOffset]::Parse($RetryHeader)
-                $RetryAfter = [Math]::Max(1, [int][Math]::Ceiling(($RetryAt - [DateTimeOffset]::UtcNow).TotalSeconds))
-            } catch {}
-        }
-    } catch {}
+    $StatusCode = Get-LlmHttpStatusCode $ErrorRecord.Exception
+    $RetryAfter = Get-LlmRetryAfterSeconds $ErrorRecord.Exception
+    if ($RetryAfter -le 0) {
+        try {
+            $RetryHeader = [string]$ErrorRecord.Exception.Response.Headers["Retry-After"]
+            if (-not [int]::TryParse($RetryHeader, [ref]$RetryAfter) -and -not [string]::IsNullOrWhiteSpace($RetryHeader)) {
+                try {
+                    $RetryAt = [DateTimeOffset]::Parse($RetryHeader)
+                    $RetryAfter = [Math]::Max(1, [int][Math]::Ceiling(($RetryAt - [DateTimeOffset]::UtcNow).TotalSeconds))
+                } catch {}
+            }
+        } catch {}
+    }
     $Classification = Get-LlmFailureClassification $ErrorRecord.Exception $Message $StatusCode $Attempt $RetryAfter
     return [pscustomobject]@{
         message = Limit-LogText $Message 500
@@ -3471,7 +3936,9 @@ function Complete-LlmJob {
     try {
         $Store = Read-LlmJobsStoreUnsafe
         $Job = @($Store.jobs | Where-Object {
-            [string]$_.jobId -eq $JobId -and [long]$_.generation -eq $Generation
+            [string]$_.jobId -eq $JobId -and
+            [long]$_.generation -eq $Generation -and
+            [int]$_.pipelineVersion -eq [int]$script:LlmPipelineVersion
         } | Select-Object -First 1)[0]
         if (-not $Job -or [long]$Store.auctionGeneration -ne $Generation -or [string]$Job.status -eq "cancelled") { return }
         $Now = (Get-Date).ToUniversalTime().ToString("o")
@@ -3499,7 +3966,9 @@ function Fail-OrRetryLlmJob {
     try {
         $Store = Read-LlmJobsStoreUnsafe
         $Job = @($Store.jobs | Where-Object {
-            [string]$_.jobId -eq $JobId -and [long]$_.generation -eq $Generation
+            [string]$_.jobId -eq $JobId -and
+            [long]$_.generation -eq $Generation -and
+            [int]$_.pipelineVersion -eq [int]$script:LlmPipelineVersion
         } | Select-Object -First 1)[0]
         if (-not $Job -or [long]$Store.auctionGeneration -ne $Generation -or [string]$Job.status -eq "cancelled") { return }
         $Now = (Get-Date).ToUniversalTime()

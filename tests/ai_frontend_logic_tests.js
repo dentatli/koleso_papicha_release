@@ -35,6 +35,74 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+const identityStart = source.indexOf('    function limitAiServerText');
+const identityEnd = source.indexOf('    function removeDonationAiJob', identityStart);
+if (identityStart < 0 || identityEnd < 0) throw new Error('AI identity helper block not found');
+function loadAiIdentityHelpers(pipelineVersion = 3) {
+  return new Function('LLM_PIPELINE_VERSION', 'getEntriesForAiPayload', `${source.slice(identityStart, identityEnd)}; return {
+    limitAiServerText,
+    getActiveEntriesForAiIdentity,
+    getAiInputFingerprint,
+    getDonationAnalysisKey
+  };`)(pipelineVersion, () => []);
+}
+const identityHelpers = loadAiIdentityHelpers(3);
+const identityDonation = {
+  source: 'donatepay',
+  externalId: 'identity-1',
+  message: 'на булли... МЯУ!',
+  llm: null
+};
+const identityEntries = [{
+  id: 'bully-entry',
+  name: 'Bully',
+  category: 'game',
+  source: 'steam',
+  externalId: '12200',
+  eliminated: false
+}];
+const identityKey = identityHelpers.getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries });
+assert(identityKey.startsWith('v3:donatepay:identity-1:'), 'Frontend analysis key does not include pipeline version');
+assert(identityKey === 'v3:donatepay:identity-1:5fd03456', 'Frontend analysisKey no longer matches the server UTF-16 fingerprint contract');
+assert(
+  identityHelpers.getDonationAnalysisKey({ ...identityDonation, message: 'на другую игру' }, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
+  'Frontend analysis key ignores donation message changes'
+);
+assert(
+  identityHelpers.getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: [...identityEntries, { id: 'other', name: 'Other', category: 'game' }] }) !== identityKey,
+  'Frontend analysis key ignores active entry changes'
+);
+assert(
+  loadAiIdentityHelpers(4).getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
+  'Frontend analysis key ignores pipeline version changes'
+);
+
+const skipStart = source.indexOf('    function shouldSkipDonationAi');
+const skipEnd = source.indexOf('    function getEntriesForAiPayload', skipStart);
+if (skipStart < 0 || skipEnd < 0) throw new Error('AI skip helper not found');
+const { shouldSkipDonationAi } = new Function('LLM_PIPELINE_VERSION', `${source.slice(skipStart, skipEnd)}; return { shouldSkipDonationAi };`)(3);
+assert(!shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 2, status: 'done' } }), 'Legacy AI result was reused after pipeline upgrade');
+assert(shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 3, status: 'done' } }), 'Current completed AI result was needlessly resubmitted');
+
+const mojibakeStart = source.indexOf('    function isLikelyMojibakeText');
+const mojibakeEnd = source.indexOf('    function getSafeExternalUrl', mojibakeStart);
+if (mojibakeStart < 0 || mojibakeEnd < 0) throw new Error('AI display safety helper block not found');
+const displayHelpers = new Function('limitStoredText', `${source.slice(mojibakeStart, mojibakeEnd)}; return {
+  isLikelyMojibakeText,
+  getSafeAiDisplayText
+};`)((value, maxLength) => String(value || '').slice(0, maxLength));
+assert(displayHelpers.getSafeAiDisplayText('Сообщение указывает на игру Bully', 'fallback').includes('Bully'), 'Valid Russian AI reason was hidden');
+assert(displayHelpers.getSafeAiDisplayText('Ð½Ð° Ð±ÑƒÐ»Ð»Ð¸', 'Безопасный текст') === 'Безопасный текст', 'Mojibake-like AI reason reached the UI');
+
+assert(source.includes('pipelineVersion: LLM_PIPELINE_VERSION,\n          auctionGeneration:'), 'AI job request does not send pipelineVersion');
+assert(source.includes("title.appendChild(document.createTextNode('AI выбрал существующий лот: '))"), 'Existing-entry AI result has no clear Russian UI state');
+assert(!source.includes('AI понял: Неизвестно · unknown'), 'Raw unknown enum is still shown to users');
+const aiBlockStart = source.indexOf('    function createDonationAiBlock');
+const aiBlockEnd = source.indexOf('    function formatDonationMoney', aiBlockStart);
+const aiBlockSource = source.slice(aiBlockStart, aiBlockEnd);
+assert(aiBlockSource.includes('reason.textContent = getSafeAiDisplayText'), 'AI reason bypasses safe text rendering');
+assert(!aiBlockSource.includes('.innerHTML'), 'AI result UI inserts model output as HTML');
+
 const viewModeStart = source.indexOf('    function hasDonationAlertsOAuthAccessToken');
 const viewModeEnd = source.indexOf('    function buildViewUrl', viewModeStart);
 if (viewModeStart < 0 || viewModeEnd < 0) throw new Error('View mode helper block not found');

@@ -4056,6 +4056,7 @@
     let serverCollectorStatusTimer = null;
     const SERVER_COLLECTOR_POLL_INTERVAL_MS = 10000;
     const AI_ANALYSIS_ALLOWED_CATEGORIES = ['game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown'];
+    const LLM_PIPELINE_VERSION = 3;
     const MAX_LOT_NAME_LENGTH = 200;
     const MAX_DONATION_MESSAGE_LENGTH = 1000;
     let llmJobsRevision = 0;
@@ -6612,6 +6613,7 @@
       const allowedActions = ['assign_existing', 'create_lot_candidate', 'ask_manual'];
       const legacyConfidence = Math.max(0, Math.min(1, Number(llm.confidence) || 0));
       return {
+        pipelineVersion: Number(llm.pipelineVersion) || 0,
         analysisKey: limitStoredText(llm.analysisKey, 300),
         jobId: limitStoredText(llm.jobId, 200),
         status: allowedStatuses.includes(llm.status) ? llm.status : (llm.status === 'pending' ? 'running' : 'idle'),
@@ -6636,6 +6638,7 @@
         candidates: Array.isArray(llm.candidates) ? llm.candidates.slice(0, 5) : [],
         reason: limitStoredText(llm.reason, 400),
         error: limitStoredText(llm.error, 500),
+        errorCode: limitStoredText(llm.errorCode, 100),
         analyzedAt: limitStoredText(llm.analyzedAt, 80)
       };
     }
@@ -6829,6 +6832,7 @@
 
     function shouldSkipDonationAi(donation, force = false) {
       if (!donation || donation.status !== 'pending') return true;
+      if (Number(donation.llm?.pipelineVersion || 0) !== LLM_PIPELINE_VERSION) return false;
       if (!force && ['submitting', 'queued', 'running', 'retry_wait', 'done', 'applied', 'skipped', 'error'].includes(donation.llm?.status)) return true;
       return false;
     }
@@ -6845,9 +6849,57 @@
       }));
     }
 
-    function getDonationAnalysisKey(donation) {
+    function limitAiServerText(value, maxLength) {
+      const text = String(value || '');
+      return text.length <= maxLength ? text : `${text.slice(0, maxLength)}...[truncated]`;
+    }
+
+    function getActiveEntriesForAiIdentity(entriesPayload = getEntriesForAiPayload()) {
+      return entriesPayload
+        .filter(entry => entry && !entry.eliminated && String(entry.id || '').trim() && String(entry.name || '').trim())
+        .slice(0, 200)
+        .map(entry => ({
+          id: limitAiServerText(entry.id, 300),
+          name: limitAiServerText(entry.name, 200),
+          category: limitAiServerText(entry.category, 40),
+          source: limitAiServerText(entry.source, 40),
+          externalId: limitAiServerText(entry.externalId, 200)
+        }));
+    }
+
+    function getAiInputFingerprint(donation, entriesPayload = getEntriesForAiPayload()) {
+      if (!donation) return '';
+      const activeEntries = getActiveEntriesForAiIdentity(entriesPayload);
+      const values = [
+        String(LLM_PIPELINE_VERSION),
+        limitAiServerText(donation.source, 40),
+        limitAiServerText(donation.externalId, 200),
+        limitAiServerText(donation.message, 500),
+        String(activeEntries.length)
+      ];
+      activeEntries.forEach(entry => values.push(entry.id, entry.name, entry.category, entry.source, entry.externalId));
+      const canonical = values.map(value => `${value.length}:${value}`).join('|');
+      let hash = 0x811c9dc5;
+      for (let index = 0; index < canonical.length; index += 1) {
+        hash = Math.imul((hash ^ canonical.charCodeAt(index)) >>> 0, 0x01000193) >>> 0;
+      }
+      return hash.toString(16).padStart(8, '0');
+    }
+
+    function getDonationAnalysisKey(donation, { preferTracked = true, entriesPayload = null } = {}) {
       if (!donation?.source || !donation?.externalId) return '';
-      return `${String(donation.source)}:${String(donation.externalId)}`;
+      if (
+        preferTracked
+        && Number(donation.llm?.pipelineVersion || 0) === LLM_PIPELINE_VERSION
+        && String(donation.llm?.analysisKey || '').startsWith(`v${LLM_PIPELINE_VERSION}:`)
+      ) {
+        return String(donation.llm.analysisKey);
+      }
+      const payloadEntries = entriesPayload || getEntriesForAiPayload();
+      const fingerprint = getAiInputFingerprint(donation, payloadEntries);
+      return fingerprint
+        ? `v${LLM_PIPELINE_VERSION}:${String(donation.source)}:${String(donation.externalId)}:${fingerprint}`
+        : '';
     }
 
     function removeDonationAiJob(donation) {
@@ -6865,12 +6917,14 @@
       ) return;
       const donation = getPendingDonationById(donationId);
       if (!ensure && shouldSkipDonationAi(donation, force)) return;
-      const analysisKey = getDonationAnalysisKey(donation);
+      const entriesPayload = getEntriesForAiPayload();
+      const analysisKey = getDonationAnalysisKey(donation, { preferTracked: false, entriesPayload });
       if (!analysisKey) return;
       const operationClaim = createAdminOperationClaim(createOperationId('ai-submit'), currentAuctionGeneration);
       if (!operationClaim) return false;
       donation.llm = {
         ...normalizeDonationLlmState(force ? null : donation.llm),
+        pipelineVersion: LLM_PIPELINE_VERSION,
         analysisKey,
         status: 'submitting',
         stage: 'waiting',
@@ -6882,6 +6936,7 @@
       try {
         const response = await fetchLocalApi('/api/llm/jobs', {
           analysisKey,
+          pipelineVersion: LLM_PIPELINE_VERSION,
           auctionGeneration: currentAuctionGeneration,
           force: !!force,
           donation: {
@@ -6893,7 +6948,7 @@
             currency: donation.currency,
             message: donation.message
           },
-          entries: getEntriesForAiPayload(),
+          entries: entriesPayload,
           settings: {
             model: llmSettings.model,
             allowSteam: llmSettings.allowSteam,
@@ -6908,6 +6963,7 @@
         applyServerAuctionGeneration(response?.auctionGeneration || response?.generation);
         current.llm = {
           ...normalizeDonationLlmState(current.llm),
+          pipelineVersion: Number(response?.pipelineVersion) || LLM_PIPELINE_VERSION,
           analysisKey,
           jobId: String(response?.jobId || ''),
           status: ['queued', 'running', 'retry_wait', 'done', 'error'].includes(response?.status) ? response.status : 'queued',
@@ -6919,6 +6975,21 @@
         await syncLlmJobResults({ force: true });
         return true;
       } catch (error) {
+        if (error?.status === 409 && error?.proxyPayload?.code === 'LLM_PIPELINE_VERSION_MISMATCH') {
+          const current = getPendingDonationById(donationId);
+          if (current && isAdminOperationStillAuthoritative(operationClaim)) {
+            current.llm = {
+              ...normalizeDonationLlmState(current.llm),
+              status: 'error',
+              stage: 'finished',
+              error: 'Версия AI-анализа изменилась. Обновите страницу.',
+              errorCode: 'LLM_PIPELINE_VERSION_MISMATCH'
+            };
+            saveData();
+            renderDonationsPanel();
+          }
+          return false;
+        }
         if (error?.status === 409 && error?.proxyPayload?.code === 'AUCTION_GENERATION_MISMATCH') {
           const serverGeneration = Number(error.proxyPayload.currentAuctionGeneration || 0);
           applyServerAuctionGeneration(serverGeneration, { autoResync: false });
@@ -6953,6 +7024,7 @@
       donationsPending
         .filter(donation => {
           if (donation.status !== 'pending') return false;
+          if (Number(donation.llm?.pipelineVersion || 0) !== LLM_PIPELINE_VERSION) return true;
           const status = donation.llm?.status || 'idle';
           return includeTracked
             ? !['done', 'applied', 'skipped', 'error'].includes(status)
@@ -7015,11 +7087,13 @@
         for (const job of Array.isArray(payload?.jobs) ? payload.jobs : []) {
           const donation = donationsPending.find(item => getDonationAnalysisKey(item) === job.analysisKey);
           if (!donation) continue;
+          if (Number(job.pipelineVersion || 0) !== LLM_PIPELINE_VERSION) continue;
           const base = normalizeDonationLlmState(donation.llm);
           if (job.status === 'done') {
             if (validateAiSuggestion(job.result, donation)) {
               donation.llm = {
                 ...normalizeDonationLlmState(job.result),
+                pipelineVersion: LLM_PIPELINE_VERSION,
                 analysisKey: job.analysisKey,
                 jobId: job.jobId,
                 status: 'done',
@@ -7027,12 +7101,12 @@
                 analyzedAt: job.finishedAt || new Date().toISOString()
               };
             } else {
-              donation.llm = { ...base, jobId: job.jobId, status: 'error', stage: 'finished', error: 'AI вернул некорректное предложение.' };
+              donation.llm = { ...base, pipelineVersion: LLM_PIPELINE_VERSION, jobId: job.jobId, status: 'error', stage: 'finished', error: 'AI вернул некорректное предложение.', errorCode: 'PIPELINE_RESULT_INVALID' };
             }
           } else if (job.status === 'error') {
-            donation.llm = { ...base, jobId: job.jobId, status: 'error', stage: 'finished', error: job.error || 'AI недоступен', analyzedAt: job.finishedAt || new Date().toISOString() };
+            donation.llm = { ...base, pipelineVersion: LLM_PIPELINE_VERSION, jobId: job.jobId, status: 'error', stage: 'finished', error: job.error || 'AI недоступен', errorCode: job.errorCode || '', analyzedAt: job.finishedAt || new Date().toISOString() };
           } else {
-            donation.llm = { ...base, jobId: job.jobId, status: job.status, stage: job.stage || 'waiting', error: job.error || '' };
+            donation.llm = { ...base, pipelineVersion: LLM_PIPELINE_VERSION, jobId: job.jobId, status: job.status, stage: job.stage || 'waiting', error: job.error || '', errorCode: job.errorCode || '' };
           }
           changed = true;
         }
@@ -7365,6 +7439,16 @@
       return '';
     }
 
+    function isLikelyMojibakeText(value) {
+      const text = String(value || '');
+      return /(?:Ð.|Ñ.|Ã.|Â.){2,}/.test(text);
+    }
+
+    function getSafeAiDisplayText(value, fallback = '') {
+      const text = limitStoredText(value, 400).trim();
+      return !text || isLikelyMojibakeText(text) ? fallback : text;
+    }
+
     function getSafeExternalUrl(url) {
       try {
         const parsed = new URL(String(url || ''));
@@ -7423,12 +7507,23 @@
         return box;
       }
       if (llm.status === 'error') {
-        title.textContent = 'AI недоступен';
+        if (llm.errorCode === 'LLM_RESPONSE_ENCODING_ERROR') {
+          title.textContent = 'Ответ AI получен в неверной кодировке';
+        } else if (['LLM_RESPONSE_PARSE_ERROR', 'LLM_SCHEMA_VALIDATION_ERROR'].includes(llm.errorCode)) {
+          title.textContent = 'Ответ AI не удалось обработать';
+        } else {
+          title.textContent = 'AI недоступен';
+        }
         box.appendChild(title);
-        if (llm.error) {
+        const displayError = llm.errorCode === 'LLM_RESPONSE_ENCODING_ERROR'
+          ? 'Повторите запрос после проверки подключения.'
+          : (['LLM_RESPONSE_PARSE_ERROR', 'LLM_SCHEMA_VALIDATION_ERROR'].includes(llm.errorCode)
+            ? 'Некорректный структурированный ответ.'
+            : getSafeAiDisplayText(llm.error, 'Не удалось выполнить AI-анализ.'));
+        if (displayError) {
           const reason = document.createElement('div');
           reason.className = 'donation-ai-reason';
-          reason.textContent = llm.error;
+          reason.textContent = displayError;
           box.appendChild(reason);
         }
         const actions = document.createElement('div');
@@ -7447,7 +7542,7 @@
         const fingerprintMatches = !!entry
           && !entry.eliminated
           && doesEntryMatchAiFingerprint(entry, llm.entryFingerprint);
-        title.appendChild(document.createTextNode('AI предлагает: '));
+        title.appendChild(document.createTextNode('AI выбрал существующий лот: '));
         appendLinkedText(title, entry?.name || llm.query || 'лот', entry?.sourceUrl);
         title.appendChild(document.createTextNode(` · ${formatAiConfidence(llm.finalConfidence)}`));
         box.appendChild(title);
@@ -7486,7 +7581,9 @@
         if (candidate.sourceMode === 'store_search') {
           const mode = document.createElement('div');
           mode.className = 'donation-ai-reason';
-          mode.textContent = 'Steam: поиск магазина';
+          mode.textContent = candidate.metadataIncomplete || ['region_unavailable', 'details_unavailable'].includes(candidate.availability)
+            ? 'Игра распознана, но карточка Steam недоступна или содержит неполные данные.'
+            : 'Steam: поиск магазина';
           box.appendChild(mode);
         }
         const actions = document.createElement('div');
@@ -7517,8 +7614,9 @@
 
       if (llm.action === 'ask_manual') {
         const categoryLabel = getAiCategoryLabel(llm.category);
+        const knownCategory = llm.category && llm.category !== 'unknown';
         title.textContent = llm.query
-          ? `AI понял: ${categoryLabel} · ${llm.query}`
+          ? `AI распознал: ${llm.query}${knownCategory ? ` · ${categoryLabel}` : ''}`
           : 'AI не смог однозначно выбрать лот';
         box.appendChild(title);
         if (llm.candidates?.length) {
@@ -7532,7 +7630,7 @@
         } else if (llm.reason) {
           const reason = document.createElement('div');
           reason.className = 'donation-ai-reason';
-          reason.textContent = llm.reason;
+          reason.textContent = getSafeAiDisplayText(llm.reason, 'AI не смог однозначно определить лот.');
           box.appendChild(reason);
         }
         return box;
