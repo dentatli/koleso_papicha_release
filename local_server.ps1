@@ -51,8 +51,11 @@ $script:MaxRequestHeaderChars = 32768
 $script:MaxRequestHeaderCount = 100
 $script:MaxRequestBodyBytes = 4MB
 $script:ClientIoTimeoutMs = 15000
-$script:LlmPipelineVersion = 4
+$script:LlmPipelineVersion = 6
 $script:LlmExistingSelectionThreshold = 0.90
+$script:LlmMaxItems = 5
+$script:LlmMaxSearchQueriesPerItem = 4
+$script:LlmMaxCandidatesPerItem = 5
 
 function Mask-SecretText {
     param([AllowNull()][string]$Text)
@@ -1364,7 +1367,7 @@ function Normalize-LlmText {
 function Normalize-LotTitle {
     param([AllowNull()][string]$Text)
 
-    $Value = ([string]$Text).ToLowerInvariant()
+    $Value = ([string]$Text).ToLowerInvariant().Replace([char]0x0451, [char]0x0435)
     $Value = [System.Text.RegularExpressions.Regex]::Replace($Value, '[^\p{L}\p{Nd}\s]+', ' ')
     return [System.Text.RegularExpressions.Regex]::Replace($Value, '\s+', ' ').Trim()
 }
@@ -1541,6 +1544,49 @@ function Get-LlmTitleInformation {
         normalized = $Normalized
         letterCount = [int]$LetterCount
         reason = $Reason
+    }
+}
+
+function Normalize-LlmDisplayTitle {
+    param([AllowNull()][string]$Text)
+
+    $Value = Limit-LogText ([string]$Text) 200
+    $Value = [System.Text.RegularExpressions.Regex]::Replace($Value, '\p{Cc}', ' ')
+    return [System.Text.RegularExpressions.Regex]::Replace($Value, '\s+', ' ').Trim()
+}
+
+function Get-LlmManualLotSuggestion {
+    param(
+        [AllowNull()][string]$DisplayTitle,
+        [AllowNull()][string]$Category,
+        [AllowNull()][string]$OriginalLanguage = 'unknown'
+    )
+
+    $Title = Normalize-LlmDisplayTitle $DisplayTitle
+    $TitleInfo = Get-LlmTitleInformation $Title
+    if (-not $TitleInfo.usable) { return $null }
+    if ($Title -match '(?i)(?:https?://|www\.)') { return $null }
+    $ServiceText = @(
+        'неизвестно', 'название неизвестно', 'не определено', 'без названия',
+        'unknown title', 'not specified', 'n a'
+    )
+    if ($ServiceText -contains $TitleInfo.normalized) { return $null }
+
+    $AllowedCategories = @('game', 'anime', 'movie', 'tv_show', 'cartoon', 'other')
+    $SafeCategory = ([string]$Category).Trim().ToLowerInvariant()
+    if ($AllowedCategories -notcontains $SafeCategory) { $SafeCategory = 'other' }
+    $AllowedLanguages = @('ru', 'en', 'ja', 'ko', 'zh', 'other', 'unknown')
+    $SafeLanguage = ([string]$OriginalLanguage).Trim().ToLowerInvariant()
+    if ($AllowedLanguages -notcontains $SafeLanguage) { $SafeLanguage = 'unknown' }
+    return [pscustomobject]@{
+        kind = 'manual_lot'
+        title = $Title
+        category = $SafeCategory
+        originalLanguage = $SafeLanguage
+        source = 'llm_manual'
+        externalId = ''
+        sourceUrl = ''
+        catalogConfirmed = $false
     }
 }
 
@@ -1721,6 +1767,7 @@ function ConvertTo-LlmResult {
         [AllowNull()][object]$EntryFingerprint = $null,
         [AllowNull()][object]$Candidate = $null,
         [object[]]$Candidates = @(),
+        [object[]]$Items = @(),
         [string]$Reason = ""
     )
 
@@ -1738,8 +1785,370 @@ function ConvertTo-LlmResult {
         existingMatchKind = if (@('exact_title', 'exact_external_identity') -contains $ExistingMatchKind) { $ExistingMatchKind } else { '' }
         candidate = $Candidate
         candidates = @($Candidates | Select-Object -First 5)
+        items = @($Items | Select-Object -First $script:LlmMaxItems)
         reason = Limit-LogText $Reason 400
     }
+}
+
+function Get-LlmItemCatalog {
+    param(
+        [AllowNull()][string]$Catalog,
+        [AllowNull()][string]$Category
+    )
+
+    $Value = ([string]$Catalog).Trim().ToLowerInvariant()
+    if (@('steam', 'anime', 'none') -contains $Value) { return $Value }
+    if ([string]$Category -eq 'game') { return 'steam' }
+    if ([string]$Category -eq 'anime') { return 'anime' }
+    return 'none'
+}
+
+function Get-LlmItemSearchQueries {
+    param(
+        [AllowNull()][object]$Item,
+        [int]$Limit = 4
+    )
+
+    if (-not $Item) { return @() }
+    $Values = New-Object System.Collections.Generic.List[string]
+    foreach ($Value in @(
+        [string]$Item.officialTitleGuess,
+        [string]$Item.displayTitle,
+        [string]$Item.mentionedTitle
+    ) + @($Item.searchQueries)) {
+        $Text = Limit-LogText ([string]$Value) 160
+        if ([string]::IsNullOrWhiteSpace($Text)) { continue }
+        $Text = $Text.Trim()
+        $Key = Normalize-LotTitle $Text
+        if ([string]::IsNullOrWhiteSpace($Key)) { continue }
+        $AlreadyPresent = $false
+        foreach ($Existing in $Values) {
+            if ((Normalize-LotTitle $Existing) -eq $Key) {
+                $AlreadyPresent = $true
+                break
+            }
+        }
+        if (-not $AlreadyPresent) { $Values.Add($Text) }
+        if ($Values.Count -ge [Math]::Max(1, $Limit)) { break }
+    }
+    return @($Values | ForEach-Object { $_ })
+}
+
+function Get-LlmIntentItemRejectionReason {
+    param([AllowNull()][object]$ErrorRecord)
+
+    $Message = if ($ErrorRecord -and $ErrorRecord.Exception) {
+        [string]$ErrorRecord.Exception.Message
+    } else {
+        [string]$ErrorRecord
+    }
+    $AllowedReasons = @(
+        'invalid_item_shape',
+        'invalid_item_confidence',
+        'invalid_existing_confidence',
+        'unknown_existing_entry',
+        'invalid_none_confidence',
+        'empty_item_titles'
+    )
+    if ($AllowedReasons -contains $Message) { return $Message }
+    return 'invalid_item'
+}
+
+function Write-LlmIntentItemRejection {
+    param(
+        [int]$ItemIndex,
+        [string]$Reason,
+        [int]$ReceivedCount,
+        [int]$AcceptedCount,
+        [int]$ActiveEntryCount,
+        [AllowNull()][string]$ResponseFingerprint = ''
+    )
+
+    $SafeReason = Get-LlmIntentItemRejectionReason $Reason
+    $SafeFingerprint = if ([string]$ResponseFingerprint -match '^[0-9a-fA-F]{16,24}$') {
+        ([string]$ResponseFingerprint).ToLowerInvariant()
+    } else {
+        'unavailable'
+    }
+    $Message = "AI intent item rejected: code=LLM_SCHEMA_VALIDATION_ERROR itemIndex=$ItemIndex reason=$SafeReason receivedItems=$ReceivedCount acceptedItems=$AcceptedCount activeEntries=$ActiveEntryCount responseFingerprint=$SafeFingerprint"
+    if (Get-Command -Name Write-AppLog -ErrorAction SilentlyContinue) {
+        Write-AppLog -Level 'WARN' -Message $Message
+    }
+}
+
+function Resolve-LlmIntentItems {
+    param(
+        [AllowNull()][object]$Result,
+        [object[]]$Entries,
+        [AllowNull()][string]$ResponseFingerprint = ''
+    )
+
+    if (-not $Result -or -not $Result.PSObject.Properties['items']) {
+        Throw-LlmError 'LLM_SCHEMA_VALIDATION_ERROR' 'OpenRouter intent response did not contain items.'
+    }
+    $ActiveEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
+    $HasActiveEntries = $ActiveEntries.Count -gt 0
+    $AllowedCategories = @('game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown')
+    $AllowedCatalogs = @('steam', 'anime', 'none')
+    $AllowedLanguages = @('ru', 'en', 'ja', 'ko', 'zh', 'other', 'unknown')
+    $Resolved = New-Object System.Collections.Generic.List[object]
+    $RawItems = @($Result.items | Select-Object -First $script:LlmMaxItems)
+    $Index = 0
+    foreach ($RawItem in $RawItems) {
+        $Index++
+        try {
+            if (
+                -not $RawItem -or
+                -not $RawItem.PSObject.Properties['category'] -or
+                -not $RawItem.PSObject.Properties['catalog'] -or
+                -not $RawItem.PSObject.Properties['mentionedTitle'] -or
+                -not $RawItem.PSObject.Properties['displayTitle'] -or
+                -not $RawItem.PSObject.Properties['officialTitleGuess'] -or
+                -not $RawItem.PSObject.Properties['searchQueries'] -or
+                -not $RawItem.PSObject.Properties['originalLanguage'] -or
+                -not $RawItem.PSObject.Properties['confidence'] -or
+                -not $RawItem.PSObject.Properties['reason'] -or
+                ($HasActiveEntries -and -not $RawItem.PSObject.Properties['existingEntryId']) -or
+                ($HasActiveEntries -and -not $RawItem.PSObject.Properties['existingSelectionConfidence']) -or
+                $AllowedCategories -notcontains [string]$RawItem.category -or
+                $AllowedCatalogs -notcontains [string]$RawItem.catalog -or
+                $AllowedLanguages -notcontains [string]$RawItem.originalLanguage -or
+                [string]::IsNullOrWhiteSpace([string]$RawItem.reason)
+            ) { throw 'invalid_item_shape' }
+
+            $Confidence = ConvertTo-LlmConfidence $RawItem.confidence
+            if ($null -eq $Confidence) { throw 'invalid_item_confidence' }
+            $ExistingConfidence = 0.0
+            $ExistingEntryId = ''
+            if ($HasActiveEntries) {
+                $ExistingConfidenceValue = ConvertTo-LlmConfidence $RawItem.existingSelectionConfidence
+                if ($null -eq $ExistingConfidenceValue) { throw 'invalid_existing_confidence' }
+                $ExistingConfidence = [double]$ExistingConfidenceValue
+                $ProviderEntryId = Limit-LogText ([string]$RawItem.existingEntryId) 300
+                if ($ProviderEntryId -ne '__none__') {
+                    $SelectedEntry = @($ActiveEntries | Where-Object { [string]$_.id -eq $ProviderEntryId } | Select-Object -First 1)[0]
+                    if (-not $SelectedEntry) { throw 'unknown_existing_entry' }
+                    $ExistingEntryId = $ProviderEntryId
+                }
+                elseif ($ExistingConfidence -ne 0.0) { throw 'invalid_none_confidence' }
+            }
+
+            $SearchQueries = @(Get-LlmItemSearchQueries $RawItem $script:LlmMaxSearchQueriesPerItem)
+            $MentionedTitle = Limit-LogText ([string]$RawItem.mentionedTitle) 200
+            $DisplayTitle = Normalize-LlmDisplayTitle ([string]$RawItem.displayTitle)
+            $OfficialTitleGuess = Limit-LogText ([string]$RawItem.officialTitleGuess) 200
+            if (
+                [string]::IsNullOrWhiteSpace($MentionedTitle) -and
+                [string]::IsNullOrWhiteSpace($OfficialTitleGuess) -and
+                $SearchQueries.Count -eq 0
+            ) { throw 'empty_item_titles' }
+
+            $Resolved.Add([pscustomobject]@{
+                itemId = "item-$Index"
+                category = [string]$RawItem.category
+                catalog = [string]$RawItem.catalog
+                mentionedTitle = $MentionedTitle
+                displayTitle = $DisplayTitle
+                officialTitleGuess = $OfficialTitleGuess
+                originalLanguage = [string]$RawItem.originalLanguage
+                searchQueries = $SearchQueries
+                confidence = [double]$Confidence
+                existingEntryId = $ExistingEntryId
+                existingSelectionConfidence = [double]$ExistingConfidence
+                reason = Limit-LogText ([string]$RawItem.reason) 400
+            })
+        }
+        catch {
+            # A malformed entity must not discard other valid entities from the
+            # same strictly structured response. The rejection reason is a
+            # fixed allowlisted code; no raw model text or entry ID is logged.
+            Write-LlmIntentItemRejection `
+                -ItemIndex $Index `
+                -Reason (Get-LlmIntentItemRejectionReason $_) `
+                -ReceivedCount $RawItems.Count `
+                -AcceptedCount $Resolved.Count `
+                -ActiveEntryCount $ActiveEntries.Count `
+                -ResponseFingerprint $ResponseFingerprint
+            continue
+        }
+    }
+    if ($Resolved.Count -eq 0) {
+        Throw-LlmError 'LLM_SCHEMA_VALIDATION_ERROR' 'OpenRouter intent response did not contain a valid item.'
+    }
+    return @($Resolved | ForEach-Object { $_ })
+}
+
+function Resolve-LlmNormalizedIntentItems {
+    param(
+        [object[]]$Items,
+        [object[]]$Entries,
+        [AllowNull()][string]$ResponseFingerprint = ''
+    )
+
+    $ActiveEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
+    $AllowedCategories = @('game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown')
+    $AllowedCatalogs = @('steam', 'anime', 'none')
+    $AllowedLanguages = @('ru', 'en', 'ja', 'ko', 'zh', 'other', 'unknown')
+    $Resolved = New-Object System.Collections.Generic.List[object]
+    $RawItems = @($Items | Select-Object -First $script:LlmMaxItems)
+    $Index = 0
+    foreach ($RawItem in $RawItems) {
+        $Index++
+        try {
+            if (
+                -not $RawItem -or
+                -not $RawItem.PSObject.Properties['category'] -or
+                -not $RawItem.PSObject.Properties['catalog'] -or
+                -not $RawItem.PSObject.Properties['mentionedTitle'] -or
+                -not $RawItem.PSObject.Properties['displayTitle'] -or
+                -not $RawItem.PSObject.Properties['officialTitleGuess'] -or
+                -not $RawItem.PSObject.Properties['searchQueries'] -or
+                -not $RawItem.PSObject.Properties['originalLanguage'] -or
+                -not $RawItem.PSObject.Properties['confidence'] -or
+                -not $RawItem.PSObject.Properties['existingEntryId'] -or
+                -not $RawItem.PSObject.Properties['existingSelectionConfidence'] -or
+                -not $RawItem.PSObject.Properties['reason'] -or
+                $AllowedCategories -notcontains [string]$RawItem.category -or
+                $AllowedCatalogs -notcontains [string]$RawItem.catalog -or
+                $AllowedLanguages -notcontains [string]$RawItem.originalLanguage -or
+                [string]::IsNullOrWhiteSpace([string]$RawItem.reason)
+            ) { throw 'invalid_item_shape' }
+
+            $Confidence = ConvertTo-LlmConfidence $RawItem.confidence
+            if ($null -eq $Confidence) { throw 'invalid_item_confidence' }
+            $ExistingConfidence = ConvertTo-LlmConfidence $RawItem.existingSelectionConfidence
+            if ($null -eq $ExistingConfidence) { throw 'invalid_existing_confidence' }
+
+            $ExistingEntryId = Limit-LogText ([string]$RawItem.existingEntryId) 300
+            if ([string]::IsNullOrWhiteSpace($ExistingEntryId)) {
+                $ExistingEntryId = ''
+                if ([double]$ExistingConfidence -ne 0.0) { throw 'invalid_none_confidence' }
+            }
+            else {
+                $SelectedEntry = @($ActiveEntries | Where-Object { [string]$_.id -eq $ExistingEntryId } | Select-Object -First 1)[0]
+                if (-not $SelectedEntry) { throw 'unknown_existing_entry' }
+            }
+
+            $SearchQueries = @(Get-LlmItemSearchQueries $RawItem $script:LlmMaxSearchQueriesPerItem)
+            $MentionedTitle = Limit-LogText ([string]$RawItem.mentionedTitle) 200
+            $DisplayTitle = Normalize-LlmDisplayTitle ([string]$RawItem.displayTitle)
+            $OfficialTitleGuess = Limit-LogText ([string]$RawItem.officialTitleGuess) 200
+            if (
+                [string]::IsNullOrWhiteSpace($MentionedTitle) -and
+                [string]::IsNullOrWhiteSpace($OfficialTitleGuess) -and
+                $SearchQueries.Count -eq 0
+            ) { throw 'empty_item_titles' }
+
+            $ItemId = Limit-LogText ([string]$RawItem.itemId) 80
+            if ([string]::IsNullOrWhiteSpace($ItemId)) { $ItemId = "item-$Index" }
+            $Resolved.Add([pscustomobject]@{
+                itemId = $ItemId
+                category = [string]$RawItem.category
+                catalog = [string]$RawItem.catalog
+                mentionedTitle = $MentionedTitle
+                displayTitle = $DisplayTitle
+                officialTitleGuess = $OfficialTitleGuess
+                originalLanguage = [string]$RawItem.originalLanguage
+                searchQueries = $SearchQueries
+                confidence = [double]$Confidence
+                existingEntryId = $ExistingEntryId
+                existingSelectionConfidence = [double]$ExistingConfidence
+                reason = Limit-LogText ([string]$RawItem.reason) 400
+            })
+        }
+        catch {
+            Write-LlmIntentItemRejection `
+                -ItemIndex $Index `
+                -Reason (Get-LlmIntentItemRejectionReason $_) `
+                -ReceivedCount $RawItems.Count `
+                -AcceptedCount $Resolved.Count `
+                -ActiveEntryCount $ActiveEntries.Count `
+                -ResponseFingerprint $ResponseFingerprint
+            continue
+        }
+    }
+    if ($Resolved.Count -eq 0) {
+        Throw-LlmError 'LLM_SCHEMA_VALIDATION_ERROR' 'OpenRouter intent response did not contain a valid item.'
+    }
+    return @($Resolved | ForEach-Object { $_ })
+}
+
+function ConvertTo-LlmNormalizedIntentEnvelope {
+    param(
+        [AllowNull()][object]$ProviderResult,
+        [object[]]$Entries,
+        [AllowNull()][object]$Diagnostics = $null
+    )
+
+    $Fingerprint = if ($Diagnostics -and $Diagnostics.PSObject.Properties['contentFingerprint']) {
+        Limit-LogText ([string]$Diagnostics.contentFingerprint) 24
+    } else { '' }
+    $Items = @(Resolve-LlmIntentItems $ProviderResult $Entries $Fingerprint)
+    return [pscustomobject]@{
+        intentItemsContract = 'normalized_intent_items_v1'
+        responseFingerprint = $Fingerprint
+        items = $Items
+    }
+}
+
+function ConvertTo-LlmIntentItems {
+    param(
+        [AllowNull()][object]$Result,
+        [object[]]$Entries
+    )
+
+    if (
+        $Result -and
+        $Result.PSObject.Properties['intentItemsContract'] -and
+        [string]$Result.intentItemsContract -eq 'normalized_intent_items_v1' -and
+        $Result.PSObject.Properties['items']
+    ) {
+        $Fingerprint = if ($Result.PSObject.Properties['responseFingerprint']) {
+            Limit-LogText ([string]$Result.responseFingerprint) 24
+        } else { '' }
+        return @(Resolve-LlmNormalizedIntentItems @($Result.items) $Entries $Fingerprint)
+    }
+
+    if ($Result -and $Result.PSObject.Properties['items']) {
+        return @(Resolve-LlmIntentItems $Result $Entries)
+    }
+
+    # Internal compatibility for tests and persisted single-item analyzers.
+    # New provider responses always use items[].
+    if (
+        $Result -and
+        $Result.PSObject.Properties['decision'] -and
+        [string]$Result.decision -ne 'select_existing' -and
+        $Result.PSObject.Properties['entryId'] -and
+        [string]::IsNullOrWhiteSpace([string]$Result.entryId) -and
+        @(Get-ActiveEntriesForLlmIntent $Entries).Count -gt 0
+    ) {
+        $Result.entryId = '__none__'
+        if ($Result.PSObject.Properties['existingSelectionConfidence']) {
+            $Result.existingSelectionConfidence = 0.0
+        }
+    }
+    $Legacy = Resolve-LlmIntentDecision $Result $Entries
+    $Catalog = Get-LlmItemCatalog '' ([string]$Legacy.category)
+    $EntryId = if ([string]$Legacy.decision -eq 'select_existing') { [string]$Legacy.entryId } else { '' }
+    return @([pscustomobject]@{
+        itemId = 'item-1'
+        category = [string]$Legacy.category
+        catalog = $Catalog
+        mentionedTitle = Limit-LogText ([string]$Legacy.query) 200
+        displayTitle = Normalize-LlmDisplayTitle ([string]$Legacy.query)
+        officialTitleGuess = Limit-LogText ([string]$Legacy.query) 200
+        originalLanguage = 'unknown'
+        searchQueries = @(Get-LlmItemSearchQueries ([pscustomobject]@{
+            officialTitleGuess = [string]$Legacy.query
+            mentionedTitle = [string]$Legacy.query
+            searchQueries = @([string]$Legacy.query)
+        }) $script:LlmMaxSearchQueriesPerItem)
+        confidence = [double]$Legacy.intentConfidence
+        existingEntryId = $EntryId
+        existingSelectionConfidence = if ($EntryId) { [double]$Legacy.existingSelectionConfidence } else { 0.0 }
+        reason = Limit-LogText ([string]$Legacy.reason) 400
+    })
 }
 
 function Resolve-LlmIntentDecision {
@@ -2354,15 +2763,39 @@ function Search-SteamStoreCandidates {
     $Url = "https://store.steampowered.com/api/storesearch/?term=$([System.Uri]::EscapeDataString($Query))&cc=US&l=english"
     $Response = Invoke-RestMethod -Uri $Url -Method Get -Headers @{ Accept = "application/json" } -TimeoutSec 20
     $Items = if ($Response -and $Response.items) { @($Response.items) } else { @() }
+    $UsedRussianFallback = $false
+    if ($Items.Count -eq 0 -and [System.Text.RegularExpressions.Regex]::IsMatch($Query, '\p{IsCyrillic}')) {
+        $RussianUrl = "https://store.steampowered.com/api/storesearch/?term=$([System.Uri]::EscapeDataString($Query))&cc=RU&l=russian"
+        $RussianResponse = Invoke-RestMethod -Uri $RussianUrl -Method Get -Headers @{ Accept = "application/json" } -TimeoutSec 20
+        $Items = if ($RussianResponse -and $RussianResponse.items) { @($RussianResponse.items) } else { @() }
+        $UsedRussianFallback = $Items.Count -gt 0
+    }
 
     $Candidates = @($Items | Where-Object {
         $_.id -and -not [string]::IsNullOrWhiteSpace([string]$_.name)
     } | ForEach-Object {
         $AppId = [string]$_.id
-        $Name = [string]$_.name
+        $LocalizedName = [string]$_.name
+        $Name = $LocalizedName
+        $TitleConfirmed = -not $UsedRussianFallback
+        if ($UsedRussianFallback) {
+            try {
+                $DetailsUrl = "https://store.steampowered.com/api/appdetails?appids=$([System.Uri]::EscapeDataString($AppId))&cc=US&l=english"
+                $Details = Invoke-RestMethod -Uri $DetailsUrl -Method Get -Headers @{ Accept = "application/json" } -TimeoutSec 15
+                $DetailsNode = if ($Details -and $Details.PSObject.Properties[$AppId]) { $Details.PSObject.Properties[$AppId].Value } else { $null }
+                if ($DetailsNode -and [bool]$DetailsNode.success -and -not [string]::IsNullOrWhiteSpace([string]$DetailsNode.data.name)) {
+                    $Name = [string]$DetailsNode.data.name
+                    $TitleConfirmed = $true
+                }
+            }
+            catch {
+                $TitleConfirmed = $false
+            }
+        }
         $AppNorm = Normalize-LotTitle $Name
         $Comparison = Compare-LotTitles $Normalized $AppNorm
-        $Score = [double]$Comparison.score
+        $LocalizedComparison = Compare-LotTitles $Normalized (Normalize-LotTitle $LocalizedName)
+        $Score = [Math]::Max([double]$Comparison.score, [double]$LocalizedComparison.score)
 
         if ($Score -ge 0.35) {
             [pscustomobject]@{
@@ -2374,7 +2807,8 @@ function Search-SteamStoreCandidates {
                 imageUrl = if ($_.tiny_image) { [string]$_.tiny_image } else { "" }
                 sourceMode = "store_search"
                 availability = "search_result"
-                metadataIncomplete = [string]::IsNullOrWhiteSpace([string]$_.tiny_image)
+                metadataIncomplete = [string]::IsNullOrWhiteSpace([string]$_.tiny_image) -or -not $TitleConfirmed
+                titleConfirmed = $TitleConfirmed
                 score = [Math]::Round([double]$Score, 4)
             }
         }
@@ -2384,6 +2818,172 @@ function Search-SteamStoreCandidates {
         Set-SteamSearchCachedCandidates $Query $Candidates $Generation | Out-Null
     }
     return $Candidates
+}
+
+function Merge-SteamCandidatesByAppId {
+    param(
+        [object[]]$CandidateGroups,
+        [int]$Limit = 5
+    )
+
+    $ById = @{}
+    foreach ($Group in @($CandidateGroups)) {
+        if (-not $Group) { continue }
+        $MatchedQuery = Limit-LogText ([string]$Group.query) 160
+        foreach ($Candidate in @($Group.candidates)) {
+            if (-not $Candidate -or [string]::IsNullOrWhiteSpace([string]$Candidate.externalId)) { continue }
+            $Id = [string]$Candidate.externalId
+            if (-not $ById.ContainsKey($Id)) {
+                $ById[$Id] = [pscustomobject]@{
+                    candidateId = "steam:$Id"
+                    source = 'steam'
+                    externalId = $Id
+                    title = Limit-LogText ([string]$Candidate.title) 200
+                    sourceUrl = Limit-LogText ([string]$Candidate.sourceUrl) 1000
+                    imageUrl = Limit-LogText ([string]$Candidate.imageUrl) 1000
+                    sourceMode = Limit-LogText ([string]$Candidate.sourceMode) 40
+                    availability = Limit-LogText ([string]$Candidate.availability) 40
+                    metadataIncomplete = [bool]$Candidate.metadataIncomplete
+                    titleConfirmed = if ($Candidate.PSObject.Properties['titleConfirmed']) { [bool]$Candidate.titleConfirmed } else { $true }
+                    score = [Math]::Max(0.0, [Math]::Min(1.0, [double]$Candidate.score))
+                    matchedQueries = @()
+                }
+            }
+            $Stored = $ById[$Id]
+            if ([double]$Candidate.score -gt [double]$Stored.score) { $Stored.score = [double]$Candidate.score }
+            if (-not [bool]$Stored.titleConfirmed -and $Candidate.PSObject.Properties['titleConfirmed'] -and [bool]$Candidate.titleConfirmed) {
+                $Stored.title = Limit-LogText ([string]$Candidate.title) 200
+                $Stored.titleConfirmed = $true
+                $Stored.metadataIncomplete = [bool]$Candidate.metadataIncomplete
+            }
+            if ($MatchedQuery -and @($Stored.matchedQueries) -notcontains $MatchedQuery) {
+                $Stored.matchedQueries = @($Stored.matchedQueries) + $MatchedQuery
+            }
+        }
+    }
+    return @($ById.Values | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'title'; Descending = $false } | Select-Object -First ([Math]::Max(1, $Limit)))
+}
+
+function Search-SteamCandidatesForQueries {
+    param(
+        [object]$Item,
+        [string]$JobId = '',
+        [long]$Generation = 1,
+        [AllowNull()][scriptblock]$SteamSearcher = $null
+    )
+
+    $Queries = @(Get-LlmItemSearchQueries $Item $script:LlmMaxSearchQueriesPerItem)
+    $Groups = New-Object System.Collections.Generic.List[object]
+    $Failures = 0
+    foreach ($Query in $Queries) {
+        if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
+        try {
+            $Found = if ($SteamSearcher) {
+                @(& $SteamSearcher $Query $JobId $Generation)
+            } else {
+                @(Search-SteamStoreCandidates $Query $JobId $Generation)
+            }
+            $Groups.Add([pscustomobject]@{ query = $Query; candidates = @($Found) })
+        }
+        catch {
+            $Failures++
+            Write-AppLog -Level 'WARN' -Message "Steam search variant failed for AI job."
+        }
+    }
+    if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
+    return [pscustomobject]@{
+        queries = $Queries
+        attempted = $Queries.Count
+        failures = $Failures
+        candidates = @(Merge-SteamCandidatesByAppId @($Groups | ForEach-Object { $_ }) $script:LlmMaxCandidatesPerItem)
+    }
+}
+
+function Get-LlmExistingOptionsForItem {
+    param(
+        [object]$Item,
+        [object[]]$Entries,
+        [object[]]$Candidates = @()
+    )
+
+    if (-not $Item) { return @() }
+    $Titles = @(Get-LlmItemSearchQueries $Item $script:LlmMaxSearchQueriesPerItem)
+    $ByEntryId = @{}
+    foreach ($Entry in @($Entries)) {
+        if (-not $Entry -or [bool]$Entry.eliminated -or [string]::IsNullOrWhiteSpace([string]$Entry.id)) { continue }
+        $MatchKind = ''
+        foreach ($Candidate in @($Candidates)) {
+            if (
+                -not [string]::IsNullOrWhiteSpace([string]$Candidate.source) -and
+                -not [string]::IsNullOrWhiteSpace([string]$Candidate.externalId) -and
+                [string]$Entry.source -eq [string]$Candidate.source -and
+                [string]$Entry.externalId -eq [string]$Candidate.externalId
+            ) {
+                $MatchKind = 'exact_external_identity'
+                break
+            }
+        }
+        if (-not $MatchKind) {
+            $EntryTitleInfo = Get-LlmTitleInformation ([string]$Entry.name)
+            if (-not $EntryTitleInfo.usable) { continue }
+            foreach ($Title in $Titles) {
+                $QueryTitleInfo = Get-LlmTitleInformation $Title
+                if ($QueryTitleInfo.usable -and (Compare-LotTitles $Title ([string]$Entry.name)).exact) {
+                    $MatchKind = 'exact_title'
+                    break
+                }
+            }
+        }
+        if (-not $MatchKind) { continue }
+        $CategoryCompatible = Test-LotCategoriesCompatible ([string]$Item.category) ([string]$Entry.category)
+        $SelectedByModel = [string]$Item.existingEntryId -eq [string]$Entry.id
+        $SafeAutoAssign = $SelectedByModel -and
+            $CategoryCompatible -and
+            [double]$Item.existingSelectionConfidence -ge [double]$script:LlmExistingSelectionThreshold -and
+            @('exact_title', 'exact_external_identity') -contains $MatchKind
+        $ByEntryId[[string]$Entry.id] = [pscustomobject]@{
+            optionId = "entry:$([string]$Entry.id)"
+            kind = 'existing_entry'
+            entryId = [string]$Entry.id
+            title = Limit-LogText ([string]$Entry.name) 200
+            category = Limit-LogText ([string]$Entry.category) 40
+            source = Limit-LogText ([string]$Entry.source) 40
+            externalId = Limit-LogText ([string]$Entry.externalId) 200
+            sourceUrl = Limit-LogText ([string]$Entry.sourceUrl) 1000
+            entryFingerprint = Get-EntryFingerprint $Entry
+            matchKind = $MatchKind
+            categoryMismatch = -not $CategoryCompatible
+            selectedByModel = $SelectedByModel
+            safeAutoAssign = $SafeAutoAssign
+        }
+    }
+    return @($ByEntryId.Values | Sort-Object -Property @{ Expression = 'selectedByModel'; Descending = $true }, @{ Expression = 'matchKind'; Descending = $false }, @{ Expression = 'title'; Descending = $false } | Select-Object -First 10)
+}
+
+function Add-LlmCandidateExistingMetadata {
+    param(
+        [object[]]$Candidates,
+        [object[]]$Entries,
+        [AllowNull()][string]$ExpectedCategory
+    )
+
+    return @($Candidates | ForEach-Object {
+        $Candidate = $_
+        $Existing = Search-ExistingEntryByCandidate $Candidate $Entries $ExpectedCategory
+        if ($Existing) {
+            $MatchKind = if (
+                [string]$Existing.source -eq [string]$Candidate.source -and
+                -not [string]::IsNullOrWhiteSpace([string]$Candidate.externalId) -and
+                [string]$Existing.externalId -eq [string]$Candidate.externalId
+            ) { 'exact_external_identity' } else { 'exact_title' }
+            $Candidate | Add-Member -NotePropertyName existingEntryId -NotePropertyValue ([string]$Existing.id) -Force
+            $Candidate | Add-Member -NotePropertyName existingEntryFingerprint -NotePropertyValue (Get-EntryFingerprint $Existing) -Force
+            $Candidate | Add-Member -NotePropertyName existingEntryCategory -NotePropertyValue ([string]$Existing.category) -Force
+            $Candidate | Add-Member -NotePropertyName existingMatchKind -NotePropertyValue $MatchKind -Force
+            $Candidate | Add-Member -NotePropertyName categoryMismatch -NotePropertyValue (-not (Test-LotCategoriesCompatible $ExpectedCategory ([string]$Existing.category))) -Force
+        }
+        $Candidate
+    })
 }
 
 function Search-ExistingEntryByCandidate {
@@ -2953,6 +3553,39 @@ function ConvertFrom-OpenRouterStructuredContent {
     return $Parsed
 }
 
+function ConvertFrom-OpenRouterIntentResponse {
+    param(
+        [AllowNull()][object]$Response,
+        [object[]]$Entries
+    )
+
+    if (
+        -not $Response -or
+        -not $Response.PSObject.Properties['choices'] -or
+        @($Response.choices).Count -eq 0 -or
+        -not @($Response.choices)[0].PSObject.Properties['message']
+    ) {
+        Throw-LlmError 'LLM_RESPONSE_CONTENT_MISSING' 'OpenRouter returned no message content.'
+    }
+
+    $Choice = @($Response.choices)[0]
+    $Diagnostics = $null
+    $Result = ConvertFrom-OpenRouterStructuredContent `
+        -Message $Choice.message `
+        -FinishReason ([string]$Choice.finish_reason) `
+        -Model ([string]$Response.model) `
+        -Provider ([string]$Response.provider) `
+        -RequestId ([string]$Response.id) `
+        -Diagnostics ([ref]$Diagnostics)
+    try {
+        return ConvertTo-LlmNormalizedIntentEnvelope $Result $Entries $Diagnostics
+    }
+    catch {
+        Add-LlmSafeDiagnostics $_.Exception $Diagnostics
+        throw
+    }
+}
+
 function ConvertTo-LlmConfidence {
     param([AllowNull()][object]$Value)
 
@@ -3243,30 +3876,44 @@ function Get-OpenRouterIntentProviderSchema {
     param([object[]]$CurrentEntries)
 
     $Entries = @(Get-ActiveEntriesForLlmIntent $CurrentEntries)
-    $CommonProperties = @{
-        category = @{ type = "string"; enum = @("game", "anime", "movie", "tv_show", "cartoon", "other", "unknown") }
-        query = @{ type = "string" }
-        intentConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
-        reason = @{ type = "string" }
-    }
-    if ($Entries.Count -eq 0) {
-        $CommonProperties.decision = @{ type = "string"; enum = @("search_catalog", "ask_manual") }
-        return @{
-            type = "object"
-            properties = $CommonProperties
-            required = @("decision", "category", "query", "intentConfidence", "reason")
-            additionalProperties = $false
+    $ItemProperties = @{
+        category = @{ type = 'string'; enum = @('game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown') }
+        catalog = @{ type = 'string'; enum = @('steam', 'anime', 'none') }
+        mentionedTitle = @{ type = 'string'; maxLength = 200 }
+        displayTitle = @{ type = 'string'; maxLength = 200 }
+        officialTitleGuess = @{ type = 'string'; maxLength = 200 }
+        searchQueries = @{
+            type = 'array'
+            maxItems = $script:LlmMaxSearchQueriesPerItem
+            items = @{ type = 'string'; maxLength = 160 }
         }
+        originalLanguage = @{ type = 'string'; enum = @('ru', 'en', 'ja', 'ko', 'zh', 'other', 'unknown') }
+        confidence = @{ type = 'number'; minimum = 0; maximum = 1 }
+        reason = @{ type = 'string'; maxLength = 400 }
     }
-
-    $AllowedEntryIds = @($Entries | ForEach-Object { [string]$_.id } | Select-Object -Unique)
-    $CommonProperties.decision = @{ type = "string"; enum = @("select_existing", "search_catalog", "ask_manual") }
-    $CommonProperties.entryId = @{ type = "string"; enum = @($AllowedEntryIds + "__none__") }
-    $CommonProperties.existingSelectionConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
+    $Required = @('category', 'catalog', 'mentionedTitle', 'displayTitle', 'officialTitleGuess', 'searchQueries', 'originalLanguage', 'confidence', 'reason')
+    if ($Entries.Count -gt 0) {
+        $AllowedEntryIds = @($Entries | ForEach-Object { [string]$_.id } | Select-Object -Unique)
+        $ItemProperties.existingEntryId = @{ type = 'string'; enum = @($AllowedEntryIds + '__none__') }
+        $ItemProperties.existingSelectionConfidence = @{ type = 'number'; minimum = 0; maximum = 1 }
+        $Required += @('existingEntryId', 'existingSelectionConfidence')
+    }
     return @{
-        type = "object"
-        properties = $CommonProperties
-        required = @("decision", "entryId", "category", "query", "intentConfidence", "existingSelectionConfidence", "reason")
+        type = 'object'
+        properties = @{
+            items = @{
+                type = 'array'
+                minItems = 1
+                maxItems = $script:LlmMaxItems
+                items = @{
+                    type = 'object'
+                    properties = $ItemProperties
+                    required = $Required
+                    additionalProperties = $false
+                }
+            }
+        }
+        required = @('items')
         additionalProperties = $false
     }
 }
@@ -3281,16 +3928,17 @@ function Invoke-OpenRouterIntentAnalysis {
 
     $Model = if ($Settings -and -not [string]::IsNullOrWhiteSpace([string]$Settings.model)) { [string]$Settings.model } else { "google/gemini-2.5-flash-lite" }
     $CurrentEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
-    $HasCurrentEntries = $CurrentEntries.Count -gt 0
     $SystemPrompt = @"
-You analyze donation messages for a local auction. Extract what lot the donor probably meant.
-For query, return the canonical searchable title, preferably English or romaji, not a translated Russian phrase.
-Return only structured JSON. Never invent entryId or external identifiers. Reason must always be short and written in Russian.
-Choose select_existing only when the message unambiguously identifies exactly one current entry. Treat greetings, interjections, jokes, links, streamer mentions and unrelated phrases as noise.
-Pay close attention to franchise part, season, year, remake/remaster, movie and special. If several current entries are parts of the same franchise and the message does not identify the part, use ask_manual or search_catalog; never choose one at random.
+You analyze one donation message for a local auction. Return every explicitly mentioned work as a separate item in one response, up to five items. Never combine several works into one title or search query.
+For games, determine the likely exact official English Steam title. Do not merely transliterate Russian words and do not blindly translate them. "копатель онлайн" means the Steam game "Digger Online", not "Kopatel Online". If the official title is uncertain, provide several concise searchQueries instead of inventing certainty. Broad names such as "майнкрафт" may represent a franchise with several Steam results.
+mentionedTitle is the short title or fragment actually used by the donor. displayTitle is the canonical, correctly spelled title for display and possible manual lot creation. officialTitleGuess is only a catalog search hint and is never authoritative metadata. originalLanguage is the language of the canonical original title. searchQueries must contain distinct alternatives for the same item, never several games joined into one string. Use catalog=steam for a likely video game even if category is uncertain/other, catalog=anime for anime lookup, otherwise catalog=none.
+Keep canonical Russian and Russian-language works in Russian Cyrillic in displayTitle, with correct capitalization and ё where appropriate. Do not translate or transliterate a Russian original title into English merely for catalog search. Examples: алеша попович => displayTitle "Алёша Попович и Тугарин Змей"; вечерний ургант => "Вечерний Ургант"; слово пацана => "Слово пацана. Кровь на асфальте"; брат 2 => "Брат 2". This applies to games, films, series, TV shows, cartoons and other Russian works.
+For foreign works keep the canonical original/product title instead of automatically translating it into Russian: the outlast trials => "The Outlast Trials". Digger Online is the official product title, so копатель онлайн => displayTitle "Digger Online" and officialTitleGuess "Digger Online". Never use a simple transliteration such as Alyosha Popovich as displayTitle for a Russian work. If the exact canonical display title is uncertain, use the most meaningful safe title you can identify and lower confidence; never put a URL, instruction or service text in displayTitle.
+Return only structured JSON. Never invent external identifiers. Reason must always be short and written in Russian.
+When currentEntries are provided, set existingEntryId only when the message unambiguously identifies that exact work. Otherwise use __none__. Treat greetings, interjections, jokes, links, streamer mentions and unrelated phrases as noise.
+Pay close attention to franchise part, season, year, remake/remaster, movie and special. If several current entries are parts of the same franchise and the message does not identify the part, do not choose one at random.
 Do not match works merely because they have a similar theme. For example, Дальнобойщики 2 is not Euro Truck Simulator 2.
-Use search_catalog when no current entry safely matches but the work and category are known. Use ask_manual when the intended work cannot be determined safely.
-Use unknown only when you cannot identify either the work/franchise or its category. If the work or franchise is known but the exact season, part, version, remake, or adaptation is not specified, return the known category and the franchise title as query with normal/high intentConfidence. Catalog search and a later selection step will resolve that ambiguity. Do not lower intentConfidence merely because a part or season is missing.
+Use unknown only when neither the work/franchise nor its category can be identified. Do not lower confidence merely because a known franchise has several possible parts; local catalog results will be shown to the user.
 Categories:
 - game: video games only.
 - anime: Japanese anime/anime franchise.
@@ -3300,32 +3948,28 @@ Categories:
 - other: books, music, people, memes, or other known media that are not covered above.
 - unknown: the work/franchise or category cannot be identified at all.
 Examples:
-- Message "на булли... МЯУ!", current entry Bully => select_existing for Bully with high existingSelectionConfidence.
-- Message "на фнафыч 4", current entries Five Nights at Freddy's 4 and Five Nights at Freddy's 2 => select_existing for part 4.
-- Message "на фнафыч", current entries for parts 4 and 2 => ask_manual or search_catalog, not a random entry.
-- Message "На Outlast Trials, смешной микровидос: [ссылка]", current entry The Outlast Trials => select_existing for The Outlast Trials; the rest is noise.
+- Message "500 рублей на Копатель Онлайн или Майнкрафт" => two items. The first displayTitle and officialTitleGuess are Digger Online with Digger Online first in searchQueries. The second item displayTitle is Minecraft with multiple safe search alternatives.
+- Message "На игру алеша попович" => displayTitle "Алёша Попович и Тугарин Змей", originalLanguage ru, and officialTitleGuess/searchQueries may additionally contain "Alyosha Popovich and the Magic Horse" for Steam search.
+- Message "на булли... МЯУ!", current entry Bully => one item with existingEntryId for Bully and high existingSelectionConfidence.
+- Message "на фнафыч 4", current entries Five Nights at Freddy's 4 and Five Nights at Freddy's 2 => choose the part 4 entry.
+- Message "на фнафыч", current entries for parts 4 and 2 => existingEntryId=__none__.
+- Message "На Outlast Trials, смешной микровидос: [ссылка]", current entry The Outlast Trials => choose The Outlast Trials; the rest is noise.
 - бабка 3, бабуся 3, гренни 3 => Granny 3, game. дбд => Dead by Daylight, game. атака титанов => Attack on Titan, anime. наруто => Naruto, anime; catalog selection resolves the exact series.
 "@
-    if ($HasCurrentEntries) {
-        $SystemPrompt += "`nFor search_catalog and ask_manual return entryId=__none__ and existingSelectionConfidence=0. For select_existing return one real entryId from currentEntries."
+    if ($CurrentEntries.Count -gt 0) {
+        $SystemPrompt += "`nFor every item return existingEntryId and existingSelectionConfidence. Use __none__ and 0 when no exact current entry is safe."
     } else {
-        $SystemPrompt += "`nThere are no current entries. Return only search_catalog or ask_manual; do not return entryId or existingSelectionConfidence."
+        $SystemPrompt += "`nThere are no current entries. Do not return existingEntryId or existingSelectionConfidence."
     }
     $UserPayload = [pscustomobject]@{
-        donation = [pscustomobject]@{
-            username = [string]$Donation.username
-            amount = $Donation.amount
-            currency = [string]$Donation.currency
-            message = [string]$Donation.message
-            normalizedMessage = $NormalizedMessage
-        }
+        donationMessage = Limit-LogText ([string]$Donation.message) 1000
         currentEntries = $CurrentEntries
     }
     $Schema = Get-OpenRouterIntentProviderSchema $CurrentEntries
     $Payload = @{
         model = $Model
         temperature = 0
-        max_tokens = 400
+        max_tokens = 900
         provider = @{ require_parameters = $true }
         response_format = @{
             type = "json_schema"
@@ -3342,101 +3986,7 @@ Examples:
     }
 
     $Response = Invoke-OpenRouterRequest $Payload 45
-    $Diagnostics = $null
-    $Result = ConvertFrom-OpenRouterStructuredContent `
-        -Message $Response.choices[0].message `
-        -FinishReason ([string]$Response.choices[0].finish_reason) `
-        -Model ([string]$Response.model) `
-        -Provider ([string]$Response.provider) `
-        -RequestId ([string]$Response.id) `
-        -Diagnostics ([ref]$Diagnostics)
-    try { return Resolve-LlmIntentDecision $Result $CurrentEntries }
-    catch {
-        Add-LlmSafeDiagnostics $_.Exception $Diagnostics
-        throw
-    }
-}
-
-function Invoke-OpenRouterCandidateSelection {
-    param(
-        [object]$Donation,
-        [string]$Category,
-        [string]$Query,
-        [double]$IntentConfidence,
-        [object[]]$Entries,
-        [object[]]$Candidates,
-        [object]$Settings
-    )
-
-    $Model = if ($Settings -and -not [string]::IsNullOrWhiteSpace([string]$Settings.model)) { [string]$Settings.model } else { "google/gemini-2.5-flash-lite" }
-    $AllowedIds = @($Candidates | ForEach-Object { [string]$_.candidateId } | Where-Object { $_ })
-    if ($AllowedIds.Count -eq 0) { return $null }
-    $Schema = @{
-        type = "object"
-        properties = @{
-            decision = @{ type = "string"; enum = @("select_candidate", "ask_manual") }
-            candidateId = @{ type = "string"; enum = @($AllowedIds + "") }
-            selectionConfidence = @{ type = "number"; minimum = 0; maximum = 1 }
-            reason = @{ type = "string" }
-        }
-        required = @("decision", "candidateId", "selectionConfidence", "reason")
-        additionalProperties = $false
-    }
-    $Input = [pscustomobject]@{
-        donationMessage = Limit-LogText ([string]$Donation.message) 500
-        category = $Category
-        canonicalQuery = Limit-LogText $Query 200
-        intentConfidence = $IntentConfidence
-        currentEntries = @($Entries | Where-Object { -not [bool]$_.eliminated } | Select-Object id, name, category, source, externalId)
-        candidates = @($Candidates | Select-Object -First 5)
-    }
-    $Payload = @{
-        model = $Model
-        temperature = 0
-        max_tokens = 250
-        provider = @{ require_parameters = $true }
-        response_format = @{
-            type = "json_schema"
-            json_schema = @{ name = "donation_candidate_selection"; strict = $true; schema = $Schema }
-        }
-        messages = @(
-            @{ role = "system"; content = "Choose only one candidateId from the provided list when the donation clearly identifies it. Pay attention to franchise part, season, year, movie, special, remake and remaster. Otherwise return ask_manual. Never invent an id. Keep reason short." },
-            @{ role = "user"; content = ($Input | ConvertTo-Json -Depth 20 -Compress) }
-        )
-    }
-    $Response = Invoke-OpenRouterRequest $Payload 45
-    $Diagnostics = $null
-    $Selection = ConvertFrom-OpenRouterStructuredContent `
-        -Message $Response.choices[0].message `
-        -FinishReason ([string]$Response.choices[0].finish_reason) `
-        -Model ([string]$Response.model) `
-        -Provider ([string]$Response.provider) `
-        -RequestId ([string]$Response.id) `
-        -Diagnostics ([ref]$Diagnostics)
-    try {
-        if (
-            -not $Selection.PSObject.Properties['decision'] -or
-            -not $Selection.PSObject.Properties['candidateId'] -or
-            -not $Selection.PSObject.Properties['selectionConfidence'] -or
-            -not $Selection.PSObject.Properties['reason'] -or
-            @('select_candidate', 'ask_manual') -notcontains [string]$Selection.decision
-        ) {
-            Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter candidate selection did not match the required schema."
-        }
-        $SelectionConfidence = ConvertTo-LlmConfidence $Selection.selectionConfidence
-        if ($null -eq $SelectionConfidence) {
-            Throw-LlmError "LLM_SCHEMA_VALIDATION_ERROR" "OpenRouter selection confidence is invalid."
-        }
-        $Selection.selectionConfidence = [double]$SelectionConfidence
-        if ([string]$Selection.decision -eq "select_candidate" -and $AllowedIds -notcontains [string]$Selection.candidateId) {
-            Throw-LlmError "UNKNOWN_CANDIDATE_ID" "OpenRouter returned an unknown candidateId."
-        }
-        return $Selection
-    }
-    catch {
-        Add-LlmSafeDiagnostics $_.Exception $Diagnostics
-        throw
-    }
+    return ConvertFrom-OpenRouterIntentResponse $Response $CurrentEntries
 }
 
 function Test-OpenRouterIntegration {
@@ -3444,8 +3994,9 @@ function Test-OpenRouterIntegration {
 
     if ([string]::IsNullOrWhiteSpace($Model)) { $Model = "google/gemini-2.5-flash-lite" }
     $Schema = Get-OpenRouterIntentProviderSchema @()
-    $Schema.properties.decision.enum = @('ask_manual')
-    $Schema.properties.category.enum = @('unknown')
+    $ItemSchema = $Schema.properties.items.items
+    $ItemSchema.properties.category.enum = @('unknown')
+    $ItemSchema.properties.catalog.enum = @('none')
     $Payload = @{
         model = $Model
         temperature = 0
@@ -3457,22 +4008,15 @@ function Test-OpenRouterIntegration {
         }
         messages = @(
             @{ role = "system"; content = "Return the requested strict JSON object." },
-            @{ role = "user"; content = "Return decision ask_manual, category unknown, empty query, intentConfidence 0.5, and a short Russian reason." }
+            @{ role = "user"; content = "Return one items element: category unknown, catalog none, mentionedTitle test, displayTitle test, officialTitleGuess test, searchQueries containing test, originalLanguage unknown, confidence 0.5, and a short Russian reason." }
         )
     }
     $StartedAt = Get-Date
     try {
         $Response = Invoke-OpenRouterRequest $Payload 20
-        $Diagnostics = $null
-        $Parsed = ConvertFrom-OpenRouterStructuredContent `
-            -Message $Response.choices[0].message `
-            -FinishReason ([string]$Response.choices[0].finish_reason) `
-            -Model ([string]$Response.model) `
-            -Provider ([string]$Response.provider) `
-            -RequestId ([string]$Response.id) `
-            -Diagnostics ([ref]$Diagnostics)
-        $Parsed = Resolve-LlmIntentDecision $Parsed @()
-        if ([string]$Parsed.decision -ne "ask_manual" -or [string]$Parsed.category -ne "unknown") {
+        $NormalizedResponse = ConvertFrom-OpenRouterIntentResponse $Response @()
+        $ParsedItems = @(ConvertTo-LlmIntentItems $NormalizedResponse @())
+        if ($ParsedItems.Count -ne 1 -or [string]$ParsedItems[0].category -ne "unknown" -or [double]$ParsedItems[0].confidence -ne 0.5) {
             throw "Selected model returned invalid structured output."
         }
         $ElapsedMs = [int]((Get-Date) - $StartedAt).TotalMilliseconds
@@ -3534,245 +4078,193 @@ function Test-LlmIntentReadyForCatalog {
         $IntentConfidence -ge 0.50
 }
 
+function Invoke-LlmDonationItemPipeline {
+    param(
+        [object]$Item,
+        [object[]]$Entries,
+        [object]$Settings,
+        [string]$JobId,
+        [long]$Generation,
+        [AllowNull()][scriptblock]$SteamSearcher = $null,
+        [AllowNull()][scriptblock]$AnimeSearcher = $null
+    )
+
+    $Query = if (-not [string]::IsNullOrWhiteSpace([string]$Item.officialTitleGuess)) {
+        [string]$Item.officialTitleGuess
+    } elseif (@($Item.searchQueries).Count -gt 0) {
+        [string]$Item.searchQueries[0]
+    } elseif (-not [string]::IsNullOrWhiteSpace([string]$Item.displayTitle)) {
+        [string]$Item.displayTitle
+    } else {
+        [string]$Item.mentionedTitle
+    }
+    $Query = Limit-LogText $Query 200
+    $Candidates = @()
+    $CatalogStatus = 'not_applicable'
+    $ManualSuggestion = Get-LlmManualLotSuggestion `
+        ([string]$Item.displayTitle) `
+        ([string]$Item.category) `
+        ([string]$Item.originalLanguage)
+    $ExistingOptions = @(Get-LlmExistingOptionsForItem $Item $Entries)
+    $SafeSelectedOption = @($ExistingOptions | Where-Object { [bool]$_.safeAutoAssign } | Select-Object -First 1)[0]
+    $ShouldSearchCatalog = -not $SafeSelectedOption -and
+        (Test-LlmIntentReadyForCatalog ([string]$Item.category) $Query ([double]$Item.confidence))
+
+    if ($ShouldSearchCatalog -and [string]$Item.catalog -eq 'steam') {
+        if ($Settings -and $Settings.allowSteam -eq $false) {
+            $CatalogStatus = 'disabled'
+        }
+        else {
+            if ($JobId) { Update-LlmJobStage $JobId 'searching_steam' $Generation }
+            $SearchResult = Search-SteamCandidatesForQueries $Item $JobId $Generation $SteamSearcher
+            $Candidates = @($SearchResult.candidates)
+            $CatalogStatus = if ($Candidates.Count -gt 0) { 'ok' }
+                elseif ($SearchResult.attempted -gt 0 -and $SearchResult.failures -ge $SearchResult.attempted) { 'unavailable' }
+                else { 'not_found' }
+        }
+    }
+    elseif ($ShouldSearchCatalog -and [string]$Item.catalog -eq 'anime') {
+        if ($Settings -and $Settings.allowAnime -eq $false) {
+            $CatalogStatus = 'disabled'
+        }
+        else {
+            if ($JobId) { Update-LlmJobStage $JobId 'searching_anime' $Generation }
+            $AnimeQuery = @($Item.searchQueries | Select-Object -First 1)[0]
+            if ([string]::IsNullOrWhiteSpace([string]$AnimeQuery)) { $AnimeQuery = $Query }
+            try {
+                $Candidates = if ($AnimeSearcher) {
+                    @(& $AnimeSearcher $AnimeQuery $JobId $Generation)
+                } else {
+                    @(Search-AnimeCandidates $AnimeQuery $JobId $Generation)
+                }
+                $CatalogStatus = if ($Candidates.Count -gt 0) { 'ok' } else { 'not_found' }
+            }
+            catch {
+                Write-AppLog -Level 'WARN' -Message 'Anime search failed for AI job.'
+                $CatalogStatus = 'unavailable'
+            }
+        }
+    }
+
+    if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
+    $Candidates = @(Add-LlmCandidateExistingMetadata `
+        @($Candidates | Where-Object { $_ -and $_.candidateId } | Select-Object -First $script:LlmMaxCandidatesPerItem) `
+        $Entries `
+        ([string]$Item.category))
+    $ExistingOptions = @(Get-LlmExistingOptionsForItem $Item $Entries $Candidates)
+    return [pscustomobject]@{
+        itemId = Limit-LogText ([string]$Item.itemId) 40
+        category = [string]$Item.category
+        catalog = [string]$Item.catalog
+        mentionedTitle = Limit-LogText ([string]$Item.mentionedTitle) 200
+        displayTitle = Normalize-LlmDisplayTitle ([string]$Item.displayTitle)
+        officialTitleGuess = Limit-LogText ([string]$Item.officialTitleGuess) 200
+        originalLanguage = Limit-LogText ([string]$Item.originalLanguage) 20
+        query = $Query
+        searchQueries = @($Item.searchQueries | Select-Object -First $script:LlmMaxSearchQueriesPerItem)
+        intentConfidence = [double]$Item.confidence
+        existingSelectionConfidence = [double]$Item.existingSelectionConfidence
+        existingOptions = $ExistingOptions
+        candidates = $Candidates
+        manualSuggestion = $ManualSuggestion
+        catalogStatus = $CatalogStatus
+        reason = Limit-LogText ([string]$Item.reason) 400
+    }
+}
+
 function Invoke-LlmDonationPipeline {
     param(
         [object]$InputData,
         [AllowNull()][scriptblock]$IntentAnalyzer = $null,
         [AllowNull()][scriptblock]$SteamSearcher = $null,
-        [AllowNull()][scriptblock]$AnimeSearcher = $null,
-        [AllowNull()][scriptblock]$CandidateSelector = $null
+        [AllowNull()][scriptblock]$AnimeSearcher = $null
     )
 
     $Donation = $InputData.donation
     $Settings = if ($InputData.settings) { $InputData.settings } else { [pscustomobject]@{} }
     $Entries = Get-SafeEntriesForLlm $InputData.entries
-    if (-not $Donation) {
-        throw "Missing donation."
-    }
+    if (-not $Donation) { throw 'Missing donation.' }
     $JobId = [string]$InputData.jobId
     $Generation = if ($InputData.PSObject.Properties['generation']) { [long]$InputData.generation } else { 1L }
-    $Message = Limit-LogText ([string]$Donation.message) 500
+    $Message = Limit-LogText ([string]$Donation.message) 1000
     $Normalized = Normalize-LlmText $Message
 
     if ($JobId) {
         Assert-LlmJobGenerationCurrent $JobId $Generation
-        Update-LlmJobStage $JobId "analyzing_intent" $Generation
+        Update-LlmJobStage $JobId 'analyzing_intent' $Generation
     }
-    $Llm = if ($IntentAnalyzer) {
+    # Exactly one main OpenRouter analysis is performed here. Catalog
+    # candidates are never sent back to OpenRouter.
+    $RawIntent = if ($IntentAnalyzer) {
         & $IntentAnalyzer $Donation $Settings $Normalized $Entries
     } else {
         Invoke-OpenRouterIntentAnalysis $Donation $Settings $Normalized $Entries
     }
     if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
+    $IntentItems = @(ConvertTo-LlmIntentItems $RawIntent $Entries | Select-Object -First $script:LlmMaxItems)
+    if ($IntentItems.Count -eq 0) {
+        Throw-LlmError 'LLM_SCHEMA_VALIDATION_ERROR' 'OpenRouter intent response did not contain a valid item.'
+    }
 
-    $AllowedCategories = @("game", "anime", "movie", "tv_show", "cartoon", "other", "unknown")
-    $Category = if ($AllowedCategories -contains [string]$Llm.category) { [string]$Llm.category } else { "unknown" }
-    $Query = Limit-LogText ([string]$Llm.query) 200
-    $IntentConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]($Llm.intentConfidence)))
-    $ExistingSelectionConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]($Llm.existingSelectionConfidence)))
-    $Reason = Limit-LogText ([string]$Llm.reason) 400
-    $Decision = [string]$Llm.decision
+    $Results = New-Object System.Collections.Generic.List[object]
+    foreach ($Item in $IntentItems) {
+        if ($JobId) {
+            Assert-LlmJobGenerationCurrent $JobId $Generation
+            Update-LlmJobStage $JobId 'checking_entries' $Generation
+        }
+        $Results.Add((Invoke-LlmDonationItemPipeline $Item $Entries $Settings $JobId $Generation $SteamSearcher $AnimeSearcher))
+    }
+    if ($JobId) {
+        Assert-LlmJobGenerationCurrent $JobId $Generation
+        Update-LlmJobStage $JobId 'ranking_candidates' $Generation
+    }
 
-    if ($Decision -eq 'select_existing') {
-        if ($JobId) { Update-LlmJobStage $JobId "checking_entries" $Generation }
-        $SelectedEntry = @($Entries | Where-Object {
-            $_ -and
-            -not [bool]$_.eliminated -and
-            [string]$_.id -eq [string]$Llm.entryId
-        } | Select-Object -First 1)[0]
-        $SelectionBasicsValid = $SelectedEntry -and
-            $ExistingSelectionConfidence -ge [double]$script:LlmExistingSelectionThreshold -and
-            (Test-LotCategoriesCompatible $Category ([string]$SelectedEntry.category))
-        $SelectionEvidence = if ($SelectionBasicsValid) {
-            Get-LlmExistingSelectionEvidence $Query $SelectedEntry
-        } else {
-            [pscustomobject]@{ safe = $false; matchKind = ''; reason = 'selection_validation_failed' }
-        }
-        if (-not $SelectionBasicsValid -or -not $SelectionEvidence.safe) {
-            if (Test-LlmIntentReadyForCatalog $Category $Query $IntentConfidence) {
-                $Decision = 'search_catalog'
-                $ExistingSelectionConfidence = 0.0
-                $Reason = if ([string]$SelectionEvidence.reason -eq 'opaque_entry_name') {
-                    'Выбранный лот имеет неинформативное название; выполняется поиск по распознанному произведению.'
-                } else {
-                    'Выбранный лот не совпадает с распознанным произведением; выполняется поиск по каталогу.'
-                }
-            }
-            else {
-                return [pscustomobject]@{
-                    ok = $true
-                    result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -SelectionConfidence $ExistingSelectionConfidence -Query $Query -MatchedBy "manual_required" -Reason "AI не смог безопасно подтвердить существующий лот."
-                }
-            }
-        }
-        else {
-            $SelectedEntryCategory = Normalize-LotCategory ([string]$SelectedEntry.category)
-            if ($Category -eq 'unknown' -and -not [string]::IsNullOrWhiteSpace($SelectedEntryCategory)) {
-                $Category = $SelectedEntryCategory
-            }
-            $FinalConfidence = [Math]::Min([double]$IntentConfidence, [double]$ExistingSelectionConfidence)
+    $ResultItems = @($Results | ForEach-Object { $_ })
+    $FirstItem = $ResultItems[0]
+    if ($ResultItems.Count -eq 1) {
+        $SafeOption = @($FirstItem.existingOptions | Where-Object { [bool]$_.safeAutoAssign } | Select-Object -First 1)[0]
+        if ($SafeOption) {
+            $FinalConfidence = [Math]::Min([double]$FirstItem.intentConfidence, [double]$FirstItem.existingSelectionConfidence)
             return [pscustomobject]@{
                 ok = $true
                 result = ConvertTo-LlmResult `
-                    -Action "assign_existing" `
-                    -Category $Category `
-                    -IntentConfidence $IntentConfidence `
-                    -SelectionConfidence $ExistingSelectionConfidence `
+                    -Action 'assign_existing' `
+                    -Category ([string]$FirstItem.category) `
+                    -IntentConfidence ([double]$FirstItem.intentConfidence) `
+                    -SelectionConfidence ([double]$FirstItem.existingSelectionConfidence) `
                     -FinalConfidence $FinalConfidence `
-                    -Query $Query `
-                    -MatchedBy "llm_existing_entry_$([string]$SelectionEvidence.matchKind)" `
-                    -ExistingMatchKind ([string]$SelectionEvidence.matchKind) `
-                    -EntryId ([string]$SelectedEntry.id) `
-                    -EntryFingerprint (Get-EntryFingerprint $SelectedEntry) `
-                    -Reason $Reason
+                    -Query ([string]$FirstItem.query) `
+                    -MatchedBy "llm_existing_entry_$([string]$SafeOption.matchKind)" `
+                    -ExistingMatchKind ([string]$SafeOption.matchKind) `
+                    -EntryId ([string]$SafeOption.entryId) `
+                    -EntryFingerprint $SafeOption.entryFingerprint `
+                    -Items $ResultItems `
+                    -Reason ([string]$FirstItem.reason)
             }
         }
     }
 
-    if ($Decision -eq 'ask_manual') {
-        return [pscustomobject]@{
-            ok = $true
-            result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -SelectionConfidence $ExistingSelectionConfidence -Query $Query -MatchedBy "manual_required" -Reason $Reason
-        }
-    }
-
-    if (-not (Test-LlmIntentReadyForCatalog $Category $Query $IntentConfidence)) {
-        return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason $Reason }
-    }
-
-    if ($JobId) { Update-LlmJobStage $JobId "checking_entries" $Generation }
-    $QueryMatch = Find-ExistingEntryMatch $Query $Entries $Category
-    if ($QueryMatch -and $QueryMatch.confidence -ge 0.80) {
-        $FinalConfidence = [Math]::Min([double]$IntentConfidence, [double]$QueryMatch.confidence)
-        return [pscustomobject]@{
-            ok = $true
-            result = ConvertTo-LlmResult `
-                -Action "assign_existing" `
-                -Category $Category `
-                -IntentConfidence $IntentConfidence `
-                -CandidateScore ([double]$QueryMatch.confidence) `
-                -FinalConfidence $FinalConfidence `
-                -Query $Query `
-                -MatchedBy "llm_current_entries_exact_title" `
-                -ExistingMatchKind "exact_title" `
-                -EntryId ([string]$QueryMatch.entry.id) `
-                -EntryFingerprint (Get-EntryFingerprint $QueryMatch.entry) `
-                -Reason $Reason
-        }
-    }
-
-    if (Find-EliminatedEntryMatch $Query $Entries $Category) {
-        return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason "Похожий лот уже выбыл. Выберите действие вручную." }
-    }
-
-    if ($Category -eq "game") {
-        if ($Settings -and $Settings.allowSteam -eq $false) {
-            return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category "game" -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason "Поиск Steam отключён в настройках." }
-        }
-        if ($JobId) { Update-LlmJobStage $JobId "searching_steam" $Generation }
-        try {
-            $Candidates = if ($SteamSearcher) {
-                @(& $SteamSearcher $Query $JobId $Generation)
-            } else {
-                @(Search-SteamStoreCandidates $Query $JobId $Generation)
-            }
-        }
-        catch {
-            Write-AppLog -Level "WARN" -Message "Steam search failed for AI job: $($_.Exception.Message)"
-            return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category "game" -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason "Steam временно недоступен. Выберите лот вручную." }
-        }
-    }
-    elseif ($Category -eq "anime") {
-        if ($Settings -and $Settings.allowAnime -eq $false) {
-            return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category "anime" -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason "Поиск аниме отключён в настройках." }
-        }
-        if ($JobId) { Update-LlmJobStage $JobId "searching_anime" $Generation }
-        try {
-            $Candidates = if ($AnimeSearcher) {
-                @(& $AnimeSearcher $Query $JobId $Generation)
-            } else {
-                @(Search-AnimeCandidates $Query $JobId $Generation)
-            }
-        }
-        catch {
-            Write-AppLog -Level "WARN" -Message "Anime search failed for AI job: $($_.Exception.Message)"
-            return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category "anime" -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason "AniList и Jikan временно недоступны. Выберите лот вручную." }
-        }
-    }
-    else {
-        return [pscustomobject]@{
-            ok = $true
-            result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason "AI распознал тип, но автопоиск для этой категории пока не подключён. Выберите лот вручную."
-        }
-    }
-
-    if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
-    $Candidates = @($Candidates | Where-Object { $_ -and $_.candidateId } | Select-Object -First 5)
-    if ($Candidates.Count -eq 0) {
-        $CatalogName = if ($Category -eq "game") { "Steam" } else { "AniList/Jikan" }
-        return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -Query $Query -MatchedBy "manual_required" -Reason "$CatalogName не нашёл подходящий вариант." }
-    }
-
-    if ($JobId) { Update-LlmJobStage $JobId "ranking_candidates" $Generation }
-    $Candidate = $Candidates[0]
-    $SelectionConfidence = 0.0
-    $CandidatesAmbiguous = Test-CatalogCandidatesAmbiguous $Query $Candidates
-    if (-not $CandidatesAmbiguous) {
-        $UniqueExactCandidate = Get-UniqueExactCatalogCandidate $Query $Candidates
-        if ($UniqueExactCandidate) { $Candidate = $UniqueExactCandidate }
-    }
-    if ($CandidatesAmbiguous) {
-        if ($JobId) {
-            Assert-LlmJobGenerationCurrent $JobId $Generation
-            Update-LlmJobStage $JobId "llm_candidate_selection" $Generation
-        }
-        $Selection = if ($CandidateSelector) {
-            & $CandidateSelector $Donation $Category $Query $IntentConfidence $Entries $Candidates $Settings
-        } else {
-            Invoke-OpenRouterCandidateSelection $Donation $Category $Query $IntentConfidence $Entries $Candidates $Settings
-        }
-        if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
-        if (-not $Selection -or [string]$Selection.decision -ne "select_candidate" -or [double]$Selection.selectionConfidence -lt 0.70) {
-            $ManualConfidence = if ($Selection) { [double]$Selection.selectionConfidence } else { 0.0 }
-            $ManualReason = if ($Selection -and $Selection.reason) { [string]$Selection.reason } else { "Не удалось однозначно выбрать вариант." }
-            return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -SelectionConfidence $ManualConfidence -Query $Query -MatchedBy "manual_required" -Candidates $Candidates -Reason $ManualReason }
-        }
-        $Candidate = @($Candidates | Where-Object { [string]$_.candidateId -eq [string]$Selection.candidateId })[0]
-        if (-not $Candidate) { Throw-LlmError "UNKNOWN_CANDIDATE_ID" "Selected candidate is not present in the catalog result." }
-        $SelectionConfidence = [Math]::Max(0.0, [Math]::Min(1.0, [double]$Selection.selectionConfidence))
-        $Reason = [string]$Selection.reason
-    }
-
-    $CandidateScore = [Math]::Max(0.0, [Math]::Min(1.0, [double]$Candidate.score))
-    $FinalConfidence = if ($SelectionConfidence -gt 0) {
-        [Math]::Min([double]$IntentConfidence, [Math]::Min([double]$CandidateScore, [double]$SelectionConfidence))
+    $FlatCandidates = @($ResultItems | ForEach-Object { @($_.candidates) } | Select-Object -First $script:LlmMaxCandidatesPerItem)
+    $SummaryReason = if ($ResultItems.Count -gt 1) {
+        'Выберите один итоговый вариант: вся сумма доната будет добавлена только в один лот.'
+    } elseif ($FirstItem.catalogStatus -eq 'unavailable') {
+        'Каталог временно недоступен. Можно выбрать существующий лот или создать ручной лот по подсказке AI.'
+    } elseif ($FirstItem.catalogStatus -eq 'not_found') {
+        'Каталог не подтвердил название. Можно выбрать существующий лот или создать ручной лот по подсказке AI.'
     } else {
-        [Math]::Min([double]$IntentConfidence, [double]$CandidateScore)
-    }
-    $Existing = Search-ExistingEntryByCandidate $Candidate $Entries $Category
-    if ($Existing) {
-        $ExistingEvidence = Get-LlmExistingSelectionEvidence `
-            $Query `
-            $Existing `
-            ([string]$Candidate.source) `
-            ([string]$Candidate.externalId)
-        if (-not $ExistingEvidence.safe) {
-            return [pscustomobject]@{
-                ok = $true
-                result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -CandidateScore $CandidateScore -SelectionConfidence $SelectionConfidence -FinalConfidence $FinalConfidence -Query $Query -MatchedBy "manual_required" -Candidate $Candidate -Candidates $Candidates -Reason "Найденный лот требует ручной проверки названия."
-            }
-        }
-        return [pscustomobject]@{
-            ok = $true
-            result = ConvertTo-LlmResult -Action "assign_existing" -Category $Category -IntentConfidence $IntentConfidence -CandidateScore $CandidateScore -SelectionConfidence $SelectionConfidence -FinalConfidence $FinalConfidence -Query $Query -MatchedBy "$($Candidate.source)_candidate_existing_entry_$([string]$ExistingEvidence.matchKind)" -ExistingMatchKind ([string]$ExistingEvidence.matchKind) -EntryId ([string]$Existing.id) -EntryFingerprint (Get-EntryFingerprint $Existing) -Candidate $Candidate -Candidates $Candidates -Reason $Reason
-        }
-    }
-    if (Test-EliminatedEntryByCandidate $Candidate $Entries $Category) {
-        return [pscustomobject]@{ ok = $true; result = ConvertTo-LlmResult -Action "ask_manual" -Category $Category -IntentConfidence $IntentConfidence -CandidateScore $CandidateScore -SelectionConfidence $SelectionConfidence -FinalConfidence $FinalConfidence -Query $Query -MatchedBy "manual_required" -Candidate $Candidate -Candidates $Candidates -Reason "Похожий внешний лот уже выбыл. Выберите действие вручную." }
+        [string]$FirstItem.reason
     }
     return [pscustomobject]@{
         ok = $true
-        result = ConvertTo-LlmResult -Action "create_lot_candidate" -Category $Category -IntentConfidence $IntentConfidence -CandidateScore $CandidateScore -SelectionConfidence $SelectionConfidence -FinalConfidence $FinalConfidence -Query $Query -MatchedBy "$($Candidate.source)_candidate_new_lot" -Candidate $Candidate -Candidates $Candidates -Reason $Reason
+        result = ConvertTo-LlmResult `
+            -Action 'ask_manual' `
+            -Category ([string]$FirstItem.category) `
+            -IntentConfidence ([double]$FirstItem.intentConfidence) `
+            -Query ([string]$FirstItem.query) `
+            -MatchedBy 'manual_options' `
+            -Candidates $FlatCandidates `
+            -Items $ResultItems `
+            -Reason $SummaryReason
     }
 }
 
@@ -3856,7 +4348,7 @@ function Get-LlmInputFingerprint {
     $Values.Add([string]$script:LlmPipelineVersion)
     $Values.Add((Limit-LogText ([string]$Donation.source) 40))
     $Values.Add((Limit-LogText ([string]$Donation.externalId) 200))
-    $Values.Add((Limit-LogText ([string]$Donation.message) 500))
+    $Values.Add((Limit-LogText ([string]$Donation.message) 1000))
     $ActiveEntries = @(Get-ActiveEntriesForLlmIntent $InputData.entries)
     $Values.Add([string]$ActiveEntries.Count)
     foreach ($Entry in $ActiveEntries) {
@@ -3918,7 +4410,7 @@ function New-LlmJobFromInput {
             username = Limit-LogText ([string]$Donation.username) 200
             amount = [double]$Donation.amount
             currency = Limit-LogText ([string]$Donation.currency) 20
-            message = Limit-LogText ([string]$Donation.message) 500
+            message = Limit-LogText ([string]$Donation.message) 1000
         }
         entriesSnapshot = @(Get-SafeEntriesForLlm $InputData.entries)
         settings = [pscustomobject]@{

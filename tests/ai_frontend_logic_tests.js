@@ -38,7 +38,7 @@ function assert(condition, message) {
 const identityStart = source.indexOf('    function limitAiServerText');
 const identityEnd = source.indexOf('    function removeDonationAiJob', identityStart);
 if (identityStart < 0 || identityEnd < 0) throw new Error('AI identity helper block not found');
-function loadAiIdentityHelpers(pipelineVersion = 4) {
+function loadAiIdentityHelpers(pipelineVersion = 6) {
   return new Function('LLM_PIPELINE_VERSION', 'getEntriesForAiPayload', `${source.slice(identityStart, identityEnd)}; return {
     limitAiServerText,
     getActiveEntriesForAiIdentity,
@@ -46,7 +46,7 @@ function loadAiIdentityHelpers(pipelineVersion = 4) {
     getDonationAnalysisKey
   };`)(pipelineVersion, () => []);
 }
-const identityHelpers = loadAiIdentityHelpers(4);
+const identityHelpers = loadAiIdentityHelpers(6);
 const identityDonation = {
   source: 'donatepay',
   externalId: 'identity-1',
@@ -62,8 +62,8 @@ const identityEntries = [{
   eliminated: false
 }];
 const identityKey = identityHelpers.getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries });
-assert(identityKey.startsWith('v4:donatepay:identity-1:'), 'Frontend analysis key does not include pipeline version');
-assert(identityKey === 'v4:donatepay:identity-1:c1033163', 'Frontend analysisKey no longer matches the server UTF-16 fingerprint contract');
+assert(identityKey.startsWith('v6:donatepay:identity-1:'), 'Frontend analysis key does not include pipeline version');
+assert(identityKey === 'v6:donatepay:identity-1:b0e109f9', 'Frontend analysisKey no longer matches the server UTF-16 fingerprint contract');
 assert(
   identityHelpers.getDonationAnalysisKey({ ...identityDonation, message: 'на другую игру' }, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
   'Frontend analysis key ignores donation message changes'
@@ -73,16 +73,16 @@ assert(
   'Frontend analysis key ignores active entry changes'
 );
 assert(
-  loadAiIdentityHelpers(5).getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
+  loadAiIdentityHelpers(7).getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
   'Frontend analysis key ignores pipeline version changes'
 );
 
 const skipStart = source.indexOf('    function shouldSkipDonationAi');
 const skipEnd = source.indexOf('    function getEntriesForAiPayload', skipStart);
 if (skipStart < 0 || skipEnd < 0) throw new Error('AI skip helper not found');
-const { shouldSkipDonationAi } = new Function('LLM_PIPELINE_VERSION', `${source.slice(skipStart, skipEnd)}; return { shouldSkipDonationAi };`)(4);
+const { shouldSkipDonationAi } = new Function('LLM_PIPELINE_VERSION', `${source.slice(skipStart, skipEnd)}; return { shouldSkipDonationAi };`)(6);
 assert(!shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 3, status: 'done' } }), 'Legacy AI result was reused after pipeline upgrade');
-assert(shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 4, status: 'done' } }), 'Current completed AI result was needlessly resubmitted');
+assert(shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 6, status: 'done' } }), 'Current completed AI result was needlessly resubmitted');
 
 const mojibakeStart = source.indexOf('    function isLikelyMojibakeText');
 const mojibakeEnd = source.indexOf('    function getSafeExternalUrl', mojibakeStart);
@@ -108,6 +108,7 @@ const authDaState = getDonationAlertsServerDisplayState({ status: 'auth_error' }
 assert(authDaState.label.includes('переподключение'), 'DonationAlerts auth failure does not request reconnection');
 
 assert(source.includes('pipelineVersion: LLM_PIPELINE_VERSION,\n          auctionGeneration:'), 'AI job request does not send pipelineVersion');
+assert(source.includes('const LLM_PIPELINE_VERSION = 6;'), 'Frontend pipeline version was not advanced for displayTitle/manual suggestions.');
 assert(source.includes("title.appendChild(document.createTextNode('AI выбрал существующий лот: '))"), 'Existing-entry AI result has no clear Russian UI state');
 assert(!source.includes('AI понял: Неизвестно · unknown'), 'Raw unknown enum is still shown to users');
 assert(source.includes("'LLM_RESPONSE_CONTENT_MISSING'"), 'Missing OpenRouter content has no safe UI state');
@@ -117,6 +118,222 @@ const aiBlockEnd = source.indexOf('    function formatDonationMoney', aiBlockSta
 const aiBlockSource = source.slice(aiBlockStart, aiBlockEnd);
 assert(aiBlockSource.includes('reason.textContent = getSafeAiDisplayText'), 'AI reason bypasses safe text rendering');
 assert(!aiBlockSource.includes('.innerHTML'), 'AI result UI inserts model output as HTML');
+const aiItemsStart = source.indexOf('    function appendAiCategoryMismatchWarning');
+const aiItemsSource = source.slice(aiItemsStart, aiBlockEnd);
+assert(aiItemsSource.includes('Добавить в «${entry.name}»'), 'Existing AI option is not rendered as a separate add button');
+assert(aiItemsSource.includes('Создать «${candidate.title}» и добавить'), 'Steam candidate is not rendered as a separate create-and-add button');
+assert(aiItemsSource.includes("'Открыть в Steam'"), 'Steam candidate has no verification link');
+assert(aiItemsSource.includes('Категория лота:'), 'Cross-category AI option has no visible warning');
+assert(aiItemsSource.includes('llm.items.forEach'), 'Multi-item AI result is not rendered item-by-item');
+assert(aiItemsSource.includes('item.displayTitle || item.officialTitleGuess'), 'AI card does not prioritize displayTitle.');
+assert(aiItemsSource.includes('createEntryFromAiManualSuggestionAndAssign'), 'Manual AI suggestion has no create-and-add action.');
+for (const text of ['Не подтверждено каталогом', 'временно недоступен', 'отключён', 'внешний каталог не используется']) {
+  assert(aiItemsSource.includes(text), `AI UI is missing catalog state: ${text}`);
+}
+assert(aiItemsSource.includes('Низкая уверенность AI'), 'Low-confidence manual suggestion has no visible warning.');
+assert(aiItemsSource.includes('ручной лот будет создан в категории «Другое»'), 'Unknown-category manual creation has no warning.');
+assert(aiItemsSource.includes('candidate.titleConfirmed === false'), 'Unconfirmed localized Steam title can create a lot');
+assert(!aiItemsSource.includes('.innerHTML'), 'Multi-item AI UI inserts external text as HTML');
+assert(source.includes('name: limitStoredText(String(candidate.title).trim(), MAX_LOT_NAME_LENGTH)'), 'Created AI lot does not use the confirmed catalog title');
+assert(!source.includes("candidate.title || donation.llm?.query || 'Новый лот'"), 'AI title guess can still become the final Steam lot name');
+
+const llmNormalizerStart = source.indexOf('    function normalizeAiDisplayTitle');
+const llmNormalizerEnd = source.indexOf('    function isDonationConversionUnavailable', llmNormalizerStart);
+if (llmNormalizerStart < 0 || llmNormalizerEnd < 0) throw new Error('AI result normalizer block not found');
+const { normalizeDonationLlmState, normalizeAiManualSuggestion } = new Function(
+  'limitStoredText',
+  'getSafeExternalUrl',
+  'AI_ANALYSIS_ALLOWED_CATEGORIES',
+  'isSafeAiExistingMatchEvidence',
+  'MAX_LOT_NAME_LENGTH',
+  `${source.slice(llmNormalizerStart, llmNormalizerEnd)}; return { normalizeDonationLlmState, normalizeAiManualSuggestion };`
+)(
+  (value, maxLength) => String(value || '').slice(0, maxLength),
+  value => /^https?:\/\//.test(String(value || '')) ? String(value) : '',
+  ['game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown'],
+  value => ['exact_title', 'exact_external_identity'].includes(value?.existingMatchKind),
+  200
+);
+const multiItemState = normalizeDonationLlmState({
+  action: 'ask_manual',
+  items: [
+    {
+      itemId: 'digger', category: 'game', catalog: 'steam', mentionedTitle: 'Копатель Онлайн', displayTitle: 'Digger Online', officialTitleGuess: 'Digger Online', originalLanguage: 'en',
+      query: 'Digger Online', searchQueries: ['Digger Online', 'Копатель Онлайн'], intentConfidence: 0.92,
+      existingOptions: [], candidates: [{ source: 'steam', externalId: '278970', title: 'Digger Online', sourceUrl: 'https://store.steampowered.com/app/278970' }]
+    },
+    {
+      itemId: 'minecraft', category: 'game', catalog: 'steam', mentionedTitle: 'Майнкрафт', displayTitle: 'Minecraft', officialTitleGuess: 'Minecraft', originalLanguage: 'en',
+      query: 'Minecraft', searchQueries: ['Minecraft'], intentConfidence: 0.86, existingOptions: [], candidates: []
+    }
+  ]
+});
+assert(multiItemState.items.length === 2, 'Multi-item AI result was collapsed to one item');
+assert(multiItemState.items[0].candidates[0].title === 'Digger Online', 'Confirmed Steam candidate metadata was lost in frontend normalization');
+assert(multiItemState.items[0].displayTitle === 'Digger Online', 'Digger Online display title regressed to a translated/transliterated title.');
+assert(multiItemState.items[0].manualSuggestion?.title === 'Digger Online', 'Digger Online lost its independent manual suggestion.');
+for (const catalogStatus of ['not_found', 'unavailable', 'disabled', 'not_applicable']) {
+  const state = normalizeDonationLlmState({
+    action: 'ask_manual',
+    items: [{
+      category: 'game', catalog: 'steam', mentionedTitle: 'алеша попович',
+      displayTitle: 'Алёша Попович и Тугарин Змей', officialTitleGuess: 'Alyosha Popovich and the Magic Horse',
+      originalLanguage: 'ru', intentConfidence: 0.2, catalogStatus, candidates: [], existingOptions: []
+    }]
+  });
+  assert(state.items[0].displayTitle === 'Алёша Попович и Тугарин Змей', `${catalogStatus} damaged Russian displayTitle.`);
+  assert(state.items[0].manualSuggestion?.title === 'Алёша Попович и Тугарин Змей', `${catalogStatus} hid manual creation.`);
+  assert(state.items[0].manualSuggestion?.source === 'llm_manual', `${catalogStatus} forged a catalog source for manual creation.`);
+  assert(state.items[0].manualSuggestion?.externalId === '' && state.items[0].manualSuggestion?.sourceUrl === '', `${catalogStatus} retained external identity for a manual lot.`);
+}
+const unknownCategoryState = normalizeDonationLlmState({
+  action: 'ask_manual',
+  items: [{ category: 'unknown', catalog: 'none', displayTitle: 'Осмысленное произведение', intentConfidence: 0.1, catalogStatus: 'not_applicable' }]
+});
+assert(unknownCategoryState.items[0].manualSuggestion?.category === 'other', 'Unknown category was not mapped to other for manual creation.');
+for (const category of ['game', 'anime', 'movie', 'tv_show', 'cartoon', 'other']) {
+  const categoryState = normalizeDonationLlmState({
+    action: 'ask_manual',
+    items: [{ category, catalog: 'none', displayTitle: `Название ${category}`, intentConfidence: 0.1, catalogStatus: 'not_applicable' }]
+  });
+  assert(categoryState.items[0].manualSuggestion?.category === category, `Frontend manual suggestion lost category ${category}.`);
+}
+const noisyTitleState = normalizeDonationLlmState({
+  action: 'ask_manual',
+  items: [{ category: 'game', catalog: 'steam', displayTitle: 'https://example.test/game', intentConfidence: 0.9, catalogStatus: 'not_found' }]
+});
+assert(!noisyTitleState.items[0].manualSuggestion, 'URL received a manual create action.');
+const crossCategoryNormalized = normalizeDonationLlmState({
+  action: 'ask_manual',
+  items: [{
+    category: 'game', query: 'Naruto', existingOptions: [{
+      entryId: 'anime-naruto', title: 'Naruto', category: 'anime', categoryMismatch: true,
+      entryFingerprint: { normalizedName: 'naruto', source: 'anilist', externalId: '20' }
+    }], candidates: []
+  }]
+});
+assert(crossCategoryNormalized.items[0].existingOptions[0].categoryMismatch, 'Cross-category warning metadata was lost');
+assert(!crossCategoryNormalized.items[0].existingOptions[0].safeAutoAssign, 'Cross-category option became auto-applicable during normalization');
+const legacySingleState = normalizeDonationLlmState({
+  action: 'create_lot_candidate', category: 'game', query: 'Digger Online', intentConfidence: 0.9,
+  candidate: { source: 'steam', externalId: '278970', title: 'Digger Online', sourceUrl: 'https://store.steampowered.com/app/278970' }
+});
+assert(legacySingleState.items.length === 1, 'Legacy single-item AI result no longer loads');
+assert(legacySingleState.items[0].displayTitle === 'Digger Online', 'Legacy AI result did not use confirmed candidate title as display fallback.');
+const partiallyInvalidState = normalizeDonationLlmState({
+  action: 'ask_manual',
+  items: [null, { category: 'game', query: 'Bully', candidates: [], existingOptions: [] }]
+});
+assert(partiallyInvalidState.items.length === 1, 'One malformed AI item discarded the entire valid result');
+const oversizedItemsState = normalizeDonationLlmState({
+  action: 'ask_manual',
+  items: Array.from({ length: 8 }, (_, index) => ({ category: 'game', query: `Game ${index}`, candidates: [], existingOptions: [] }))
+});
+assert(oversizedItemsState.items.length === 5, 'Frontend does not enforce the AI item limit');
+
+const actionClaimStart = source.indexOf('    function tryClaimAiDonationAction');
+const actionClaimEnd = source.indexOf('    function createEntryFromAiCandidate', actionClaimStart);
+if (actionClaimStart < 0 || actionClaimEnd < 0) throw new Error('AI action lock helpers not found');
+const actionClaims = new Function(`${source.slice(actionClaimStart, actionClaimEnd)}; return { tryClaimAiDonationAction, releaseAiDonationAction };`)();
+const actionLocks = new Set();
+assert(actionClaims.tryClaimAiDonationAction('donation-1', actionLocks), 'First AI action could not claim the donation');
+assert(!actionClaims.tryClaimAiDonationAction('donation-1', actionLocks), 'The same donation can be claimed twice');
+actionClaims.releaseAiDonationAction('donation-1', actionLocks);
+assert(actionClaims.tryClaimAiDonationAction('donation-1', actionLocks), 'AI donation lock was not released');
+
+const manualActionStart = source.indexOf('    function findExistingEntryForAiManualSuggestion');
+const manualActionEnd = source.indexOf('    function createEntryFromAiCandidateAndAssign', manualActionStart);
+if (manualActionStart < 0 || manualActionEnd < 0) throw new Error('Manual AI create-and-assign helper not found');
+const manualActionBlock = source.slice(manualActionStart, manualActionEnd);
+function createManualActionHarness({ initialEntries = [], assignSucceeds = true } = {}) {
+  const donation = { id: 'manual-donation', status: 'pending', amount: 1500, source: 'donatepay', externalId: 'dp-1', llm: { status: 'done' } };
+  return new Function(
+    'initialEntries', 'initialDonation', 'normalizeAiManualSuggestion', 'assignSucceeds',
+    `${source.slice(start, end)}
+     let entries = initialEntries;
+     let donationsPending = [initialDonation];
+     const donationsAdded = [];
+     const aiDonationActionLocks = new Set();
+     let assignmentCount = 0;
+     function canMutateAuctionState() { return true; }
+     function canCreditDonationAmount(value) { return Number(value?.amount) > 0; }
+     function getPendingDonationById(id) { return donationsPending.find(item => item.id === id && item.status === 'pending') || null; }
+     function isDonationKnownOutsidePending(value) { return donationsAdded.some(item => item.externalId === value.externalId); }
+     function tryClaimAiDonationAction(id) { if (aiDonationActionLocks.has(id)) return false; aiDonationActionLocks.add(id); return true; }
+     function releaseAiDonationAction(id) { aiDonationActionLocks.delete(id); }
+     function cryptoRandomUint32() { return 1; }
+     function pickWheelColor() { return '#ffffff'; }
+     function resetSpinSeriesForCompositionChange() {}
+     function saveData() {}
+     function renderList() {}
+     function drawWheel() {}
+     function renderDonationsPanel() {}
+     function assignDonationToEntry(donationId, entryId) {
+       if (assignSucceeds === 'throw') throw new Error('simulated assignment failure');
+       if (!assignSucceeds) return false;
+       const pending = getPendingDonationById(donationId);
+       const entry = entries.find(item => item.id === entryId && !item.eliminated);
+       if (!pending || !entry) return false;
+       entry.price = Number(entry.price || 0) + Number(pending.amount || 0);
+       pending.status = 'added';
+       donationsPending = donationsPending.filter(item => item.id !== donationId);
+       donationsAdded.push(pending);
+       assignmentCount += 1;
+       if (assignSucceeds === 'throw_after') throw new Error('simulated post-mutation failure');
+       return true;
+     }
+     ${manualActionBlock}
+     return {
+       apply: createEntryFromAiManualSuggestionAndAssign,
+       getEntries: () => entries,
+       getAssignmentCount: () => assignmentCount
+     };`
+  )(initialEntries, donation, normalizeAiManualSuggestion, assignSucceeds);
+}
+
+const alyoshaSuggestion = {
+  title: 'Алёша Попович и Тугарин Змей', category: 'game', originalLanguage: 'ru',
+  source: 'llm_manual', externalId: '', sourceUrl: ''
+};
+const manualSuccess = createManualActionHarness();
+assert(manualSuccess.apply('manual-donation', alyoshaSuggestion), 'Manual AI lot was not created and credited.');
+assert(manualSuccess.getEntries().length === 1, 'Manual AI action created an unexpected number of lots.');
+assert(manualSuccess.getEntries()[0].name === 'Алёша Попович и Тугарин Змей', 'Manual AI lot lost its canonical Russian display title.');
+assert(manualSuccess.getEntries()[0].category === 'game', 'Manual AI lot lost its category.');
+assert(manualSuccess.getEntries()[0].source === 'llm_manual', 'Manual AI lot forged a catalog source.');
+assert(manualSuccess.getEntries()[0].externalId === '' && manualSuccess.getEntries()[0].sourceUrl === '', 'Manual AI lot retained external metadata.');
+assert(manualSuccess.getEntries()[0].price === 1500 && manualSuccess.getAssignmentCount() === 1, 'Manual AI donation was not credited exactly once.');
+assert(!manualSuccess.apply('manual-donation', alyoshaSuggestion), 'Processed donation could be credited a second time.');
+assert(manualSuccess.getEntries()[0].price === 1500 && manualSuccess.getAssignmentCount() === 1, 'Repeated manual action duplicated the donation amount.');
+
+const manualRollback = createManualActionHarness({ assignSucceeds: false });
+assert(!manualRollback.apply('manual-donation', alyoshaSuggestion), 'Failed donation assignment was reported as successful.');
+assert(manualRollback.getEntries().length === 0, 'Failed assignment left an orphaned manual AI lot.');
+const manualExceptionRollback = createManualActionHarness({ assignSucceeds: 'throw' });
+assert(!manualExceptionRollback.apply('manual-donation', alyoshaSuggestion), 'Thrown assignment failure was reported as successful.');
+assert(manualExceptionRollback.getEntries().length === 0, 'Thrown assignment failure left an orphaned manual AI lot.');
+const manualPostMutationRollback = createManualActionHarness({ assignSucceeds: 'throw_after' });
+assert(!manualPostMutationRollback.apply('manual-donation', alyoshaSuggestion), 'Post-mutation assignment failure was reported as successful.');
+assert(manualPostMutationRollback.getEntries().length === 0, 'Post-mutation assignment failure left an orphaned manual AI lot.');
+
+const existingRussianLot = { id: 'alyosha-existing', name: 'Алёша Попович и Тугарин Змей', price: 0, category: 'game', source: 'llm_manual', externalId: '', eliminated: false };
+const manualDuplicateGuard = createManualActionHarness({ initialEntries: [existingRussianLot] });
+assert(manualDuplicateGuard.apply('manual-donation', { ...alyoshaSuggestion, title: 'Алеша Попович и Тугарин Змей' }), 'Existing Russian lot was not found through е/ё normalization.');
+assert(manualDuplicateGuard.getEntries().length === 1, 'Manual action created an exact duplicate Russian lot.');
+assert(manualDuplicateGuard.getEntries()[0].name === 'Алёша Попович и Тугарин Змей', 'Existing lot display spelling was overwritten by normalized text.');
+assert(manualDuplicateGuard.getEntries()[0].price === 1500, 'Donation was not credited to the existing Russian lot.');
+const existingRollbackLot = { id: 'alyosha-existing', name: 'Алёша Попович и Тугарин Змей', price: 25, category: 'game', source: 'llm_manual', externalId: '', eliminated: false };
+const existingRollback = createManualActionHarness({ initialEntries: [existingRollbackLot], assignSucceeds: 'throw_after' });
+assert(!existingRollback.apply('manual-donation', alyoshaSuggestion), 'Existing-lot post-mutation failure was reported as successful.');
+assert(existingRollback.getEntries().length === 1 && existingRollback.getEntries()[0].price === 25, 'Existing lot amount was not rolled back after an assignment exception.');
+
+assert(source.includes('--link-color:'), 'Global link color variable is missing');
+assert(source.includes('a:visited {\n      color: var(--link-color);'), 'Visited text links can fall back to browser purple');
+assert(source.includes('a:hover {\n      color: var(--link-hover-color);'), 'Global link hover state is missing');
+assert(source.includes('a:focus-visible {'), 'Global link focus-visible state is missing');
+assert(!/\.integration-external-link\s*\{[^}]*color:\s*#74c0fc/s.test(source), 'Integration links still force the old blue color');
+assert(!/\.help-card a[^{]*\{[^}]*color:\s*#74c0fc/s.test(source), 'Help links still force the old blue color');
+assert(source.includes('.version-update-notice:visited') && source.includes('.app-version-badge:visited'), 'Link-like badges do not preserve their button styling after visit');
 
 const existingEvidenceStart = source.indexOf('    function isSafeAiExistingMatchEvidence');
 const existingEvidenceEnd = source.indexOf('    function normalizeAiComparableText', existingEvidenceStart);
@@ -288,6 +505,7 @@ const entries = [
 ];
 const helpers = loadHelpers(entries);
 assert(helpers.compareAiLotTitles('The Witcher 3', 'Witcher 3').exact, 'Safe article match failed');
+assert(helpers.compareAiLotTitles('Алёша Попович и Тугарин Змей', 'алеша попович и тугарин змей').exact, 'Frontend title comparison does not treat е and ё as equivalent.');
 assert(helpers.compareAiLotTitles('Granny 3', 'Granny').hasVariantConflict, 'Part-number conflict was not detected');
 assert(helpers.findExistingEntryForAiCandidate({ title: 'Granny 3' }).id === 'exact', 'Exact candidate match failed');
 

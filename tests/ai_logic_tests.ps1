@@ -27,6 +27,8 @@ $FunctionNames = @(
     'Get-NormalizedEditSimilarity',
     'Compare-LotTitles',
     'Get-LlmTitleInformation',
+    'Normalize-LlmDisplayTitle',
+    'Get-LlmManualLotSuggestion',
     'Get-LlmExistingSelectionEvidence',
     'Normalize-LotCategory',
     'Test-LotCategoriesCompatible',
@@ -39,6 +41,14 @@ $FunctionNames = @(
     'Find-EliminatedEntryMatch',
     'ConvertTo-LlmResult',
     'Resolve-LlmIntentDecision',
+    'Get-LlmItemCatalog',
+    'Get-LlmItemSearchQueries',
+    'Get-LlmIntentItemRejectionReason',
+    'Write-LlmIntentItemRejection',
+    'Resolve-LlmIntentItems',
+    'Resolve-LlmNormalizedIntentItems',
+    'ConvertTo-LlmNormalizedIntentEnvelope',
+    'ConvertTo-LlmIntentItems',
     'Search-ExistingEntryByCandidate',
     'Test-EliminatedEntryByCandidate',
     'Get-CandidateComparableTitles',
@@ -60,6 +70,7 @@ $FunctionNames = @(
     'Add-LlmSafeDiagnostics',
     'Throw-OpenRouterStructuredContentError',
     'ConvertFrom-OpenRouterStructuredContent',
+    'ConvertFrom-OpenRouterIntentResponse',
     'ConvertTo-LlmConfidence',
     'Get-StrictUtf8Encoding',
     'ConvertTo-Utf8JsonBytes',
@@ -111,6 +122,10 @@ $FunctionNames = @(
     'Get-SteamSearchCache',
     'Get-SteamSearchCachedCandidates',
     'Set-SteamSearchCachedCandidates',
+    'Merge-SteamCandidatesByAppId',
+    'Search-SteamCandidatesForQueries',
+    'Get-LlmExistingOptionsForItem',
+    'Add-LlmCandidateExistingMetadata',
     'New-EmptyLlmJobsStore',
     'Read-LlmJobsStoreUnsafe',
     'Write-LlmJobsStoreUnsafe',
@@ -125,6 +140,7 @@ $FunctionNames = @(
     'Test-LlmJobGenerationCurrent',
     'Complete-LlmJob',
     'Repair-InterruptedLlmJobs',
+    'Invoke-LlmDonationItemPipeline',
     'Invoke-LlmDonationPipeline',
     'Clear-LlmSearchCaches',
     'Get-NumericDonationId',
@@ -185,8 +201,11 @@ function Assert-Equal {
     if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'" }
 }
 
-$script:LlmPipelineVersion = 4
+$script:LlmPipelineVersion = 6
 $script:LlmExistingSelectionThreshold = 0.90
+$script:LlmMaxItems = 5
+$script:LlmMaxSearchQueriesPerItem = 4
+$script:LlmMaxCandidatesPerItem = 5
 
 $OriginalTestCulture = [Threading.Thread]::CurrentThread.CurrentCulture
 try {
@@ -309,33 +328,252 @@ foreach ($InvalidTopLevel in @('42', '[]')) {
     Assert-Equal $TopLevelCode 'LLM_SCHEMA_VALIDATION_ERROR' 'Scalar/array structured response was not rejected as a schema error.'
 }
 
+$script:CapturedIntentLogs = New-Object System.Collections.Generic.List[string]
+function Write-AppLog {
+    param([string]$Level = 'INFO', [string]$Message = '')
+    $script:CapturedIntentLogs.Add("$Level $Message")
+}
+
+function New-TestOpenRouterIntentResponse {
+    param([string]$Content)
+    return [pscustomobject]@{
+        id = 'safe-test-request-id'
+        model = 'test-model'
+        provider = 'test-provider'
+        choices = @([pscustomobject]@{
+            finish_reason = 'stop'
+            message = [pscustomobject]@{ content = $Content }
+        })
+    }
+}
+
+$RealDiggerOpenRouterJson = @'
+{
+  "items": [
+    {
+      "category": "game",
+      "catalog": "steam",
+      "mentionedTitle": "копатель онлайн",
+      "displayTitle": "Digger Online",
+      "officialTitleGuess": "Digger Online",
+      "searchQueries": ["Digger Online"],
+      "originalLanguage": "en",
+      "confidence": 0.9,
+      "reason": "Сообщение содержит название игры «копатель онлайн», что является прямым указанием на игру Digger Online.",
+      "existingEntryId": "__none__",
+      "existingSelectionConfidence": 0
+    }
+  ]
+}
+'@
+$GrannyIntentEntry = [pscustomobject]@{ id = 'granny-3'; name = 'Granny 3'; category = 'game'; source = 'steam'; externalId = '123456'; eliminated = $false }
+$SecondIntentEntry = [pscustomobject]@{ id = 'bully'; name = 'Bully'; category = 'game'; source = 'steam'; externalId = '12200'; eliminated = $false }
+$RealDiggerDiagnostics = $null
+$RealDiggerParsed = ConvertFrom-OpenRouterStructuredContent `
+    -Message ([pscustomobject]@{ content = $RealDiggerOpenRouterJson }) `
+    -FinishReason 'stop' `
+    -Model 'test-model' `
+    -Provider 'test-provider' `
+    -RequestId 'safe-test-request-id' `
+    -Diagnostics ([ref]$RealDiggerDiagnostics)
+Assert-Equal $RealDiggerParsed.items[0].existingEntryId '__none__' 'The real provider JSON fixture did not preserve the provider sentinel before normalization.'
+$RealDiggerEnvelope = ConvertFrom-OpenRouterIntentResponse `
+    (New-TestOpenRouterIntentResponse $RealDiggerOpenRouterJson) `
+    @($GrannyIntentEntry)
+Assert-Equal $RealDiggerEnvelope.intentItemsContract 'normalized_intent_items_v1' 'Provider response was not wrapped in the normalized internal contract.'
+$RealDiggerItems = @(ConvertTo-LlmIntentItems $RealDiggerEnvelope @($GrannyIntentEntry))
+Assert-Equal $RealDiggerItems.Count 1 'Real Digger Online provider JSON was discarded with one active entry.'
+Assert-Equal $RealDiggerItems[0].existingEntryId '' 'Provider __none__ sentinel was not normalized to an empty internal entry ID.'
+Assert-Equal $RealDiggerItems[0].existingSelectionConfidence ([double]0) 'Provider __none__ confidence was not normalized to zero.'
+Assert-Equal $RealDiggerItems[0].category 'game' 'Digger Online category was lost during normalization.'
+Assert-Equal $RealDiggerItems[0].catalog 'steam' 'Digger Online catalog was lost during normalization.'
+Assert-True (@($RealDiggerItems[0].searchQueries) -contains 'Digger Online') 'Digger Online search query was lost during normalization.'
+$RealDiggerItemsRepeated = @(ConvertTo-LlmIntentItems $RealDiggerEnvelope @($GrannyIntentEntry))
+Assert-Equal $RealDiggerItemsRepeated.Count 1 'Repeated internal validation is not idempotent.'
+Assert-Equal $RealDiggerItemsRepeated[0].existingEntryId '' 'Repeated internal validation treated the empty internal ID as unknown.'
+$RealDiggerMultipleEntries = ConvertFrom-OpenRouterIntentResponse `
+    (New-TestOpenRouterIntentResponse $RealDiggerOpenRouterJson) `
+    @($GrannyIntentEntry, $SecondIntentEntry)
+Assert-Equal @(ConvertTo-LlmIntentItems $RealDiggerMultipleEntries @($GrannyIntentEntry, $SecondIntentEntry)).Count 1 'Provider __none__ sentinel failed with multiple active entries.'
+
+$UnknownExistingIdJson = $RealDiggerOpenRouterJson.Replace('"__none__"', '"missing-entry"')
+$UnknownExistingCode = ''
+try {
+    [void](ConvertFrom-OpenRouterIntentResponse (New-TestOpenRouterIntentResponse $UnknownExistingIdJson) @($GrannyIntentEntry))
+}
+catch { $UnknownExistingCode = Get-LlmExceptionCode $_.Exception }
+Assert-Equal $UnknownExistingCode 'LLM_SCHEMA_VALIDATION_ERROR' 'An unknown non-empty existing entry ID was accepted.'
+Assert-True (@($script:CapturedIntentLogs | Where-Object { $_ -match 'reason=unknown_existing_entry' }).Count -gt 0) 'Safe diagnostics did not preserve the unknown_existing_entry rejection reason.'
+Assert-True (@($script:CapturedIntentLogs | Where-Object { $_ -match 'responseFingerprint=[0-9a-f]{16}' }).Count -gt 0) 'Rejected item diagnostics did not retain the safe response fingerprint.'
+Assert-False (($script:CapturedIntentLogs -join "`n").Contains('missing-entry')) 'Safe diagnostics leaked the rejected model entry ID.'
+
+$ValidExistingJson = $RealDiggerOpenRouterJson.Replace('копатель онлайн', 'Granny 3').Replace('Digger Online', 'Granny 3').Replace('"__none__"', '"granny-3"').Replace('"existingSelectionConfidence": 0', '"existingSelectionConfidence": 0.95')
+$ValidExistingEnvelope = ConvertFrom-OpenRouterIntentResponse `
+    (New-TestOpenRouterIntentResponse $ValidExistingJson) `
+    @($GrannyIntentEntry)
+$ValidExistingItems = @(ConvertTo-LlmIntentItems $ValidExistingEnvelope @($GrannyIntentEntry))
+Assert-Equal $ValidExistingItems[0].existingEntryId 'granny-3' 'A valid active existing entry ID was rejected.'
+Assert-Equal $ValidExistingItems[0].existingSelectionConfidence ([double]0.95) 'A valid existing selection confidence was lost.'
+
+$ForgedNormalizedEnvelope = [pscustomobject]@{
+    intentItemsContract = 'normalized_intent_items_v1'
+    responseFingerprint = $RealDiggerEnvelope.responseFingerprint
+    items = @([pscustomobject]@{
+        itemId = 'item-1'; category = 'game'; catalog = 'steam'; mentionedTitle = 'Granny 3'; displayTitle = 'Granny 3'; officialTitleGuess = 'Granny 3'; originalLanguage = 'en'
+        searchQueries = @('Granny 3'); confidence = 0.95; existingEntryId = 'missing-internal-entry'
+        existingSelectionConfidence = 0.95; reason = 'Выбран существующий лот.'
+    })
+}
+$ForgedNormalizedCode = ''
+try { [void](ConvertTo-LlmIntentItems $ForgedNormalizedEnvelope @($GrannyIntentEntry)) }
+catch { $ForgedNormalizedCode = Get-LlmExceptionCode $_.Exception }
+Assert-Equal $ForgedNormalizedCode 'LLM_SCHEMA_VALIDATION_ERROR' 'The internal intent contract bypassed active-entry ID validation.'
+
+$InvalidNoneConfidenceJson = $RealDiggerOpenRouterJson.Replace('"existingSelectionConfidence": 0', '"existingSelectionConfidence": 0.25')
+$InvalidNoneConfidenceCode = ''
+try {
+    [void](ConvertFrom-OpenRouterIntentResponse (New-TestOpenRouterIntentResponse $InvalidNoneConfidenceJson) @($GrannyIntentEntry))
+}
+catch { $InvalidNoneConfidenceCode = Get-LlmExceptionCode $_.Exception }
+Assert-Equal $InvalidNoneConfidenceCode 'LLM_SCHEMA_VALIDATION_ERROR' 'Provider __none__ with non-zero confidence was accepted.'
+
+$PartiallyUnknownJson = @'
+{
+  "items": [
+    {
+      "category": "game", "catalog": "steam", "mentionedTitle": "Broken", "displayTitle": "Broken", "officialTitleGuess": "Broken", "originalLanguage": "en",
+      "searchQueries": ["Broken"], "confidence": 0.8, "reason": "Некорректный ID.",
+      "existingEntryId": "unknown-id", "existingSelectionConfidence": 0.9
+    },
+    {
+      "category": "game", "catalog": "steam", "mentionedTitle": "копатель онлайн", "displayTitle": "Digger Online", "officialTitleGuess": "Digger Online", "originalLanguage": "en",
+      "searchQueries": ["Digger Online"], "confidence": 0.9, "reason": "Определена игра Digger Online.",
+      "existingEntryId": "__none__", "existingSelectionConfidence": 0
+    }
+  ]
+}
+'@
+$PartiallyUnknownEnvelope = ConvertFrom-OpenRouterIntentResponse `
+    (New-TestOpenRouterIntentResponse $PartiallyUnknownJson) `
+    @($GrannyIntentEntry)
+$PartiallyUnknownItems = @(ConvertTo-LlmIntentItems $PartiallyUnknownEnvelope @($GrannyIntentEntry))
+Assert-Equal $PartiallyUnknownItems.Count 1 'An invalid item discarded another valid provider item.'
+Assert-Equal $PartiallyUnknownItems[0].officialTitleGuess 'Digger Online' 'The surviving valid provider item was replaced.'
+
 $SchemaB = Get-OpenRouterIntentProviderSchema @()
-Assert-False ($null -ne $SchemaB.properties.entryId) 'Empty-entry provider schema still contains entryId.'
-Assert-False ($null -ne $SchemaB.properties.existingSelectionConfidence) 'Empty-entry provider schema still contains existingSelectionConfidence.'
-Assert-False (@($SchemaB.properties.decision.enum) -contains 'select_existing') 'Empty-entry provider schema permits select_existing.'
-$SchemaBResolved = Resolve-LlmIntentDecision ($StructuredFixture | ConvertFrom-Json) @()
-Assert-Equal $SchemaBResolved.entryId '' 'Schema B was not normalized to the internal entryId contract.'
-Assert-Equal $SchemaBResolved.existingSelectionConfidence ([double]0) 'Schema B was not normalized to internal existing confidence.'
+$SchemaBItem = $SchemaB.properties.items.items
+Assert-False ($null -ne $SchemaBItem.properties.existingEntryId) 'Empty-entry provider item schema still contains existingEntryId.'
+Assert-False ($null -ne $SchemaBItem.properties.existingSelectionConfidence) 'Empty-entry provider item schema still contains existingSelectionConfidence.'
+Assert-True ($null -ne $SchemaBItem.properties.displayTitle) 'Provider schema does not contain displayTitle.'
+Assert-True ($null -ne $SchemaBItem.properties.originalLanguage) 'Provider schema does not contain originalLanguage.'
+Assert-True (@($SchemaBItem.required) -contains 'displayTitle') 'displayTitle is not required by the strict provider schema.'
+Assert-True (@($SchemaBItem.required) -contains 'originalLanguage') 'originalLanguage is not required by the strict provider schema.'
+Assert-Equal $SchemaB.properties.items.maxItems 5 'Provider schema does not bound the item count.'
+Assert-Equal $SchemaBItem.properties.searchQueries.maxItems 4 'Provider schema does not bound per-item search queries.'
+$SchemaBFixture = [pscustomobject]@{ items = @([pscustomobject]@{
+    category = 'game'
+    catalog = 'steam'
+    mentionedTitle = 'Копатель Онлайн'
+    displayTitle = 'Digger Online'
+    officialTitleGuess = 'Digger Online'
+    searchQueries = @('Digger Online', 'Копатель Онлайн', 'Kopatel Online')
+    originalLanguage = 'en'
+    confidence = 0.92
+    reason = 'Определено предполагаемое официальное название игры.'
+}) }
+$SchemaBResolved = @(Resolve-LlmIntentItems $SchemaBFixture @())
+Assert-Equal $SchemaBResolved.Count 1 'Schema B item did not normalize.'
+Assert-Equal $SchemaBResolved[0].officialTitleGuess 'Digger Online' 'Official Steam title guess was lost.'
+Assert-Equal $SchemaBResolved[0].displayTitle 'Digger Online' 'Digger Online display title was lost.'
+Assert-Equal $SchemaBResolved[0].existingEntryId '' 'Schema B was not normalized to the internal existing entry contract.'
+Assert-Equal $SchemaBResolved[0].existingSelectionConfidence ([double]0) 'Schema B was not normalized to internal existing confidence.'
+$PartiallyInvalidItems = [pscustomobject]@{ items = @(
+    [pscustomobject]@{ category = 'invalid'; catalog = 'steam'; mentionedTitle = 'Broken'; officialTitleGuess = 'Broken'; searchQueries = @('Broken'); confidence = 0.9; reason = 'Некорректный элемент.' },
+    $SchemaBFixture.items[0]
+) }
+$PartiallyInvalidResolved = @(Resolve-LlmIntentItems $PartiallyInvalidItems @())
+Assert-Equal $PartiallyInvalidResolved.Count 1 'One malformed item discarded other valid LLM items.'
+$ExcessQueries = [pscustomobject]@{ officialTitleGuess = 'Digger Online'; mentionedTitle = 'Копатель Онлайн'; searchQueries = @('Digger Online', 'Копатель Онлайн', 'Kopatel Online', 'Digger', 'Extra') }
+$LimitedQueries = @(Get-LlmItemSearchQueries $ExcessQueries 4)
+Assert-Equal $LimitedQueries.Count 4 'Per-item query limit was not enforced.'
 $SchemaEntry = [pscustomobject]@{ id = 'entry-1'; name = 'Bully'; category = 'game'; source = 'steam'; externalId = '12200'; eliminated = $false }
 $SchemaA = Get-OpenRouterIntentProviderSchema @($SchemaEntry)
-Assert-True (@($SchemaA.properties.entryId.enum) -contains '__none__') 'Active-entry provider schema does not use the non-empty sentinel.'
-Assert-False (@($SchemaA.properties.entryId.enum) -contains '') 'Active-entry provider schema uses an empty provider enum sentinel.'
-$SchemaANonSelection = [pscustomobject]@{
-    decision = 'ask_manual'
-    entryId = '__none__'
+$SchemaAItem = $SchemaA.properties.items.items
+Assert-True (@($SchemaAItem.properties.existingEntryId.enum) -contains '__none__') 'Active-entry provider schema does not use the non-empty sentinel.'
+Assert-False (@($SchemaAItem.properties.existingEntryId.enum) -contains '') 'Active-entry provider schema uses an empty provider enum sentinel.'
+$SchemaAFixture = [pscustomobject]@{ items = @([pscustomobject]@{
+    category = 'game'; catalog = 'steam'; mentionedTitle = 'Bully'; displayTitle = 'Bully'; officialTitleGuess = 'Bully'; searchQueries = @('Bully'); originalLanguage = 'en'
+    confidence = 0.7; existingEntryId = '__none__'; existingSelectionConfidence = 0; reason = 'Требуется ручная проверка.'
+}) }
+Assert-Equal @(Resolve-LlmIntentItems $SchemaAFixture @($SchemaEntry))[0].existingEntryId '' 'Schema A sentinel was not normalized to the internal contract.'
+
+$AlyoshaProviderItem = [pscustomobject]@{ items = @([pscustomobject]@{
     category = 'game'
-    query = 'Bully'
-    intentConfidence = 0.7
-    existingSelectionConfidence = 0
-    reason = 'Требуется ручная проверка.'
+    catalog = 'steam'
+    mentionedTitle = 'алеша попович'
+    displayTitle = 'Алёша Попович и Тугарин Змей'
+    officialTitleGuess = 'Alyosha Popovich and the Magic Horse'
+    searchQueries = @('Алёша Попович и Тугарин Змей', 'Alyosha Popovich and the Magic Horse', 'алеша попович')
+    originalLanguage = 'ru'
+    confidence = 0.8
+    reason = 'Распознана российская игра по мотивам одноимённого мультфильма.'
+}) }
+$AlyoshaItem = @(Resolve-LlmIntentItems $AlyoshaProviderItem @())[0]
+Assert-Equal $AlyoshaItem.displayTitle 'Алёша Попович и Тугарин Змей' 'Russian displayTitle lost Cyrillic, capitalization, ё, or the canonical full title.'
+Assert-Equal $AlyoshaItem.originalLanguage 'ru' 'Russian original language was lost.'
+$AlyoshaManual = Get-LlmManualLotSuggestion $AlyoshaItem.displayTitle $AlyoshaItem.category $AlyoshaItem.originalLanguage
+Assert-Equal $AlyoshaManual.title 'Алёша Попович и Тугарин Змей' 'Manual suggestion does not use displayTitle.'
+Assert-Equal $AlyoshaManual.source 'llm_manual' 'Manual suggestion is incorrectly marked as catalog-confirmed.'
+Assert-Equal $AlyoshaManual.externalId '' 'Manual suggestion contains an invented external ID.'
+Assert-Equal $AlyoshaManual.sourceUrl '' 'Manual suggestion contains an invented source URL.'
+Assert-False $AlyoshaManual.catalogConfirmed 'Manual suggestion is marked as catalog-confirmed.'
+Assert-True ((Compare-LotTitles 'Алёша Попович и Тугарин Змей' 'алеша попович и тугарин змей').exact) 'Russian title comparison does not treat е and ё as equivalent.'
+$ExistingAlyosha = [pscustomobject]@{ id = 'alyosha-existing'; name = 'Алёша Попович и Тугарин Змей'; eliminated = $false; source = 'llm_manual'; externalId = ''; category = 'game'; sourceUrl = '' }
+$AlyoshaOptions = @(Get-LlmExistingOptionsForItem $AlyoshaItem @($ExistingAlyosha))
+Assert-Equal $AlyoshaOptions.Count 1 'Existing Russian lot was not found through displayTitle with е/ё normalization.'
+Assert-Equal $AlyoshaOptions[0].title 'Алёша Попович и Тугарин Змей' 'Existing Russian lot display spelling was modified.'
+
+$NoSteamResults = { param($Query, $JobId, $Generation) return @() }
+$UnavailableSteamResults = { param($Query, $JobId, $Generation) throw 'temporary catalog failure' }
+$AlyoshaNotFound = Invoke-LlmDonationItemPipeline $AlyoshaItem @() ([pscustomobject]@{ allowSteam = $true }) '' 1 $NoSteamResults $null
+Assert-Equal $AlyoshaNotFound.catalogStatus 'not_found' 'Empty Steam result did not produce not_found.'
+Assert-Equal $AlyoshaNotFound.manualSuggestion.title 'Алёша Попович и Тугарин Змей' 'not_found removed the manual suggestion.'
+$AlyoshaUnavailable = Invoke-LlmDonationItemPipeline $AlyoshaItem @() ([pscustomobject]@{ allowSteam = $true }) '' 1 $UnavailableSteamResults $null
+Assert-Equal $AlyoshaUnavailable.catalogStatus 'unavailable' 'Steam transport failure did not produce unavailable.'
+Assert-True ($null -ne $AlyoshaUnavailable.manualSuggestion) 'unavailable removed the manual suggestion.'
+$AlyoshaDisabled = Invoke-LlmDonationItemPipeline $AlyoshaItem @() ([pscustomobject]@{ allowSteam = $false }) '' 1 $NoSteamResults $null
+Assert-Equal $AlyoshaDisabled.catalogStatus 'disabled' 'Disabled Steam search has the wrong status.'
+Assert-True ($null -ne $AlyoshaDisabled.manualSuggestion) 'disabled removed the manual suggestion.'
+$MovieItem = [pscustomobject]@{
+    itemId = 'movie-item'; category = 'movie'; catalog = 'none'; mentionedTitle = 'брат 2'; displayTitle = 'Брат 2'
+    officialTitleGuess = 'Брат 2'; searchQueries = @('Брат 2'); originalLanguage = 'ru'; confidence = 0.35
+    existingEntryId = ''; existingSelectionConfidence = 0; reason = 'Распознан российский фильм.'
 }
-Assert-Equal (Resolve-LlmIntentDecision $SchemaANonSelection @($SchemaEntry)).entryId '' 'Schema A sentinel was not normalized to the internal contract.'
+$MovieNoCatalog = Invoke-LlmDonationItemPipeline $MovieItem @() ([pscustomobject]@{}) '' 1 $null $null
+Assert-Equal $MovieNoCatalog.catalogStatus 'not_applicable' 'Category without a catalog has the wrong status.'
+Assert-Equal $MovieNoCatalog.manualSuggestion.title 'Брат 2' 'not_applicable removed the manual suggestion.'
+Assert-True ($null -ne $MovieNoCatalog.manualSuggestion) 'Low confidence hid a valid manual suggestion.'
+foreach ($Category in @('game', 'anime', 'movie', 'tv_show', 'cartoon', 'other')) {
+    $CategorySuggestion = Get-LlmManualLotSuggestion "Название $Category" $Category 'ru'
+    Assert-Equal $CategorySuggestion.category $Category "Manual suggestion lost category $Category."
+}
+Assert-Equal (Get-LlmManualLotSuggestion 'Осмысленное название' 'unknown' 'ru').category 'other' 'Unknown category was not mapped to other for explicit manual creation.'
+Assert-True ($null -eq (Get-LlmManualLotSuggestion 'https://example.test/game' 'game' 'unknown')) 'URL received a manual lot suggestion.'
+Assert-True ($null -eq (Get-LlmManualLotSuggestion '???' 'game' 'unknown')) 'Punctuation-only title received a manual lot suggestion.'
+Assert-True ($null -eq (Get-LlmManualLotSuggestion 'лот' 'game' 'unknown')) 'Placeholder title received a manual lot suggestion.'
 
 $IntentFunctionStart = $ServerSource.IndexOf('function Invoke-OpenRouterIntentAnalysis')
-$IntentFunctionEnd = $ServerSource.IndexOf('function Invoke-OpenRouterCandidateSelection', $IntentFunctionStart)
+$IntentFunctionEnd = $ServerSource.IndexOf('function Test-OpenRouterIntegration', $IntentFunctionStart)
 $IntentFunctionSource = $ServerSource.Substring($IntentFunctionStart, $IntentFunctionEnd - $IntentFunctionStart)
-Assert-True ($IntentFunctionSource.Contains('Resolve-LlmIntentDecision $Result $CurrentEntries')) 'Intent analysis bypasses shared decision and confidence validation.'
+Assert-True ($IntentFunctionSource.Contains('ConvertFrom-OpenRouterIntentResponse $Response $CurrentEntries')) 'Intent analysis bypasses the single provider parsing and normalization boundary.'
 Assert-True ($IntentFunctionSource.Contains('currentEntries = $CurrentEntries')) 'Intent analysis does not send active current entries.'
+Assert-True ($IntentFunctionSource.Contains('donationMessage = Limit-LogText ([string]$Donation.message) 1000')) 'Full bounded donation message is not sent once to the intent request.'
+Assert-False ($IntentFunctionSource.Contains('normalizedMessage =')) 'Donation text is duplicated in the OpenRouter payload.'
+Assert-True ($IntentFunctionSource.Contains('Digger Online')) 'Intent prompt does not distinguish Digger Online from transliteration.'
+Assert-True ($IntentFunctionSource.Contains('displayTitle "Алёша Попович и Тугарин Змей"')) 'Intent prompt does not preserve canonical Russian display titles.'
+Assert-True ($IntentFunctionSource.Contains('Never use a simple transliteration such as Alyosha Popovich as displayTitle')) 'Intent prompt allows transliteration to replace a Russian display title.'
+Assert-True ($IntentFunctionSource.Contains('every explicitly mentioned work as a separate item')) 'Intent prompt does not require multi-item extraction in one response.'
+Assert-True ($ServerSource.Contains('$script:LlmPipelineVersion = 6')) 'Server pipeline version was not advanced for the new item contract.'
 $ResolveIntentStart = $ServerSource.IndexOf('function Resolve-LlmIntentDecision')
 $ResolveIntentEnd = $ServerSource.IndexOf('function Read-JsonFileSafe', $ResolveIntentStart)
 $ResolveIntentSource = $ServerSource.Substring($ResolveIntentStart, $ResolveIntentEnd - $ResolveIntentStart)
@@ -343,16 +581,24 @@ Assert-True ($ResolveIntentSource.Contains('ConvertTo-LlmConfidence $Result.inte
 Assert-True ($ResolveIntentSource.Contains('$Result.intentConfidence = [double]$IntentConfidence')) 'Intent confidence is not normalized back to double.'
 Assert-True ($ResolveIntentSource.Contains('ConvertTo-LlmConfidence $Result.existingSelectionConfidence')) 'Existing-entry confidence bypasses the shared validator.'
 Assert-True ($ResolveIntentSource.Contains('$Result.existingSelectionConfidence = [double]$ExistingConfidence')) 'Existing-entry confidence is not normalized back to double.'
-$SelectionFunctionStart = $IntentFunctionEnd
-$SelectionFunctionEnd = $ServerSource.IndexOf('function Test-OpenRouterIntegration', $SelectionFunctionStart)
-$SelectionFunctionSource = $ServerSource.Substring($SelectionFunctionStart, $SelectionFunctionEnd - $SelectionFunctionStart)
-Assert-True ($SelectionFunctionSource.Contains('ConvertTo-LlmConfidence $Selection.selectionConfidence')) 'Candidate selection does not use the shared confidence validator.'
-Assert-True ($SelectionFunctionSource.Contains('$Selection.selectionConfidence = [double]$SelectionConfidence')) 'Selection confidence is not normalized back to double.'
-$OpenRouterTestStart = $SelectionFunctionEnd
+$ResolvedItemsStart = $ServerSource.IndexOf('function Resolve-LlmIntentItems')
+$ResolvedItemsEnd = $ServerSource.IndexOf('function ConvertTo-LlmIntentItems', $ResolvedItemsStart)
+$ResolvedItemsSource = $ServerSource.Substring($ResolvedItemsStart, $ResolvedItemsEnd - $ResolvedItemsStart)
+Assert-True ($ResolvedItemsSource.Contains('ConvertTo-LlmConfidence $RawItem.confidence')) 'Multi-item confidence bypasses the invariant validator.'
+Assert-True ($ResolvedItemsSource.Contains("intentItemsContract = 'normalized_intent_items_v1'")) 'Provider-normalized items are not marked with an explicit internal contract.'
+Assert-True ($ResolvedItemsSource.Contains('Resolve-LlmNormalizedIntentItems')) 'Normalized intent items do not use their separate idempotent validator.'
+Assert-False ($ServerSource.Contains('function Invoke-OpenRouterCandidateSelection')) 'A second OpenRouter candidate-selection call is still implemented.'
+$PipelineSourceStart = $ServerSource.IndexOf('function Invoke-LlmDonationPipeline')
+$PipelineSourceEnd = $ServerSource.IndexOf('function New-EmptyLlmJobsStore', $PipelineSourceStart)
+$PipelineSource = $ServerSource.Substring($PipelineSourceStart, $PipelineSourceEnd - $PipelineSourceStart)
+Assert-Equal ([regex]::Matches($PipelineSource, 'Invoke-OpenRouterIntentAnalysis').Count) 1 'Donation pipeline can perform more than one main OpenRouter analysis.'
+Assert-False ($PipelineSource.Contains('Invoke-OpenRouterRequest')) 'Catalog processing performs a direct extra OpenRouter request.'
+$OpenRouterTestStart = $IntentFunctionEnd
 $OpenRouterTestEnd = $ServerSource.IndexOf('function Assert-LlmJobGenerationCurrent', $OpenRouterTestStart)
 $OpenRouterTestSource = $ServerSource.Substring($OpenRouterTestStart, $OpenRouterTestEnd - $OpenRouterTestStart)
-Assert-True ($OpenRouterTestSource.Contains('intentConfidence 0.5')) 'OpenRouter integration test does not request fractional confidence.'
-Assert-True ($OpenRouterTestSource.Contains('Resolve-LlmIntentDecision $Parsed @()')) 'OpenRouter integration test bypasses the production intent validator.'
+Assert-True ($OpenRouterTestSource.Contains('confidence 0.5')) 'OpenRouter integration test does not request fractional confidence.'
+Assert-True ($OpenRouterTestSource.Contains('ConvertFrom-OpenRouterIntentResponse $Response @()')) 'OpenRouter integration test bypasses the production provider response boundary.'
+Assert-True ($OpenRouterTestSource.Contains('ConvertTo-LlmIntentItems $NormalizedResponse @()')) 'OpenRouter integration test bypasses internal item validation.'
 
 $OpenRouterRequestStart = $ServerSource.IndexOf('function Invoke-OpenRouterRequest')
 $OpenRouterRequestEnd = $ServerSource.IndexOf('function Invoke-OpenRouterIntentAnalysis', $OpenRouterRequestStart)
@@ -774,6 +1020,37 @@ $UnavailableSteamSearcher = {
     $script:SteamSearchCalls++
     throw 'Steam unavailable in this region.'
 }
+$script:DiggerRegressionSteamCalls = 0
+$script:DiggerRegressionSteamQueries = New-Object System.Collections.Generic.List[string]
+$DiggerRegressionAnalyzer = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    return $RealDiggerEnvelope
+}
+$DiggerRegressionSteamSearcher = {
+    param($Query, $JobId, $Generation)
+    $script:DiggerRegressionSteamCalls++
+    $script:DiggerRegressionSteamQueries.Add([string]$Query)
+    return [pscustomobject]@{
+        candidateId = 'steam:278970'
+        source = 'steam'
+        externalId = '278970'
+        title = 'Digger Online'
+        sourceUrl = 'https://store.steampowered.com/app/278970'
+        score = 1.0
+    }
+}
+$DiggerRegressionPipeline = Invoke-LlmDonationPipeline `
+    (New-TestPipelineInput 'на копатель онлайн' @($GrannyIntentEntry)) `
+    $DiggerRegressionAnalyzer `
+    $DiggerRegressionSteamSearcher
+Assert-Equal $DiggerRegressionPipeline.result.items.Count 1 'The normalized real OpenRouter response failed in the production pipeline.'
+Assert-Equal $DiggerRegressionPipeline.result.items[0].officialTitleGuess 'Digger Online' 'The production pipeline discarded the Digger Online item.'
+Assert-Equal $DiggerRegressionPipeline.result.items[0].category 'game' 'The production pipeline changed the Digger Online category.'
+Assert-Equal $DiggerRegressionPipeline.result.items[0].catalog 'steam' 'The production pipeline changed the Digger Online catalog.'
+Assert-True ($script:DiggerRegressionSteamCalls -ge 1) 'The production pipeline did not perform a catalog lookup.'
+Assert-True ($script:DiggerRegressionSteamQueries.Contains('Digger Online')) 'The real OpenRouter fixture did not reach Steam with its normalized Digger Online query.'
+Assert-False (@($script:DiggerRegressionSteamQueries | Where-Object { $_ -match 'Digger Online.+копатель|копатель.+Digger Online' }).Count -gt 0) 'Independent search variants were combined into one Steam query.'
+
 $BullyPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на булли... МЯУ!' @($BullyEntry)) $StrictUtf8IntentAnalyzer $UnavailableSteamSearcher
 Assert-Equal $BullyPipeline.result.action 'assign_existing' 'Existing Bully was not assigned by the first LLM stage.'
 Assert-Equal $BullyPipeline.result.entryId 'bully-entry' 'First LLM stage selected the wrong existing entry.'
@@ -922,11 +1199,11 @@ Assert-True $ExternalEvidence.safe 'Locally proven external identity was rejecte
 Assert-Equal $ExternalEvidence.matchKind 'exact_external_identity' 'External identity evidence has the wrong match kind.'
 $script:SteamSearchCalls = 0
 $CatalogPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials, смешной микровидос: https://example.test/video' @()) $CatalogIntent $RegionLimitedSteamSearcher
-Assert-Equal $CatalogPipeline.result.action 'create_lot_candidate' 'Metadata-limited Steam identity was discarded.'
+Assert-Equal $CatalogPipeline.result.action 'ask_manual' 'Catalog candidates must require an explicit user choice.'
 Assert-Equal $CatalogPipeline.result.category 'game' 'Region-limited Steam candidate changed the recognized category.'
 Assert-Equal $CatalogPipeline.result.query 'The Outlast Trials' 'Region-limited Steam candidate changed the canonical query.'
-Assert-Equal $CatalogPipeline.result.candidate.externalId '1304930' 'Region-limited Steam candidate identity was replaced.'
-Assert-True $CatalogPipeline.result.candidate.metadataIncomplete 'Region-limited Steam candidate lost its metadata marker.'
+Assert-Equal $CatalogPipeline.result.items[0].candidates[0].externalId '1304930' 'Region-limited Steam candidate identity was replaced.'
+Assert-True $CatalogPipeline.result.items[0].candidates[0].metadataIncomplete 'Region-limited Steam candidate lost its metadata marker.'
 Assert-Equal $script:SteamSearchCalls 1 'Catalog search did not perform exactly one Steam lookup.'
 
 $script:SteamSearchCalls = 0
@@ -944,13 +1221,92 @@ $RecognizedManualPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput '�
 Assert-Equal $RecognizedManualPipeline.result.category 'game' 'ask_manual discarded a recognized category.'
 Assert-Equal $RecognizedManualPipeline.result.query 'Bully' 'ask_manual discarded a canonical query.'
 
+$script:MultiIntentCalls = 0
+$script:MultiSteamQueries = New-Object System.Collections.Generic.List[string]
+$MultiItemIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    $script:MultiIntentCalls++
+    return [pscustomobject]@{ items = @(
+        [pscustomobject]@{
+            category = 'game'; catalog = 'steam'; mentionedTitle = 'Копатель Онлайн'; displayTitle = 'Digger Online'; officialTitleGuess = 'Digger Online'; originalLanguage = 'en'
+            searchQueries = @('Digger Online', 'Копатель Онлайн', 'Kopatel Online'); confidence = 0.92
+            reason = 'Определено предполагаемое официальное название игры.'
+        },
+        [pscustomobject]@{
+            category = 'game'; catalog = 'steam'; mentionedTitle = 'Майнкрафт'; displayTitle = 'Minecraft'; officialTitleGuess = 'Minecraft'; originalLanguage = 'en'
+            searchQueries = @('Minecraft', 'Майнкрафт'); confidence = 0.86
+            reason = 'Упомянута игровая серия, возможны несколько результатов.'
+        }
+    ) }
+}
+$MultiSteamSearcher = {
+    param($Query, $JobId, $Generation)
+    $script:MultiSteamQueries.Add([string]$Query)
+    if ($Query -in @('Digger Online', 'Копатель Онлайн', 'Kopatel Online')) {
+        return [pscustomobject]@{
+            candidateId = 'steam:278970'; source = 'steam'; externalId = '278970'; title = 'Digger Online'
+            sourceUrl = 'https://store.steampowered.com/app/278970'; imageUrl = ''; score = 0.98; titleConfirmed = $true
+        }
+    }
+    if ($Query -eq 'Minecraft') {
+        return @(
+            [pscustomobject]@{ candidateId = 'steam:1928870'; source = 'steam'; externalId = '1928870'; title = 'Minecraft Legends'; sourceUrl = 'https://store.steampowered.com/app/1928870'; imageUrl = ''; score = 0.82; titleConfirmed = $true },
+            [pscustomobject]@{ candidateId = 'steam:1672970'; source = 'steam'; externalId = '1672970'; title = 'Minecraft Dungeons'; sourceUrl = 'https://store.steampowered.com/app/1672970'; imageUrl = ''; score = 0.81; titleConfirmed = $true }
+        )
+    }
+    if ($Query -eq 'Майнкрафт') {
+        return [pscustomobject]@{ candidateId = 'steam:1928870'; source = 'steam'; externalId = '1928870'; title = 'Minecraft Legends'; sourceUrl = 'https://store.steampowered.com/app/1928870'; imageUrl = ''; score = 0.80; titleConfirmed = $true }
+    }
+    return @()
+}
+$MultiPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput '500 рублей на Копатель Онлайн или Майнкрафт' @()) $MultiItemIntent $MultiSteamSearcher
+Assert-Equal $script:MultiIntentCalls 1 'One donation performed more than one main OpenRouter analysis.'
+Assert-Equal $MultiPipeline.result.items.Count 2 'Multiple explicitly mentioned games were not preserved as separate items.'
+Assert-Equal $MultiPipeline.result.items[0].officialTitleGuess 'Digger Online' 'Kopatel Online transliteration replaced the official-title search hint.'
+Assert-Equal $MultiPipeline.result.items[0].candidates[0].title 'Digger Online' 'Final candidate title did not come from Steam.'
+Assert-Equal $MultiPipeline.result.items[0].candidates[0].externalId '278970' 'Digger Online Steam App ID was lost.'
+Assert-Equal $MultiPipeline.result.items[0].candidates.Count 1 'Repeated Steam results were not deduplicated by App ID.'
+Assert-Equal $MultiPipeline.result.items[1].candidates.Count 2 'Broad Minecraft query did not preserve multiple Steam candidates.'
+Assert-False (@($script:MultiSteamQueries) -contains 'Digger Online Minecraft') 'Multiple games were merged into one Steam query.'
+Assert-True (@($script:MultiSteamQueries) -contains 'Digger Online') 'Official Steam title guess was not searched first.'
+Assert-True (@($script:MultiSteamQueries) -contains 'Копатель Онлайн') 'Mentioned Russian title was not searched as a fallback.'
+Assert-True ($script:MultiSteamQueries.Count -le 8) 'Per-item Steam query limits were not enforced.'
+Assert-Equal $MultiPipeline.result.action 'ask_manual' 'A multi-item donation was applied without an explicit user choice.'
+
+$CrossCategoryDigger = New-TestEntry 'digger-anime' 'Digger Online' $false 'anilist' '999' 'anime'
+$CrossCategoryIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    [pscustomobject]@{ items = @([pscustomobject]@{
+        category = 'game'; catalog = 'steam'; mentionedTitle = 'Копатель Онлайн'; displayTitle = 'Digger Online'; officialTitleGuess = 'Digger Online'; originalLanguage = 'en'
+        searchQueries = @('Digger Online'); confidence = 0.95; existingEntryId = '__none__'; existingSelectionConfidence = 0
+        reason = 'Распознана игра Digger Online.'
+    }) }
+}
+$CrossCategoryPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на копатель онлайн' @($CrossCategoryDigger)) $CrossCategoryIntent $MultiSteamSearcher
+$CrossCategoryOption = @($CrossCategoryPipeline.result.items[0].existingOptions | Where-Object { $_.entryId -eq 'digger-anime' })[0]
+Assert-True ($null -ne $CrossCategoryOption) 'Exact existing lot from another category disappeared from manual options.'
+Assert-True $CrossCategoryOption.categoryMismatch 'Cross-category option has no warning metadata.'
+Assert-False $CrossCategoryOption.safeAutoAssign 'Cross-category option can be applied automatically.'
+Assert-Equal $CrossCategoryPipeline.result.action 'ask_manual' 'Cross-category match was auto-assigned.'
+$ExternalCategoryEntry = New-TestEntry 'steam-other-category' 'Old manual name' $false 'steam' '278970' 'other'
+$ExternalItem = [pscustomobject]@{
+    itemId = 'external-item'; category = 'game'; catalog = 'steam'; mentionedTitle = 'Копатель Онлайн'; displayTitle = 'Digger Online'; officialTitleGuess = 'Digger Online'; originalLanguage = 'en'
+    searchQueries = @('Digger Online'); confidence = 0.95; existingEntryId = ''; existingSelectionConfidence = 0; reason = 'Распознана игра.'
+}
+$ExternalCandidate = [pscustomobject]@{ candidateId = 'steam:278970'; source = 'steam'; externalId = '278970'; title = 'Digger Online'; score = 1.0 }
+$ExternalOptions = @(Get-LlmExistingOptionsForItem $ExternalItem @($ExternalCategoryEntry) @($ExternalCandidate))
+Assert-Equal $ExternalOptions.Count 1 'Exact Steam App ID did not produce an existing manual option.'
+Assert-Equal $ExternalOptions[0].matchKind 'exact_external_identity' 'Steam App ID did not take priority over title/category.'
+Assert-True $ExternalOptions[0].categoryMismatch 'Exact external identity across categories lacks a confirmation warning.'
+Assert-False $ExternalOptions[0].safeAutoAssign 'Cross-category external identity can be auto-applied.'
+
 $IdentityInput = [pscustomobject]@{
     donation = [pscustomobject]@{ source = 'donatepay'; externalId = 'identity-1'; message = 'на булли... МЯУ!' }
     entries = @($BullyEntry)
 }
 $IdentityKey = Get-LlmAnalysisKey $IdentityInput
-Assert-True $IdentityKey.StartsWith('v4:donatepay:identity-1:') 'Current analysis key does not include pipeline version.'
-Assert-Equal $IdentityKey 'v4:donatepay:identity-1:c1033163' 'Server analysisKey no longer matches the frontend UTF-16 fingerprint contract.'
+Assert-True $IdentityKey.StartsWith('v6:donatepay:identity-1:') 'Current analysis key does not include pipeline version.'
+Assert-Equal $IdentityKey 'v6:donatepay:identity-1:b0e109f9' 'Server analysisKey no longer matches the frontend UTF-16 fingerprint contract.'
 $ChangedMessageInput = [pscustomobject]@{
     donation = [pscustomobject]@{ source = 'donatepay'; externalId = 'identity-1'; message = 'на другую игру' }
     entries = @($BullyEntry)
@@ -963,7 +1319,7 @@ $ChangedEntriesInput = [pscustomobject]@{
 Assert-False ((Get-LlmAnalysisKey $ChangedEntriesInput) -eq $IdentityKey) 'Changing active entries did not invalidate analysisKey.'
 $OriginalPipelineVersion = $script:LlmPipelineVersion
 try {
-    $script:LlmPipelineVersion = 5
+    $script:LlmPipelineVersion = 7
     Assert-False ((Get-LlmAnalysisKey $IdentityInput) -eq $IdentityKey) 'Changing pipelineVersion did not invalidate analysisKey.'
 }
 finally {
@@ -1194,10 +1550,10 @@ try {
     $CurrentPipelineJob = Add-OrGet-LlmJob $CurrentPipelineInput
     Assert-True $CurrentPipelineJob.ok 'Current pipeline could not replace a legacy analysis.'
     Assert-False $CurrentPipelineJob.existing 'Legacy pipeline result was reused as a current job.'
-    Assert-True $CurrentPipelineJob.analysisKey.StartsWith('v4:') 'Replacement job did not use the current pipeline key.'
+    Assert-True $CurrentPipelineJob.analysisKey.StartsWith('v6:') 'Replacement job did not use the current pipeline key.'
     $JobsAfterLegacyReplacement = @((Read-LlmJobsStoreUnsafe).jobs)
     Assert-True ($JobsAfterLegacyReplacement.Count -eq 2) 'Legacy job was not preserved safely alongside the replacement job.'
-    Assert-True (@($JobsAfterLegacyReplacement | Where-Object { [int]$_.pipelineVersion -eq 4 }).Count -eq 1) 'Current pipeline replacement job was not persisted.'
+    Assert-True (@($JobsAfterLegacyReplacement | Where-Object { [int]$_.pipelineVersion -eq 6 }).Count -eq 1) 'Current pipeline replacement job was not persisted.'
 
     $LegacyQueueStore = New-EmptyLlmJobsStore
     $LegacyQueueStore.auctionGeneration = 2
@@ -1215,7 +1571,7 @@ try {
     Assert-True (Write-LlmJobsStoreUnsafe $LegacyQueueStore) 'Legacy v3 queue setup failed.'
     Repair-InterruptedLlmJobs
     $LegacyQueuedAfterRepair = @((Read-LlmJobsStoreUnsafe).jobs)[0]
-    Assert-Equal $LegacyQueuedAfterRepair.status 'cancelled' 'Legacy v3 queued job was reused by pipeline v4.'
+    Assert-Equal $LegacyQueuedAfterRepair.status 'cancelled' 'Legacy queued job was reused by the current pipeline.'
 
     $ResetJobStore = New-EmptyLlmJobsStore
     $ResetJobStore.auctionGeneration = 2

@@ -101,7 +101,7 @@ try {
     $StaleBody = $null
     try {
         [void](Invoke-JsonPost '/api/llm/jobs' @{
-            pipelineVersion = 4
+            pipelineVersion = 6
             auctionGeneration = $Generation + 1
             donation = @{ id = 'runtime-stale'; source = 'manual_test'; externalId = 'runtime-stale'; amount = 1; currency = 'RUB'; message = 'test' }
             entries = @()
@@ -125,7 +125,7 @@ try {
     $OldStatus = 0
     try {
         [void](Invoke-JsonPost '/api/llm/jobs' @{
-            pipelineVersion = 4
+            pipelineVersion = 6
             auctionGeneration = $Generation
             donation = @{ id = 'runtime-old'; source = 'manual_test'; externalId = 'runtime-old'; amount = 1; currency = 'RUB'; message = 'test' }
             entries = @()

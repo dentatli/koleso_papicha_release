@@ -15,6 +15,9 @@
       --primary-hover: #1c7ed6;
       --border: #444;
       --danger: #e03131;
+      --link-color: #d7e3ec;
+      --link-hover-color: #ffffff;
+      --link-underline-color: rgba(215, 227, 236, 0.42);
       --entry-row-height: 37px;
       /* От строки 56px: коэффициент масштаба для отступов и вторичных размеров */
       --ui-scale: calc(var(--entry-row-height) / 56px);
@@ -39,6 +42,24 @@
     }
     
     * { box-sizing: border-box; }
+
+    a,
+    a:visited {
+      color: var(--link-color);
+      text-decoration: underline;
+      text-decoration-color: var(--link-underline-color);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 2px;
+    }
+    a:hover {
+      color: var(--link-hover-color);
+      text-decoration-color: currentColor;
+    }
+    a:focus-visible {
+      outline: 2px solid var(--link-hover-color);
+      outline-offset: 2px;
+      border-radius: 3px;
+    }
     
     body {
       margin: 0;
@@ -196,7 +217,8 @@
       border-radius: 2px 2px 0 0;
       background: var(--primary);
     }
-    .version-update-notice {
+    .version-update-notice,
+    .version-update-notice:visited {
       align-self: center;
       border: 1px solid rgba(255, 212, 59, 0.55);
       border-radius: 999px;
@@ -502,6 +524,35 @@
     .donation-ai-actions button {
       padding: 5px 8px;
       font-size: 12px;
+    }
+    .donation-ai-items {
+      display: grid;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .donation-ai-item {
+      padding: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.10);
+    }
+    .donation-ai-item-title {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .donation-ai-category-warning {
+      margin-top: 5px;
+      color: #ffd8a8;
+    }
+    .donation-ai-option-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    .donation-ai-candidate-link {
+      font-size: 11px;
     }
     .donation-entry-button {
       border: 1px solid var(--primary);
@@ -847,12 +898,7 @@
     .integration-external-link {
       display: inline-flex;
       margin-bottom: 14px;
-      color: #74c0fc;
       font-size: 13px;
-      text-decoration: none;
-    }
-    .integration-external-link:hover {
-      text-decoration: underline;
     }
     .integration-modal-field {
       display: grid;
@@ -1237,15 +1283,6 @@
     .help-card ol {
       margin: 12px 0;
       padding-left: 20px;
-    }
-    .help-card a,
-    .integration-help a {
-      color: #74c0fc;
-      text-decoration: none;
-    }
-    .help-card a:hover,
-    .integration-help a:hover {
-      text-decoration: underline;
     }
     .integration-help {
       margin-bottom: 14px;
@@ -1864,14 +1901,9 @@
       outline: none;
     }
     .entry-name-display {
-      color: #74c0fc;
-      text-decoration: none;
       text-overflow: ellipsis;
     }
     .entry-name-display:not(a) { color: inherit; }
-    a.entry-name-display:hover {
-      text-decoration: underline;
-    }
     .entry-name-edit {
       flex: 0 0 auto;
       padding: 2px 4px;
@@ -1971,7 +2003,8 @@
     .plus-wrapper input:focus { border: none; box-shadow: none; }
     .plus-wrapper input:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 
-    .app-version-badge {
+    .app-version-badge,
+    .app-version-badge:visited {
       position: fixed;
       right: 12px;
       bottom: 10px;
@@ -1995,7 +2028,8 @@
       color: #ffe066;
       background: rgba(120, 88, 0, 0.35);
     }
-    .app-author-badge {
+    .app-author-badge,
+    .app-author-badge:visited {
       position: fixed;
       left: 12px;
       bottom: 10px;
@@ -4056,11 +4090,12 @@
     let serverCollectorStatusTimer = null;
     const SERVER_COLLECTOR_POLL_INTERVAL_MS = 10000;
     const AI_ANALYSIS_ALLOWED_CATEGORIES = ['game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown'];
-    const LLM_PIPELINE_VERSION = 4;
+    const LLM_PIPELINE_VERSION = 6;
     const MAX_LOT_NAME_LENGTH = 200;
     const MAX_DONATION_MESSAGE_LENGTH = 1000;
     let llmJobsRevision = 0;
     let llmResultsSyncInFlight = false;
+    const aiDonationActionLocks = new Set();
     let auctionClearInFlight = false;
     let resetAllDataInFlight = false;
     let donationCollectionPaused = false;
@@ -6605,6 +6640,171 @@
       return limit > 0 && text.length > limit ? text.slice(0, limit) : text;
     }
 
+    function normalizeAiDisplayTitle(value) {
+      return limitStoredText(value, MAX_LOT_NAME_LENGTH)
+        .replace(/\p{Cc}/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function isValidAiManualLotTitle(value) {
+      const title = normalizeAiDisplayTitle(value);
+      if (!title || /(?:https?:\/\/|www\.)/i.test(title)) return false;
+      const letters = title.match(/\p{L}/gu) || [];
+      if (letters.length < 2) return false;
+      const comparable = title.toLowerCase()
+        .replace(/ё/g, 'е')
+        .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return ![
+        'test', 'тест', 'lot', 'лот', 'game', 'игра', 'item', 'entry', 'unknown',
+        'неизвестно', 'название неизвестно', 'не определено', 'без названия',
+        'unknown title', 'not specified', 'n a'
+      ].includes(comparable);
+    }
+
+    function normalizeAiManualSuggestion(suggestion, fallback = {}) {
+      const source = suggestion && typeof suggestion === 'object' ? suggestion : {};
+      const title = normalizeAiDisplayTitle(source.title || fallback.displayTitle);
+      if (!isValidAiManualLotTitle(title)) return null;
+      const requestedCategory = AI_ANALYSIS_ALLOWED_CATEGORIES.includes(source.category)
+        ? source.category
+        : fallback.category;
+      const category = requestedCategory && requestedCategory !== 'unknown' ? requestedCategory : 'other';
+      const language = ['ru', 'en', 'ja', 'ko', 'zh', 'other', 'unknown'].includes(source.originalLanguage || fallback.originalLanguage)
+        ? String(source.originalLanguage || fallback.originalLanguage)
+        : 'unknown';
+      return {
+        kind: 'manual_lot',
+        title,
+        category,
+        originalLanguage: language,
+        source: 'llm_manual',
+        externalId: '',
+        sourceUrl: '',
+        catalogConfirmed: false
+      };
+    }
+
+    function normalizeAiCandidate(candidate) {
+      if (!candidate || typeof candidate !== 'object') return null;
+      const source = ['steam', 'anilist', 'jikan'].includes(String(candidate.source || ''))
+        ? String(candidate.source)
+        : '';
+      const externalId = limitStoredText(candidate.externalId, 200);
+      const title = limitStoredText(candidate.title, 200).trim();
+      if (!source || !externalId || !title) return null;
+      return {
+        candidateId: limitStoredText(candidate.candidateId || `${source}:${externalId}`, 260),
+        source,
+        externalId,
+        title,
+        titleEnglish: limitStoredText(candidate.titleEnglish, 200),
+        titleRomaji: limitStoredText(candidate.titleRomaji, 200),
+        titleNative: limitStoredText(candidate.titleNative, 200),
+        sourceUrl: getSafeExternalUrl(candidate.sourceUrl),
+        imageUrl: getSafeExternalUrl(candidate.imageUrl),
+        sourceMode: limitStoredText(candidate.sourceMode, 40),
+        availability: limitStoredText(candidate.availability, 40),
+        metadataIncomplete: !!candidate.metadataIncomplete,
+        titleConfirmed: candidate.titleConfirmed !== false,
+        score: Math.max(0, Math.min(1, Number(candidate.score) || 0)),
+        matchedQueries: Array.isArray(candidate.matchedQueries)
+          ? candidate.matchedQueries.map(value => limitStoredText(value, 160)).filter(Boolean).slice(0, 4)
+          : [],
+        existingEntryId: limitStoredText(candidate.existingEntryId, 300),
+        existingEntryFingerprint: candidate.existingEntryFingerprint && typeof candidate.existingEntryFingerprint === 'object'
+          ? {
+              normalizedName: limitStoredText(candidate.existingEntryFingerprint.normalizedName, 200),
+              source: limitStoredText(candidate.existingEntryFingerprint.source, 40),
+              externalId: limitStoredText(candidate.existingEntryFingerprint.externalId, 200)
+            }
+          : null,
+        existingEntryCategory: limitStoredText(candidate.existingEntryCategory, 40),
+        existingMatchKind: ['exact_title', 'exact_external_identity'].includes(candidate.existingMatchKind)
+          ? candidate.existingMatchKind
+          : '',
+        categoryMismatch: !!candidate.categoryMismatch
+      };
+    }
+
+    function normalizeAiExistingOption(option) {
+      if (!option || typeof option !== 'object' || !String(option.entryId || '').trim()) return null;
+      return {
+        optionId: limitStoredText(option.optionId || `entry:${option.entryId}`, 340),
+        kind: 'existing_entry',
+        entryId: limitStoredText(option.entryId, 300),
+        title: limitStoredText(option.title, 200),
+        category: AI_ANALYSIS_ALLOWED_CATEGORIES.includes(option.category) ? option.category : 'unknown',
+        source: limitStoredText(option.source, 40),
+        externalId: limitStoredText(option.externalId, 200),
+        sourceUrl: getSafeExternalUrl(option.sourceUrl),
+        entryFingerprint: option.entryFingerprint && typeof option.entryFingerprint === 'object'
+          ? {
+              normalizedName: limitStoredText(option.entryFingerprint.normalizedName, 200),
+              source: limitStoredText(option.entryFingerprint.source, 40),
+              externalId: limitStoredText(option.entryFingerprint.externalId, 200)
+            }
+          : null,
+        matchKind: ['exact_title', 'exact_external_identity'].includes(option.matchKind) ? option.matchKind : '',
+        categoryMismatch: !!option.categoryMismatch,
+        selectedByModel: !!option.selectedByModel,
+        safeAutoAssign: !!option.safeAutoAssign
+      };
+    }
+
+    function normalizeAiResultItem(item, index = 0) {
+      if (!item || typeof item !== 'object') return null;
+      const candidates = (Array.isArray(item.candidates) ? item.candidates : [])
+        .map(normalizeAiCandidate)
+        .filter(Boolean)
+        .slice(0, 5);
+      const existingOptions = (Array.isArray(item.existingOptions) ? item.existingOptions : [])
+        .map(normalizeAiExistingOption)
+        .filter(Boolean)
+        .slice(0, 10);
+      const mentionedTitle = limitStoredText(item.mentionedTitle, 200);
+      const officialTitleGuess = limitStoredText(item.officialTitleGuess, 200);
+      const confirmedCandidateTitle = candidates.find(candidate => candidate.titleConfirmed !== false)?.title || '';
+      const displayTitle = normalizeAiDisplayTitle(
+        item.displayTitle || confirmedCandidateTitle || officialTitleGuess || mentionedTitle || item.query
+      );
+      const originalLanguage = ['ru', 'en', 'ja', 'ko', 'zh', 'other', 'unknown'].includes(item.originalLanguage)
+        ? item.originalLanguage
+        : 'unknown';
+      const query = limitStoredText(item.query || officialTitleGuess || mentionedTitle, 200);
+      const category = AI_ANALYSIS_ALLOWED_CATEGORIES.includes(item.category) ? item.category : 'unknown';
+      const manualSuggestion = normalizeAiManualSuggestion(item.manualSuggestion, {
+        displayTitle,
+        category,
+        originalLanguage
+      });
+      if (!query && !displayTitle && !mentionedTitle && !candidates.length && !existingOptions.length) return null;
+      return {
+        itemId: limitStoredText(item.itemId || `item-${index + 1}`, 40),
+        category,
+        catalog: ['steam', 'anime', 'none'].includes(item.catalog) ? item.catalog : (item.category === 'game' ? 'steam' : (item.category === 'anime' ? 'anime' : 'none')),
+        mentionedTitle,
+        displayTitle,
+        officialTitleGuess,
+        originalLanguage,
+        query,
+        searchQueries: Array.isArray(item.searchQueries)
+          ? item.searchQueries.map(value => limitStoredText(value, 160)).filter(Boolean).slice(0, 4)
+          : (query ? [query] : []),
+        intentConfidence: Math.max(0, Math.min(1, Number(item.intentConfidence ?? item.confidence) || 0)),
+        existingSelectionConfidence: Math.max(0, Math.min(1, Number(item.existingSelectionConfidence) || 0)),
+        existingOptions,
+        candidates,
+        manualSuggestion,
+        catalogStatus: ['ok', 'not_found', 'unavailable', 'disabled', 'not_applicable'].includes(item.catalogStatus)
+          ? item.catalogStatus
+          : 'not_applicable',
+        reason: limitStoredText(item.reason, 400)
+      };
+    }
+
     function normalizeDonationLlmState(llm) {
       if (!llm || typeof llm !== 'object') {
         return { status: 'idle' };
@@ -6612,6 +6812,38 @@
       const allowedStatuses = ['idle', 'submitting', 'queued', 'running', 'retry_wait', 'done', 'applied', 'error', 'skipped'];
       const allowedActions = ['assign_existing', 'create_lot_candidate', 'ask_manual'];
       const legacyConfidence = Math.max(0, Math.min(1, Number(llm.confidence) || 0));
+      const normalizedCandidate = normalizeAiCandidate(llm.candidate);
+      const normalizedCandidates = (Array.isArray(llm.candidates) ? llm.candidates : [])
+        .map(normalizeAiCandidate)
+        .filter(Boolean)
+        .slice(0, 5);
+      let items = (Array.isArray(llm.items) ? llm.items : [])
+        .map(normalizeAiResultItem)
+        .filter(Boolean)
+        .slice(0, 5);
+      if (!items.length && (llm.action || llm.query || normalizedCandidate || normalizedCandidates.length)) {
+        const legacyItem = normalizeAiResultItem({
+          itemId: 'legacy-item-1',
+          category: llm.category,
+          query: llm.query,
+          displayTitle: normalizedCandidate?.title || llm.query,
+          officialTitleGuess: llm.query,
+          originalLanguage: 'unknown',
+          intentConfidence: llm.intentConfidence ?? legacyConfidence,
+          existingSelectionConfidence: llm.selectionConfidence,
+          existingOptions: llm.action === 'assign_existing' && llm.entryId ? [{
+            entryId: llm.entryId,
+            title: llm.query,
+            category: llm.category,
+            entryFingerprint: llm.entryFingerprint,
+            matchKind: llm.existingMatchKind,
+            safeAutoAssign: isSafeAiExistingMatchEvidence(llm)
+          }] : [],
+          candidates: normalizedCandidate ? [normalizedCandidate] : normalizedCandidates,
+          reason: llm.reason
+        }, 0);
+        if (legacyItem) items = [legacyItem];
+      }
       return {
         pipelineVersion: Number(llm.pipelineVersion) || 0,
         analysisKey: limitStoredText(llm.analysisKey, 300),
@@ -6637,8 +6869,9 @@
         existingMatchKind: ['exact_title', 'exact_external_identity'].includes(llm.existingMatchKind)
           ? llm.existingMatchKind
           : '',
-        candidate: llm.candidate && typeof llm.candidate === 'object' ? llm.candidate : null,
-        candidates: Array.isArray(llm.candidates) ? llm.candidates.slice(0, 5) : [],
+        candidate: normalizedCandidate,
+        candidates: normalizedCandidates,
+        items,
         reason: limitStoredText(llm.reason, 400),
         error: limitStoredText(llm.error, 500),
         errorCode: limitStoredText(llm.errorCode, 100),
@@ -6877,7 +7110,7 @@
         String(LLM_PIPELINE_VERSION),
         limitAiServerText(donation.source, 40),
         limitAiServerText(donation.externalId, 200),
-        limitAiServerText(donation.message, 500),
+        limitAiServerText(donation.message, 1000),
         String(activeEntries.length)
       ];
       activeEntries.forEach(entry => values.push(entry.id, entry.name, entry.category, entry.source, entry.externalId));
@@ -7038,10 +7271,14 @@
 
     function validateAiSuggestion(result, donation) {
       if (!result || !donation || donation.status !== 'pending') return false;
+      const normalized = normalizeDonationLlmState(result);
+      if (Array.isArray(result.items) && result.items.length > 5) return false;
+      if (Array.isArray(result.items) && !normalized.items.length) return false;
       if (result.action === 'assign_existing') {
         return !!String(result.entryId || '')
           && !!result.entryFingerprint
           && typeof result.entryFingerprint === 'object'
+          && normalized.items.length <= 1
           && !isDonationKnownOutsidePending(donation);
       }
       if (result.action === 'create_lot_candidate') {
@@ -7137,6 +7374,7 @@
       if (llm.action === 'assign_existing') {
         const entry = getEntryById(llm.entryId);
         return llmSettings.autoAssignExisting
+          && llm.items.length <= 1
           && llm.finalConfidence >= llmSettings.confidenceAssignThreshold
           && isSafeAiExistingMatchEvidence(llm)
           && !!entry
@@ -7145,7 +7383,8 @@
           && !isDonationKnownOutsidePending(donation);
       }
       if (llm.action === 'create_lot_candidate') {
-        return llmSettings.autoCreateLots
+        return llm.items.length === 0
+          && llmSettings.autoCreateLots
           && llm.finalConfidence >= llmSettings.confidenceCreateThreshold
           && validateAiSuggestion(llm, donation)
           && !findExistingEntryForAiCandidate(llm.candidate, llm.category)
@@ -7168,6 +7407,7 @@
     function normalizeAiComparableText(value) {
       return String(value || '')
         .toLowerCase()
+        .replace(/ё/g, 'е')
         .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
         .replace(/\s+/g, ' ')
         .trim();
@@ -7308,24 +7548,44 @@
       }) || null;
     }
 
-    function createEntryFromAiCandidate(donationId, candidate, { deferRefresh = false } = {}) {
+    function tryClaimAiDonationAction(donationId, locks = aiDonationActionLocks) {
+      const id = String(donationId || '');
+      if (!id || locks.has(id)) return false;
+      locks.add(id);
+      return true;
+    }
+
+    function releaseAiDonationAction(donationId, locks = aiDonationActionLocks) {
+      locks.delete(String(donationId || ''));
+    }
+
+    function createEntryFromAiCandidate(donationId, candidate, { deferRefresh = false, category = '' } = {}) {
       if (!canMutateAuctionState()) return null;
       const donation = getPendingDonationById(donationId);
-      if (!donation || !candidate) return null;
-      const existing = findExistingEntryForAiCandidate(candidate, donation.llm?.category);
+      if (
+        !donation
+        || !candidate
+        || candidate.titleConfirmed === false
+        || !['steam', 'anilist', 'jikan'].includes(String(candidate.source || ''))
+        || !String(candidate.externalId || '').trim()
+        || !String(candidate.title || '').trim()
+        || !getSafeExternalUrl(candidate.sourceUrl)
+      ) return null;
+      const expectedCategory = AI_ANALYSIS_ALLOWED_CATEGORIES.includes(category) ? category : donation.llm?.category;
+      const existing = findExistingEntryForAiCandidate(candidate, expectedCategory);
       if (existing) return existing.eliminated ? null : existing;
       const insertAt = entries.length;
       const newId = `${Date.now()}-${cryptoRandomUint32().toString(16)}`;
       const entry = {
         id: newId,
-        name: limitStoredText(String(candidate.title || donation.llm?.query || 'Новый лот').trim(), MAX_LOT_NAME_LENGTH),
+        name: limitStoredText(String(candidate.title).trim(), MAX_LOT_NAME_LENGTH),
         price: 0,
         addedOrder: entries.reduce((max, e) => Math.max(max, Number.isFinite(e.addedOrder) ? e.addedOrder : 0), 0) + 1,
         color: pickWheelColor([entries[entries.length - 1]?.color].filter(Boolean), insertAt, newId),
         eliminated: false,
         source: limitStoredText(candidate.source, 40),
         externalId: limitStoredText(candidate.externalId, 200),
-        category: String(donation.llm?.category || 'unknown'),
+        category: String(expectedCategory || 'unknown'),
         sourceUrl: getSafeExternalUrl(candidate.sourceUrl),
         imageUrl: limitStoredText(candidate.imageUrl, 1000),
         createdBy: 'llm',
@@ -7342,10 +7602,117 @@
       return entry;
     }
 
-    function createEntryFromAiCandidateAndAssign(donationId, candidate) {
+    function findExistingEntryForAiManualSuggestion(suggestion) {
+      const normalized = normalizeAiManualSuggestion(suggestion);
+      if (!normalized) return null;
+      return entries.find(entry => {
+        if (!entry || entry.eliminated) return false;
+        if (!areAiLotCategoriesCompatible(normalized.category, entry.category)) return false;
+        return compareAiLotTitles(entry.name, normalized.title).exact;
+      }) || null;
+    }
+
+    function createEntryFromAiManualSuggestionAndAssign(donationId, suggestion) {
+      if (!canMutateAuctionState() || !tryClaimAiDonationAction(donationId)) return false;
+      let createdEntry = null;
+      let assignmentEntry = null;
+      let originalEntryPrice = null;
+      try {
+        const donation = getPendingDonationById(donationId);
+        const normalized = normalizeAiManualSuggestion(suggestion);
+        if (
+          !donation
+          || !normalized
+          || !canCreditDonationAmount(donation)
+          || isDonationKnownOutsidePending(donation)
+        ) return false;
+
+        const existing = findExistingEntryForAiManualSuggestion(normalized);
+        if (existing) {
+          assignmentEntry = existing;
+          originalEntryPrice = Number(existing.price || 0);
+          if (donation.llm) donation.llm.status = 'applied';
+          const appliedToExisting = assignDonationToEntry(donationId, existing.id);
+          if (!appliedToExisting && donation.llm) {
+            donation.llm.status = 'done';
+            saveData();
+            renderDonationsPanel();
+          }
+          return appliedToExisting;
+        }
+
+        const insertAt = entries.length;
+        const newId = `${Date.now()}-${cryptoRandomUint32().toString(16)}`;
+        createdEntry = {
+          id: newId,
+          name: normalized.title,
+          price: 0,
+          addedOrder: entries.reduce((max, entry) => Math.max(max, Number.isFinite(entry.addedOrder) ? entry.addedOrder : 0), 0) + 1,
+          color: pickWheelColor([entries[entries.length - 1]?.color].filter(Boolean), insertAt, newId),
+          eliminated: false,
+          source: 'llm_manual',
+          externalId: '',
+          category: normalized.category,
+          sourceUrl: '',
+          imageUrl: '',
+          createdBy: 'llm',
+          createdFromDonationId: donation.id,
+          createdAt: new Date().toISOString()
+        };
+        entries.push(createdEntry);
+        assignmentEntry = createdEntry;
+        originalEntryPrice = 0;
+        resetSpinSeriesForCompositionChange();
+        if (donation.llm) donation.llm.status = 'applied';
+        const applied = assignDonationToEntry(donationId, createdEntry.id);
+        if (applied) return true;
+
+        entries = entries.filter(entry => entry.id !== createdEntry.id);
+        resetSpinSeriesForCompositionChange();
+        if (donation.llm) donation.llm.status = 'done';
+        saveData();
+        renderList();
+        drawWheel();
+        renderDonationsPanel();
+        return false;
+      } catch (error) {
+        if (assignmentEntry && originalEntryPrice !== null) {
+          assignmentEntry.price = originalEntryPrice;
+        }
+        if (createdEntry) {
+          entries = entries.filter(entry => entry.id !== createdEntry.id);
+          resetSpinSeriesForCompositionChange();
+        }
+        let donation = getPendingDonationById(donationId);
+        const addedIndex = donationsAdded.findIndex(item => item.id === donationId);
+        if (!donation && addedIndex >= 0) {
+          donation = donationsAdded[addedIndex];
+          donationsAdded.splice(addedIndex, 1);
+          donation.status = 'pending';
+          donation.assignedEntryId = null;
+          donation.assignedEntryName = null;
+          donationsPending.push(donation);
+        }
+        if (donation?.llm) donation.llm.status = 'done';
+        saveData();
+        renderList();
+        drawWheel();
+        renderDonationsPanel();
+        return false;
+      } finally {
+        releaseAiDonationAction(donationId);
+      }
+    }
+
+    function createEntryFromAiCandidateAndAssign(donationId, candidate, item = null) {
+      if (!tryClaimAiDonationAction(donationId)) return false;
+      try {
       const donation = getPendingDonationById(donationId);
       if (!canCreditDonationAmount(donation)) return false;
-      const entry = createEntryFromAiCandidate(donationId, candidate, { deferRefresh: true });
+      const entry = createEntryFromAiCandidate(donationId, candidate, {
+        deferRefresh: true,
+        category: item?.category || donation.llm?.category
+      });
       if (!entry) return false;
       if (donation?.llm) donation.llm.status = 'applied';
       const applied = assignDonationToEntry(donationId, entry.id);
@@ -7356,6 +7723,35 @@
         drawWheel();
       }
       return applied;
+      } finally {
+        releaseAiDonationAction(donationId);
+      }
+    }
+
+    function applyAiExistingOption(donationId, option) {
+      if (!canMutateAuctionState() || !tryClaimAiDonationAction(donationId)) return false;
+      try {
+        const donation = getPendingDonationById(donationId);
+        const entry = getEntryById(option?.entryId);
+        if (
+          !donation
+          || !canCreditDonationAmount(donation)
+          || !entry
+          || entry.eliminated
+          || !doesEntryMatchAiFingerprint(entry, option.entryFingerprint)
+          || isDonationKnownOutsidePending(donation)
+        ) return false;
+        if (donation.llm) donation.llm.status = 'applied';
+        const applied = assignDonationToEntry(donationId, entry.id);
+        if (!applied && donation.llm) {
+          donation.llm.status = 'done';
+          saveData();
+          renderDonationsPanel();
+        }
+        return applied;
+      } finally {
+        releaseAiDonationAction(donationId);
+      }
     }
 
     async function applyAiAssignSuggestion(donationId, { auto = false } = {}) {
@@ -7490,6 +7886,172 @@
       return link;
     }
 
+    function appendAiCategoryMismatchWarning(parent, entryCategory, aiCategory) {
+      const warning = document.createElement('div');
+      warning.className = 'donation-ai-category-warning';
+      warning.textContent = `Категория лота: ${getAiCategoryLabel(entryCategory)} · AI определил: ${getAiCategoryLabel(aiCategory)}`;
+      parent.appendChild(warning);
+    }
+
+    function getAiCatalogStatusText(item) {
+      const catalogName = item?.catalog === 'steam' ? 'Steam' : (item?.catalog === 'anime' ? 'AniList/Jikan' : '');
+      if (item?.catalogStatus === 'ok') return catalogName ? `Найдены подтверждённые варианты в каталоге ${catalogName}` : 'Найдены подтверждённые варианты в каталоге';
+      if (item?.catalogStatus === 'not_found') return catalogName ? `Не подтверждено каталогом ${catalogName}` : 'Внешний каталог не подтвердил название';
+      if (item?.catalogStatus === 'unavailable') return catalogName ? `Каталог ${catalogName} временно недоступен` : 'Внешний каталог временно недоступен';
+      if (item?.catalogStatus === 'disabled') return catalogName ? `Поиск ${catalogName} отключён` : 'Поиск во внешнем каталоге отключён';
+      return catalogName
+        ? `Поиск ${catalogName} для этой подсказки не выполнялся`
+        : 'Для этой категории внешний каталог не используется';
+    }
+
+    function appendDonationAiItems(box, donation, llm) {
+      const heading = document.createElement('div');
+      heading.className = 'donation-ai-title';
+      heading.textContent = llm.items.length > 1
+        ? 'AI распознал несколько вариантов — выберите один'
+        : 'AI нашёл варианты';
+      box.appendChild(heading);
+
+      const list = document.createElement('div');
+      list.className = 'donation-ai-items';
+      llm.items.forEach((item) => {
+        const card = document.createElement('div');
+        card.className = 'donation-ai-item';
+        const itemTitle = document.createElement('div');
+        itemTitle.className = 'donation-ai-item-title';
+        const displayTitle = item.displayTitle || item.officialTitleGuess || item.mentionedTitle || item.query || 'Вариант';
+        itemTitle.textContent = `${displayTitle} · ${getAiCategoryLabel(item.category)} · ${formatAiConfidence(item.intentConfidence)}`;
+        card.appendChild(itemTitle);
+
+        if (item.category === 'unknown') {
+          const categoryWarning = document.createElement('div');
+          categoryWarning.className = 'donation-ai-category-warning';
+          categoryWarning.textContent = 'Категория не определена · ручной лот будет создан в категории «Другое»';
+          card.appendChild(categoryWarning);
+        }
+        if (item.intentConfidence < 0.5) {
+          const confidenceWarning = document.createElement('div');
+          confidenceWarning.className = 'donation-ai-category-warning';
+          confidenceWarning.textContent = 'Низкая уверенность AI · проверьте название перед созданием';
+          card.appendChild(confidenceWarning);
+        }
+
+        if (item.reason) {
+          const reason = document.createElement('div');
+          reason.className = 'donation-ai-reason';
+          reason.textContent = getSafeAiDisplayText(item.reason, 'Требуется ручная проверка.');
+          card.appendChild(reason);
+        }
+
+        const catalogState = document.createElement('div');
+        catalogState.className = 'donation-ai-reason';
+        catalogState.textContent = getAiCatalogStatusText(item);
+        card.appendChild(catalogState);
+
+        const actions = document.createElement('div');
+        actions.className = 'donation-ai-actions';
+        const renderedEntries = new Set();
+        item.existingOptions.forEach((option) => {
+          if (renderedEntries.has(option.entryId)) return;
+          const entry = getEntryById(option.entryId);
+          if (!entry || entry.eliminated || !doesEntryMatchAiFingerprint(entry, option.entryFingerprint)) return;
+          renderedEntries.add(option.entryId);
+          const add = document.createElement('button');
+          add.type = 'button';
+          add.className = 'btn-primary';
+          add.textContent = `Добавить в «${entry.name}»`;
+          add.disabled = !canCreditDonationAmount(donation) || aiDonationActionLocks.has(donation.id);
+          add.addEventListener('click', () => applyAiExistingOption(donation.id, option));
+          actions.appendChild(add);
+          if (option.categoryMismatch) {
+            appendAiCategoryMismatchWarning(card, option.category, item.category);
+          }
+        });
+
+        item.candidates.forEach((candidate) => {
+          const row = document.createElement('div');
+          row.className = 'donation-ai-option-row';
+          const existing = candidate.existingEntryId ? getEntryById(candidate.existingEntryId) : null;
+          if (existing && !existing.eliminated && candidate.existingEntryFingerprint) {
+            if (!renderedEntries.has(existing.id) && doesEntryMatchAiFingerprint(existing, candidate.existingEntryFingerprint)) {
+              renderedEntries.add(existing.id);
+              const option = {
+                entryId: existing.id,
+                entryFingerprint: candidate.existingEntryFingerprint
+              };
+              const add = document.createElement('button');
+              add.type = 'button';
+              add.className = 'btn-primary';
+              add.textContent = `Добавить в «${existing.name}»`;
+              add.disabled = !canCreditDonationAmount(donation) || aiDonationActionLocks.has(donation.id);
+              add.addEventListener('click', () => applyAiExistingOption(donation.id, option));
+              row.appendChild(add);
+              if (candidate.categoryMismatch) {
+                appendAiCategoryMismatchWarning(card, candidate.existingEntryCategory, item.category);
+              }
+            }
+          } else {
+            const create = document.createElement('button');
+            create.type = 'button';
+            create.className = 'btn-primary';
+            create.textContent = `Создать «${candidate.title}» и добавить`;
+            create.disabled = !canCreditDonationAmount(donation)
+              || candidate.titleConfirmed === false
+              || !getSafeExternalUrl(candidate.sourceUrl)
+              || aiDonationActionLocks.has(donation.id);
+            create.addEventListener('click', () => createEntryFromAiCandidateAndAssign(donation.id, candidate, item));
+            row.appendChild(create);
+          }
+          const sourceLabel = candidate.source === 'steam' ? 'Открыть в Steam' : `Открыть в ${getAiSourceLabel(candidate.source)}`;
+          appendLinkedText(row, sourceLabel, candidate.sourceUrl, 'donation-ai-candidate-link');
+          actions.appendChild(row);
+        });
+
+        if (item.manualSuggestion) {
+          const manualExisting = findExistingEntryForAiManualSuggestion(item.manualSuggestion);
+          if (!manualExisting || !renderedEntries.has(manualExisting.id)) {
+            const manualRow = document.createElement('div');
+            manualRow.className = 'donation-ai-option-row';
+            const manualAction = document.createElement('button');
+            manualAction.type = 'button';
+            manualAction.className = 'btn-primary';
+            if (manualExisting) {
+              manualAction.textContent = `Добавить в «${manualExisting.name}»`;
+            } else if (item.catalogStatus === 'unavailable' && item.catalog === 'steam') {
+              manualAction.textContent = `Создать «${item.manualSuggestion.title}» и добавить без привязки к Steam`;
+            } else if (item.catalogStatus === 'unavailable' && item.catalog === 'anime') {
+              manualAction.textContent = `Создать «${item.manualSuggestion.title}» и добавить без привязки к каталогу`;
+            } else {
+              manualAction.textContent = `Создать «${item.manualSuggestion.title}» и добавить`;
+            }
+            manualAction.disabled = !canCreditDonationAmount(donation) || aiDonationActionLocks.has(donation.id);
+            manualAction.addEventListener('click', () => createEntryFromAiManualSuggestionAndAssign(donation.id, item.manualSuggestion));
+            manualRow.appendChild(manualAction);
+            actions.appendChild(manualRow);
+          }
+        }
+
+        if (actions.children.length) card.appendChild(actions);
+        list.appendChild(card);
+      });
+      box.appendChild(list);
+
+      const footer = document.createElement('div');
+      footer.className = 'donation-ai-actions';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = 'Повторить анализ';
+      retry.addEventListener('click', () => scheduleDonationAiAnalysis(donation.id, { force: true }));
+      const reject = document.createElement('button');
+      reject.type = 'button';
+      reject.className = 'btn-danger-outline';
+      reject.textContent = 'Игнорировать подсказку';
+      reject.addEventListener('click', () => rejectAiSuggestion(donation.id));
+      footer.append(retry, reject);
+      box.appendChild(footer);
+      return box;
+    }
+
     function createDonationAiBlock(donation) {
       const llm = normalizeDonationLlmState(donation.llm);
       if (llm.status === 'idle' || llm.status === 'skipped') return null;
@@ -7510,8 +8072,7 @@
           checking_entries: 'AI проверяет текущие лоты...',
           searching_steam: 'AI ищет игру...',
           searching_anime: 'AI ищет аниме...',
-          ranking_candidates: 'AI сравнивает варианты...',
-          llm_candidate_selection: 'AI сравнивает варианты...'
+          ranking_candidates: 'AI готовит варианты...'
         };
         title.textContent = stageLabels[llm.stage] || 'AI анализирует сообщение...';
         box.appendChild(title);
@@ -7557,6 +8118,10 @@
         actions.appendChild(retry);
         box.appendChild(actions);
         return box;
+      }
+
+      if (llm.items.length) {
+        return appendDonationAiItems(box, donation, llm);
       }
 
       if (llm.action === 'assign_existing') {
