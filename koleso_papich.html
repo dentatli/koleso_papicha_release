@@ -3376,7 +3376,7 @@
                 <summary>Расширенные настройки модели</summary>
                 <label>
                   Модель OpenRouter
-                  <input type="text" id="llm-model" autocomplete="off" placeholder="google/gemini-2.5-flash-lite">
+                  <input type="text" id="llm-model" autocomplete="off" placeholder="google/gemini-3-flash-preview">
                 </label>
                 <label class="checkbox-row integration-checkbox">
                   <input type="checkbox" id="llm-allow-steam">
@@ -4090,7 +4090,9 @@
     let serverCollectorStatusTimer = null;
     const SERVER_COLLECTOR_POLL_INTERVAL_MS = 10000;
     const AI_ANALYSIS_ALLOWED_CATEGORIES = ['game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown'];
-    const LLM_PIPELINE_VERSION = 6;
+    const LLM_PIPELINE_VERSION = 8;
+    const DEFAULT_LLM_MODEL = 'google/gemini-3-flash-preview';
+    const LEGACY_DEFAULT_LLM_MODELS = new Set(['google/gemini-2.5-flash-lite']);
     const MAX_LOT_NAME_LENGTH = 200;
     const MAX_DONATION_MESSAGE_LENGTH = 1000;
     let llmJobsRevision = 0;
@@ -5069,7 +5071,7 @@
         enabled: false,
         autoAssignExisting: false,
         autoCreateLots: false,
-        model: 'google/gemini-2.5-flash-lite',
+        model: DEFAULT_LLM_MODEL,
         confidenceAssignThreshold: 0.85,
         confidenceCreateThreshold: 0.92,
         allowSteam: true,
@@ -5117,13 +5119,14 @@
     function normalizeStoredLlmSettings(value) {
       const defaults = createDefaultLlmSettings();
       const stored = value && typeof value === 'object' ? value : {};
+      const storedModel = String(stored.model || '').trim();
       return {
         ...defaults,
         ...stored,
         enabled: !!stored.enabled,
         autoAssignExisting: !!stored.autoAssignExisting,
         autoCreateLots: !!stored.autoCreateLots,
-        model: String(stored.model || defaults.model),
+        model: !storedModel || LEGACY_DEFAULT_LLM_MODELS.has(storedModel) ? defaults.model : storedModel,
         confidenceAssignThreshold: Math.max(0, Math.min(1, Number(stored.confidenceAssignThreshold ?? defaults.confidenceAssignThreshold))),
         confidenceCreateThreshold: Math.max(0, Math.min(1, Number(stored.confidenceCreateThreshold ?? defaults.confidenceCreateThreshold))),
         allowSteam: stored.allowSteam !== false,
@@ -7273,7 +7276,7 @@
       if (!result || !donation || donation.status !== 'pending') return false;
       const normalized = normalizeDonationLlmState(result);
       if (Array.isArray(result.items) && result.items.length > 5) return false;
-      if (Array.isArray(result.items) && !normalized.items.length) return false;
+      if (Array.isArray(result.items) && result.items.length > 0 && !normalized.items.length) return false;
       if (result.action === 'assign_existing') {
         return !!String(result.entryId || '')
           && !!result.entryFingerprint
@@ -7503,6 +7506,16 @@
         hasVariantConflict: !exact && (variantDifference.length > 0 || oneSideExtendsOther),
         extraSignificantTokens
       };
+    }
+
+    function doesAiManualSuggestionDuplicateCandidate(item) {
+      const manualTitle = String(item?.manualSuggestion?.title || '').trim();
+      if (!manualTitle) return false;
+      return (Array.isArray(item?.candidates) ? item.candidates : []).some(candidate => (
+        candidate
+        && candidate.titleConfirmed !== false
+        && compareAiLotTitles(candidate.title, manualTitle).exact
+      ));
     }
 
     function getCurrentEntryFingerprint(entry) {
@@ -8007,7 +8020,7 @@
           actions.appendChild(row);
         });
 
-        if (item.manualSuggestion) {
+        if (item.manualSuggestion && !doesAiManualSuggestionDuplicateCandidate(item)) {
           const manualExisting = findExistingEntryForAiManualSuggestion(item.manualSuggestion);
           if (!manualExisting || !renderedEntries.has(manualExisting.id)) {
             const manualRow = document.createElement('div');
@@ -8204,7 +8217,9 @@
         const knownCategory = llm.category && llm.category !== 'unknown';
         title.textContent = llm.query
           ? `AI распознал: ${llm.query}${knownCategory ? ` · ${categoryLabel}` : ''}`
-          : 'AI не смог однозначно выбрать лот';
+          : (llm.matchedBy === 'no_auction_target'
+            ? 'AI не нашёл явного предложения лота'
+            : 'AI не смог однозначно выбрать лот');
         box.appendChild(title);
         if (llm.candidates?.length) {
           const reason = document.createElement('div');
@@ -9116,7 +9131,7 @@
       document.getElementById('llm-auto-create').checked = !!llmSettings.autoCreateLots;
       document.getElementById('llm-allow-steam').checked = !!llmSettings.allowSteam;
       document.getElementById('llm-allow-anime').checked = !!llmSettings.allowAnime;
-      document.getElementById('llm-model').value = llmSettings.model || 'google/gemini-2.5-flash-lite';
+      document.getElementById('llm-model').value = llmSettings.model || DEFAULT_LLM_MODEL;
       document.getElementById('llm-assign-threshold').value = String(llmSettings.confidenceAssignThreshold);
       document.getElementById('llm-create-threshold').value = String(llmSettings.confidenceCreateThreshold);
       const assignValue = document.getElementById('llm-assign-threshold-value');
@@ -9185,7 +9200,7 @@
         llmSettings.autoCreateLots = !!document.getElementById('llm-auto-create').checked;
         llmSettings.allowSteam = !!document.getElementById('llm-allow-steam').checked;
         llmSettings.allowAnime = !!document.getElementById('llm-allow-anime').checked;
-        llmSettings.model = document.getElementById('llm-model').value.trim() || 'google/gemini-2.5-flash-lite';
+        llmSettings.model = document.getElementById('llm-model').value.trim() || DEFAULT_LLM_MODEL;
         llmSettings.confidenceAssignThreshold = Math.max(0, Math.min(1, Number(document.getElementById('llm-assign-threshold').value) || 0.85));
         llmSettings.confidenceCreateThreshold = Math.max(0, Math.min(1, Number(document.getElementById('llm-create-threshold').value) || 0.92));
         saveData();

@@ -51,7 +51,8 @@ $script:MaxRequestHeaderChars = 32768
 $script:MaxRequestHeaderCount = 100
 $script:MaxRequestBodyBytes = 4MB
 $script:ClientIoTimeoutMs = 15000
-$script:LlmPipelineVersion = 6
+$script:LlmPipelineVersion = 8
+$script:DefaultLlmModel = "google/gemini-3-flash-preview"
 $script:LlmExistingSelectionThreshold = 0.90
 $script:LlmMaxItems = 5
 $script:LlmMaxSearchQueriesPerItem = 4
@@ -1972,7 +1973,7 @@ function Resolve-LlmIntentItems {
             continue
         }
     }
-    if ($Resolved.Count -eq 0) {
+    if ($RawItems.Count -gt 0 -and $Resolved.Count -eq 0) {
         Throw-LlmError 'LLM_SCHEMA_VALIDATION_ERROR' 'OpenRouter intent response did not contain a valid item.'
     }
     return @($Resolved | ForEach-Object { $_ })
@@ -2067,7 +2068,7 @@ function Resolve-LlmNormalizedIntentItems {
             continue
         }
     }
-    if ($Resolved.Count -eq 0) {
+    if ($RawItems.Count -gt 0 -and $Resolved.Count -eq 0) {
         Throw-LlmError 'LLM_SCHEMA_VALIDATION_ERROR' 'OpenRouter intent response did not contain a valid item.'
     }
     return @($Resolved | ForEach-Object { $_ })
@@ -3879,17 +3880,17 @@ function Get-OpenRouterIntentProviderSchema {
     $ItemProperties = @{
         category = @{ type = 'string'; enum = @('game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown') }
         catalog = @{ type = 'string'; enum = @('steam', 'anime', 'none') }
-        mentionedTitle = @{ type = 'string'; maxLength = 200 }
-        displayTitle = @{ type = 'string'; maxLength = 200 }
-        officialTitleGuess = @{ type = 'string'; maxLength = 200 }
+        mentionedTitle = @{ type = 'string' }
+        displayTitle = @{ type = 'string' }
+        officialTitleGuess = @{ type = 'string' }
         searchQueries = @{
             type = 'array'
             maxItems = $script:LlmMaxSearchQueriesPerItem
-            items = @{ type = 'string'; maxLength = 160 }
+            items = @{ type = 'string' }
         }
         originalLanguage = @{ type = 'string'; enum = @('ru', 'en', 'ja', 'ko', 'zh', 'other', 'unknown') }
         confidence = @{ type = 'number'; minimum = 0; maximum = 1 }
-        reason = @{ type = 'string'; maxLength = 400 }
+        reason = @{ type = 'string' }
     }
     $Required = @('category', 'catalog', 'mentionedTitle', 'displayTitle', 'officialTitleGuess', 'searchQueries', 'originalLanguage', 'confidence', 'reason')
     if ($Entries.Count -gt 0) {
@@ -3903,7 +3904,7 @@ function Get-OpenRouterIntentProviderSchema {
         properties = @{
             items = @{
                 type = 'array'
-                minItems = 1
+                minItems = 0
                 maxItems = $script:LlmMaxItems
                 items = @{
                     type = 'object'
@@ -3926,35 +3927,119 @@ function Invoke-OpenRouterIntentAnalysis {
         [object[]]$Entries
     )
 
-    $Model = if ($Settings -and -not [string]::IsNullOrWhiteSpace([string]$Settings.model)) { [string]$Settings.model } else { "google/gemini-2.5-flash-lite" }
+    $Model = if ($Settings -and -not [string]::IsNullOrWhiteSpace([string]$Settings.model)) { [string]$Settings.model } else { $script:DefaultLlmModel }
     $CurrentEntries = @(Get-ActiveEntriesForLlmIntent $Entries)
     $SystemPrompt = @"
-You analyze one donation message for a local auction. Return every explicitly mentioned work as a separate item in one response, up to five items. Never combine several works into one title or search query.
-For games, determine the likely exact official English Steam title. Do not merely transliterate Russian words and do not blindly translate them. "копатель онлайн" means the Steam game "Digger Online", not "Kopatel Online". If the official title is uncertain, provide several concise searchQueries instead of inventing certainty. Broad names such as "майнкрафт" may represent a franchise with several Steam results.
-mentionedTitle is the short title or fragment actually used by the donor. displayTitle is the canonical, correctly spelled title for display and possible manual lot creation. officialTitleGuess is only a catalog search hint and is never authoritative metadata. originalLanguage is the language of the canonical original title. searchQueries must contain distinct alternatives for the same item, never several games joined into one string. Use catalog=steam for a likely video game even if category is uncertain/other, catalog=anime for anime lookup, otherwise catalog=none.
-Keep canonical Russian and Russian-language works in Russian Cyrillic in displayTitle, with correct capitalization and ё where appropriate. Do not translate or transliterate a Russian original title into English merely for catalog search. Examples: алеша попович => displayTitle "Алёша Попович и Тугарин Змей"; вечерний ургант => "Вечерний Ургант"; слово пацана => "Слово пацана. Кровь на асфальте"; брат 2 => "Брат 2". This applies to games, films, series, TV shows, cartoons and other Russian works.
-For foreign works keep the canonical original/product title instead of automatically translating it into Russian: the outlast trials => "The Outlast Trials". Digger Online is the official product title, so копатель онлайн => displayTitle "Digger Online" and officialTitleGuess "Digger Online". Never use a simple transliteration such as Alyosha Popovich as displayTitle for a Russian work. If the exact canonical display title is uncertain, use the most meaningful safe title you can identify and lower confidence; never put a URL, instruction or service text in displayTitle.
-Return only structured JSON. Never invent external identifiers. Reason must always be short and written in Russian.
-When currentEntries are provided, set existingEntryId only when the message unambiguously identifies that exact work. Otherwise use __none__. Treat greetings, interjections, jokes, links, streamer mentions and unrelated phrases as noise.
-Pay close attention to franchise part, season, year, remake/remaster, movie and special. If several current entries are parts of the same franchise and the message does not identify the part, do not choose one at random.
-Do not match works merely because they have a similar theme. For example, Дальнобойщики 2 is not Euro Truck Simulator 2.
-Use unknown only when neither the work/franchise nor its category can be identified. Do not lower confidence merely because a known franchise has several possible parts; local catalog results will be shown to the user.
-Categories:
-- game: video games only.
-- anime: Japanese anime/anime franchise.
-- movie: movies that are not anime.
-- tv_show: TV shows, including Russian shows and broadcasts.
-- cartoon: non-anime cartoons/animated series.
-- other: books, music, people, memes, or other known media that are not covered above.
-- unknown: the work/franchise or category cannot be identified at all.
+Prompt version: auction-precision-v6
+
+Analyze exactly one donation for a local auction. Return only strict schema-valid JSON, without markdown or text outside JSON. Extract auction targets, not every mentioned work.
+
+Decide separately for every mentioned work, in this order.
+
+1. EXCLUSION GATE
+
+Exclude a work mentioned only in:
+- a question about it, review, comparison or recommendation;
+- plot, characters, places or thematic description;
+- gameplay instructions, current gameplay or past experience;
+- a request to check its trailer, page or gameplay;
+- advertising, jokes or examples of channel content;
+- a hypothetical or existing-auction outcome such as "if X wins".
+
+A question is a target only when it asks which concrete work should receive the donation or be selected for the auction.
+
+Never infer a work from plot details, characters, fictional companies or places.
+
+Exclusions override standalone-title detection. A separate direct allocation cue still wins for the title governed by that cue.
+
+If the reason would say "no auction cue", "merely mentioned", "suggested to check" or similar, DO NOT return that item.
+
+2. TARGET GATE
+
+Include a concrete work only when at least one condition applies:
+
+A. A direct allocation cue governs it:
+"на TITLE", "донат/доначу на", "кинь/кидаю/докинь/добавь/закинь", "в аук/лот", "пикаю/выбираю TITLE".
+
+B. It is an explicit alternative in an auction or stream-content choice:
+"TITLE_A или TITLE_B", "хочу TITLE_A, но можно TITLE_B", "если нельзя TITLE_A — TITLE_B", "реши сам".
+Return every concrete alternative, including discouraged or unlikely ones.
+
+C. It is a standalone nomination: the whole message, or an isolated beginning/end of the message, is a recognizable concrete title and the surrounding text does not discuss, review or describe that same work.
+
+A new direct allocation cue starts a new target.
+
+3. EXTRACTION AND NORMALIZATION
+
+Return one item per distinct canonical work, in mention order, maximum five.
+
+Merge repeated mentions and aliases of the same work into one item. Never combine different works.
+
+mentionedTitle:
+- must be the smallest useful verbatim contiguous substring of donationMessage;
+- must contain actual title words;
+- must not be only "первый", "второй", a pronoun, category or preposition.
+
+displayTitle:
+- use the canonical, correctly spelled title;
+- preserve meaningful numbers, year, season, episode, chapter, edition and subtitle;
+- never infer a sequel from an ordinal alone;
+- Russian-origin works stay in Russian Cyrillic with correct capitalization and "ё";
+- foreign games use the official Steam/product title;
+- other foreign media use the standard official international product title;
+- avoid literal translations and scholarly romanization when a widely used international title exists.
+
+category must be one of:
+game, anime, movie, tv_show, cartoon, other, unknown.
+
+catalog must be steam for a likely video game, anime for anime lookup, otherwise none.
+officialTitleGuess is only a catalog search hint and never authoritative metadata.
+
+searchQueries:
+- prefer one canonical query;
+- add a second only for a materially different alias or language;
+- queries must be unique ignoring case and refer only to this item.
+
+confidence covers both auction intent and title identification.
+reason must be brief, Russian and consistent with inclusion.
+
+Never return generic words such as "игра", "аниме", "сериал", "фильм", "мем", "хоррор" or "смерть".
+
+Known aliases, not an exhaustive list:
+- "копатель онлайн" = Digger Online;
+- "булли" = Bully;
+- "коратель/каратель" = The Punisher, game;
+- METEL = Metel - Horror Escape;
+- "край оф фир" = Cry of Fear;
+- "фнафыч 4" = Five Nights at Freddy's 4;
+- "добрыню STORY" = "Добрыня Никитич и Змей Горыныч", game;
+- "деус секс мд" = Deus Ex: Mankind Divided;
+- "готика ремейк" = Gothic 1 Remake;
+- "цифровой цирк" = The Amazing Digital Circus, cartoon;
+- "The Coffin of Andy and Laylay" = The Coffin of Andy and Leyley, game;
+- "алеша/алёша попович" = "Алёша Попович и Тугарин Змей", game; an English catalog alias may appear only in searchQueries or officialTitleGuess, never replace displayTitle;
+- AMAZING ONLINE stays AMAZING ONLINE.
+
+When currentEntries are provided, choose existingEntryId only for an unambiguous exact work, including its part, season, year, remake/remaster, movie or special. Similar theme is not a match: "Дальнобойщики 2" is not Euro Truck Simulator 2. Otherwise use __none__ and existingSelectionConfidence=0.
+
 Examples:
-- Message "500 рублей на Копатель Онлайн или Майнкрафт" => two items. The first displayTitle and officialTitleGuess are Digger Online with Digger Online first in searchQueries. The second item displayTitle is Minecraft with multiple safe search alternatives.
-- Message "На игру алеша попович" => displayTitle "Алёша Попович и Тугарин Змей", originalLanguage ru, and officialTitleGuess/searchQueries may additionally contain "Alyosha Popovich and the Magic Horse" for Steam search.
-- Message "на булли... МЯУ!", current entry Bully => one item with existingEntryId for Bully and high existingSelectionConfidence.
-- Message "на фнафыч 4", current entries Five Nights at Freddy's 4 and Five Nights at Freddy's 2 => choose the part 4 entry.
-- Message "на фнафыч", current entries for parts 4 and 2 => existingEntryId=__none__.
-- Message "На Outlast Trials, смешной микровидос: [ссылка]", current entry The Outlast Trials => choose The Outlast Trials; the rest is noise.
-- бабка 3, бабуся 3, гренни 3 => Granny 3, game. дбд => Dead by Daylight, game. атака титанов => Attack on Titan, anime. наруто => Naruto, anime; catalog selection resolves the exact series.
+- "Кидаю на A. Слышал про B? Чекни трейлер" => A only.
+- "Как тебе A и B? Донат на C" => C only.
+- "Если A выиграет, будешь играть?" => items=[].
+- "Хочу A, но можно B, реши сам" => A and B.
+- A title followed by its plot description, without allocation or nomination => items=[].
+
+Before output silently verify:
+- every item passed the target gate;
+- no exclusion-only mention was included;
+- every direct-cue target and every auction-choice alternative is present;
+- duplicates and aliases are merged;
+- mentionedTitle occurs verbatim in donationMessage;
+- installments, seasons, chapters and years were preserved;
+- no title was inferred only from plot context;
+- searchQueries are case-insensitively unique.
+
+Never return lot IDs, external IDs, URLs, catalog availability claims or donation-crediting instructions.
 "@
     if ($CurrentEntries.Count -gt 0) {
         $SystemPrompt += "`nFor every item return existingEntryId and existingSelectionConfidence. Use __none__ and 0 when no exact current entry is safe."
@@ -3968,8 +4053,7 @@ Examples:
     $Schema = Get-OpenRouterIntentProviderSchema $CurrentEntries
     $Payload = @{
         model = $Model
-        temperature = 0
-        max_tokens = 900
+        max_tokens = 1200
         provider = @{ require_parameters = $true }
         response_format = @{
             type = "json_schema"
@@ -3992,14 +4076,13 @@ Examples:
 function Test-OpenRouterIntegration {
     param([string]$Model)
 
-    if ([string]::IsNullOrWhiteSpace($Model)) { $Model = "google/gemini-2.5-flash-lite" }
+    if ([string]::IsNullOrWhiteSpace($Model)) { $Model = $script:DefaultLlmModel }
     $Schema = Get-OpenRouterIntentProviderSchema @()
     $ItemSchema = $Schema.properties.items.items
     $ItemSchema.properties.category.enum = @('unknown')
     $ItemSchema.properties.catalog.enum = @('none')
     $Payload = @{
         model = $Model
-        temperature = 0
         max_tokens = 120
         provider = @{ require_parameters = $true }
         response_format = @{
@@ -4203,7 +4286,15 @@ function Invoke-LlmDonationPipeline {
     if ($JobId) { Assert-LlmJobGenerationCurrent $JobId $Generation }
     $IntentItems = @(ConvertTo-LlmIntentItems $RawIntent $Entries | Select-Object -First $script:LlmMaxItems)
     if ($IntentItems.Count -eq 0) {
-        Throw-LlmError 'LLM_SCHEMA_VALIDATION_ERROR' 'OpenRouter intent response did not contain a valid item.'
+        return [pscustomobject]@{
+            ok = $true
+            result = ConvertTo-LlmResult `
+                -Action 'ask_manual' `
+                -Category 'unknown' `
+                -MatchedBy 'no_auction_target' `
+                -Items @() `
+                -Reason 'AI не нашёл явного предложения лота.'
+        }
     }
 
     $Results = New-Object System.Collections.Generic.List[object]
@@ -4381,7 +4472,7 @@ function New-LlmJobFromInput {
 
     $Donation = $InputData.donation
     $Settings = if ($InputData.settings) { $InputData.settings } else { [pscustomobject]@{} }
-    $Model = if ($Settings.PSObject.Properties["model"]) { [string]$Settings.model } else { "google/gemini-2.5-flash-lite" }
+    $Model = if ($Settings.PSObject.Properties["model"] -and -not [string]::IsNullOrWhiteSpace([string]$Settings.model)) { [string]$Settings.model } else { $script:DefaultLlmModel }
     $AllowSteam = -not $Settings.PSObject.Properties["allowSteam"] -or $Settings.allowSteam -ne $false
     $AllowAnime = -not $Settings.PSObject.Properties["allowAnime"] -or $Settings.allowAnime -ne $false
     $AssignThreshold = if ($Settings.PSObject.Properties["confidenceAssignThreshold"]) { [double]$Settings.confidenceAssignThreshold } else { 0.85 }
@@ -4520,6 +4611,7 @@ function Get-LlmJobsSummary {
             [int]$_.pipelineVersion -eq [int]$script:LlmPipelineVersion
         })
         return [pscustomobject]@{
+            pipelineVersion = [int]$script:LlmPipelineVersion
             revision = [long]$Store.revision
             auctionGeneration = $Generation
             queued = @($Jobs | Where-Object { $_.status -eq "queued" }).Count
@@ -4784,8 +4876,19 @@ function Get-LlmFailureClassification {
         $RetryableType = $true
     }
 
+    $StructuredResponseRetry = -not [string]::IsNullOrWhiteSpace($InternalCode) -and $Code -in @(
+        'LLM_RESPONSE_PARSE_ERROR',
+        'LLM_RESPONSE_CONTENT_MISSING',
+        'LLM_SCHEMA_VALIDATION_ERROR'
+    )
+    if ($StructuredResponseRetry) { $RetryableType = $true }
+
     $CanRetry = if ($Code -eq 'OPENROUTER_RATE_LIMIT') {
         $Attempt -le 3
+    } elseif ($StructuredResponseRetry) {
+        # Structured providers occasionally stop with an empty/truncated body.
+        # One automatic retry hides that transient failure without creating a loop.
+        $Attempt -le 1
     } else {
         $RetryableType -and $Attempt -le 2
     }

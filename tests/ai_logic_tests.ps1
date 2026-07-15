@@ -201,7 +201,8 @@ function Assert-Equal {
     if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'" }
 }
 
-$script:LlmPipelineVersion = 6
+$script:LlmPipelineVersion = 8
+$script:DefaultLlmModel = "google/gemini-3-flash-preview"
 $script:LlmExistingSelectionThreshold = 0.90
 $script:LlmMaxItems = 5
 $script:LlmMaxSearchQueriesPerItem = 4
@@ -468,8 +469,12 @@ Assert-True ($null -ne $SchemaBItem.properties.displayTitle) 'Provider schema do
 Assert-True ($null -ne $SchemaBItem.properties.originalLanguage) 'Provider schema does not contain originalLanguage.'
 Assert-True (@($SchemaBItem.required) -contains 'displayTitle') 'displayTitle is not required by the strict provider schema.'
 Assert-True (@($SchemaBItem.required) -contains 'originalLanguage') 'originalLanguage is not required by the strict provider schema.'
+Assert-Equal $SchemaB.properties.items.minItems 0 'Provider schema rejects a valid no-target response.'
 Assert-Equal $SchemaB.properties.items.maxItems 5 'Provider schema does not bound the item count.'
 Assert-Equal $SchemaBItem.properties.searchQueries.maxItems 4 'Provider schema does not bound per-item search queries.'
+Assert-False (($SchemaB | ConvertTo-Json -Depth 20 -Compress).Contains('maxLength')) 'Provider schema still contains model-specific maxLength keywords.'
+Assert-Equal (@(Resolve-LlmIntentItems ([pscustomobject]@{ items = @() }) @()).Count) 0 'A valid empty provider result became a schema error.'
+Assert-Equal (@(Resolve-LlmNormalizedIntentItems @() @()).Count) 0 'A valid empty normalized result became a schema error.'
 $SchemaBFixture = [pscustomobject]@{ items = @([pscustomobject]@{
     category = 'game'
     catalog = 'steam'
@@ -569,11 +574,16 @@ Assert-True ($IntentFunctionSource.Contains('ConvertFrom-OpenRouterIntentRespons
 Assert-True ($IntentFunctionSource.Contains('currentEntries = $CurrentEntries')) 'Intent analysis does not send active current entries.'
 Assert-True ($IntentFunctionSource.Contains('donationMessage = Limit-LogText ([string]$Donation.message) 1000')) 'Full bounded donation message is not sent once to the intent request.'
 Assert-False ($IntentFunctionSource.Contains('normalizedMessage =')) 'Donation text is duplicated in the OpenRouter payload.'
+Assert-True ($IntentFunctionSource.Contains('Prompt version: auction-precision-v6')) 'Production intent prompt is not auction-precision-v6.'
+Assert-True ($IntentFunctionSource.Contains('max_tokens = 1200')) 'Production output budget does not match the tested multi-item prompt.'
 Assert-True ($IntentFunctionSource.Contains('Digger Online')) 'Intent prompt does not distinguish Digger Online from transliteration.'
-Assert-True ($IntentFunctionSource.Contains('displayTitle "Алёша Попович и Тугарин Змей"')) 'Intent prompt does not preserve canonical Russian display titles.'
-Assert-True ($IntentFunctionSource.Contains('Never use a simple transliteration such as Alyosha Popovich as displayTitle')) 'Intent prompt allows transliteration to replace a Russian display title.'
-Assert-True ($IntentFunctionSource.Contains('every explicitly mentioned work as a separate item')) 'Intent prompt does not require multi-item extraction in one response.'
-Assert-True ($ServerSource.Contains('$script:LlmPipelineVersion = 6')) 'Server pipeline version was not advanced for the new item contract.'
+Assert-True ($IntentFunctionSource.Contains('"алеша/алёша попович" = "Алёша Попович и Тугарин Змей"')) 'Intent prompt does not preserve canonical Russian display titles.'
+Assert-True ($IntentFunctionSource.Contains('Russian-origin works stay in Russian Cyrillic')) 'Intent prompt allows transliteration to replace a Russian display title.'
+Assert-True ($IntentFunctionSource.Contains('Return every concrete alternative')) 'Intent prompt does not preserve all auction alternatives in one response.'
+Assert-True ($IntentFunctionSource.Contains('=> items=[]')) 'Intent prompt cannot return a valid no-target response.'
+Assert-False ($IntentFunctionSource.Contains('temperature =')) 'Production request overrides the tested model temperature defaults.'
+Assert-True ($ServerSource.Contains('$script:LlmPipelineVersion = 8')) 'Server pipeline version was not advanced for prompt/model semantics.'
+Assert-True ($ServerSource.Contains('$script:DefaultLlmModel = "google/gemini-3-flash-preview"')) 'Server default model is not Gemini 3 Flash Preview.'
 $ResolveIntentStart = $ServerSource.IndexOf('function Resolve-LlmIntentDecision')
 $ResolveIntentEnd = $ServerSource.IndexOf('function Read-JsonFileSafe', $ResolveIntentStart)
 $ResolveIntentSource = $ServerSource.Substring($ResolveIntentStart, $ResolveIntentEnd - $ResolveIntentStart)
@@ -597,6 +607,7 @@ $OpenRouterTestStart = $IntentFunctionEnd
 $OpenRouterTestEnd = $ServerSource.IndexOf('function Assert-LlmJobGenerationCurrent', $OpenRouterTestStart)
 $OpenRouterTestSource = $ServerSource.Substring($OpenRouterTestStart, $OpenRouterTestEnd - $OpenRouterTestStart)
 Assert-True ($OpenRouterTestSource.Contains('confidence 0.5')) 'OpenRouter integration test does not request fractional confidence.'
+Assert-False ($OpenRouterTestSource.Contains('temperature =')) 'OpenRouter integration test overrides the model temperature defaults.'
 Assert-True ($OpenRouterTestSource.Contains('ConvertFrom-OpenRouterIntentResponse $Response @()')) 'OpenRouter integration test bypasses the production provider response boundary.'
 Assert-True ($OpenRouterTestSource.Contains('ConvertTo-LlmIntentItems $NormalizedResponse @()')) 'OpenRouter integration test bypasses internal item validation.'
 
@@ -935,12 +946,18 @@ $Unavailable = Get-LlmFailureClassification $null 'Service unavailable' 503 1 0
 Assert-True ($Unavailable.retry -and $Unavailable.code -eq 'OPENROUTER_UPSTREAM_ERROR') '503 must be retryable.'
 $Timeout = Get-LlmFailureClassification ([TimeoutException]::new('timeout')) 'timeout' 0 1 0
 Assert-True ($Timeout.retry -and $Timeout.code -eq 'OPENROUTER_TIMEOUT') 'Timeout must be retryable.'
-foreach ($Code in @('LLM_RESPONSE_PARSE_ERROR', 'UNKNOWN_CANDIDATE_ID', 'PIPELINE_RESULT_INVALID')) {
+foreach ($Code in @('UNKNOWN_CANDIDATE_ID', 'PIPELINE_RESULT_INVALID')) {
     $Exception = New-LlmCodedException $Code 'test failure'
     $Failure = Get-LlmFailureClassification $Exception $Exception.Message 0 1 0
     Assert-False $Failure.retry "$Code must not be retryable."
     Assert-True ($Failure.code -eq $Code) "$Code classification was lost."
 }
+$ParseFailure = New-LlmCodedException 'LLM_RESPONSE_PARSE_ERROR' 'truncated response'
+Assert-True (Get-LlmFailureClassification $ParseFailure $ParseFailure.Message 0 1 0).retry 'The first malformed structured response must be retried once.'
+Assert-False (Get-LlmFailureClassification $ParseFailure $ParseFailure.Message 0 2 0).retry 'Malformed structured response entered an unbounded retry loop.'
+$SchemaFailure = New-LlmCodedException 'LLM_SCHEMA_VALIDATION_ERROR' 'invalid structured response'
+Assert-True (Get-LlmFailureClassification $SchemaFailure $SchemaFailure.Message 0 1 0).retry 'The first invalid structured response must be retried once.'
+Assert-False (Get-LlmFailureClassification $SchemaFailure $SchemaFailure.Message 0 2 0).retry 'Invalid structured response entered an unbounded retry loop.'
 $ProgrammingError = Get-LlmFailureClassification ([InvalidOperationException]::new('local bug')) 'local bug' 0 1 0
 Assert-False $ProgrammingError.retry 'Unknown status-free programming errors must not retry.'
 Add-Type -AssemblyName System.Net.Http
@@ -999,6 +1016,19 @@ function New-TestPipelineInput {
         settings = [pscustomobject]@{ allowSteam = $true; allowAnime = $true }
     }
 }
+
+$NoTargetCatalogCalls = 0
+$NoTargetIntent = {
+    param($Donation, $Settings, $Normalized, $Entries)
+    return [pscustomobject]@{ items = @() }
+}
+$NoTargetCatalog = { param($Query, $JobId, $Generation) $script:NoTargetCatalogCalls++; return @() }
+$script:NoTargetCatalogCalls = 0
+$NoTargetPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'Как настроение?' @()) $NoTargetIntent $NoTargetCatalog $NoTargetCatalog
+Assert-Equal $NoTargetPipeline.result.action 'ask_manual' 'A valid no-target response became a pipeline error.'
+Assert-Equal $NoTargetPipeline.result.matchedBy 'no_auction_target' 'No-target pipeline result lost its explicit state.'
+Assert-Equal (@($NoTargetPipeline.result.items).Count) 0 'No-target pipeline result invented an item.'
+Assert-Equal $script:NoTargetCatalogCalls 0 'No-target response still called an external catalog.'
 
 $BullyEntry = New-TestEntry 'bully-entry' 'Bully' $false 'steam' '12200' 'game'
 $IntentEntrySnapshot = @(Get-ActiveEntriesForLlmIntent @($BullyEntry, (New-TestEntry 'gone-intent' 'Gone' $true 'steam' '9' 'game')))
@@ -1305,8 +1335,8 @@ $IdentityInput = [pscustomobject]@{
     entries = @($BullyEntry)
 }
 $IdentityKey = Get-LlmAnalysisKey $IdentityInput
-Assert-True $IdentityKey.StartsWith('v6:donatepay:identity-1:') 'Current analysis key does not include pipeline version.'
-Assert-Equal $IdentityKey 'v6:donatepay:identity-1:b0e109f9' 'Server analysisKey no longer matches the frontend UTF-16 fingerprint contract.'
+Assert-True $IdentityKey.StartsWith('v8:donatepay:identity-1:') 'Current analysis key does not include pipeline version.'
+Assert-Equal $IdentityKey 'v8:donatepay:identity-1:78d83657' 'Server analysisKey no longer matches the frontend UTF-16 fingerprint contract.'
 $ChangedMessageInput = [pscustomobject]@{
     donation = [pscustomobject]@{ source = 'donatepay'; externalId = 'identity-1'; message = 'на другую игру' }
     entries = @($BullyEntry)
@@ -1319,7 +1349,7 @@ $ChangedEntriesInput = [pscustomobject]@{
 Assert-False ((Get-LlmAnalysisKey $ChangedEntriesInput) -eq $IdentityKey) 'Changing active entries did not invalidate analysisKey.'
 $OriginalPipelineVersion = $script:LlmPipelineVersion
 try {
-    $script:LlmPipelineVersion = 7
+    $script:LlmPipelineVersion = 9
     Assert-False ((Get-LlmAnalysisKey $IdentityInput) -eq $IdentityKey) 'Changing pipelineVersion did not invalidate analysisKey.'
 }
 finally {
@@ -1550,10 +1580,10 @@ try {
     $CurrentPipelineJob = Add-OrGet-LlmJob $CurrentPipelineInput
     Assert-True $CurrentPipelineJob.ok 'Current pipeline could not replace a legacy analysis.'
     Assert-False $CurrentPipelineJob.existing 'Legacy pipeline result was reused as a current job.'
-    Assert-True $CurrentPipelineJob.analysisKey.StartsWith('v6:') 'Replacement job did not use the current pipeline key.'
+    Assert-True $CurrentPipelineJob.analysisKey.StartsWith('v8:') 'Replacement job did not use the current pipeline key.'
     $JobsAfterLegacyReplacement = @((Read-LlmJobsStoreUnsafe).jobs)
     Assert-True ($JobsAfterLegacyReplacement.Count -eq 2) 'Legacy job was not preserved safely alongside the replacement job.'
-    Assert-True (@($JobsAfterLegacyReplacement | Where-Object { [int]$_.pipelineVersion -eq 6 }).Count -eq 1) 'Current pipeline replacement job was not persisted.'
+    Assert-True (@($JobsAfterLegacyReplacement | Where-Object { [int]$_.pipelineVersion -eq 8 }).Count -eq 1) 'Current pipeline replacement job was not persisted.'
 
     $LegacyQueueStore = New-EmptyLlmJobsStore
     $LegacyQueueStore.auctionGeneration = 2

@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Donation Tester · PapichWheel</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101113;
+      --panel: #181a1f;
+      --panel-2: #20232a;
+      --border: #343943;
+      --text: #f0f2f5;
+      --muted: #9da6b4;
+      --accent: #d9a441;
+      --accent-2: #f0c96b;
+      --ok: #64c58a;
+      --error: #ef7373;
+      --warn: #e9b961;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 10% 0%, #24201a 0, var(--bg) 34rem); color: var(--text); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+    button, input, textarea, select { font: inherit; }
+    button { border: 1px solid var(--border); border-radius: 9px; background: #292d35; color: var(--text); padding: .65rem .9rem; cursor: pointer; }
+    button:hover:not(:disabled) { border-color: var(--accent); background: #333843; }
+    button.primary { background: var(--accent); color: #17130b; border-color: var(--accent); font-weight: 700; }
+    button.danger { border-color: #794343; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+    input, textarea, select { width: 100%; background: #111318; color: var(--text); border: 1px solid var(--border); border-radius: 9px; padding: .7rem; }
+    textarea { min-height: 11rem; resize: vertical; }
+    label { display: grid; gap: .35rem; color: var(--muted); }
+    .shell { max-width: 1440px; margin: 0 auto; padding: 24px; }
+    header { display: flex; gap: 20px; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(1.65rem, 3vw, 2.4rem); margin-bottom: .3rem; }
+    h2 { font-size: 1.15rem; }
+    .tag { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; padding: .25rem .65rem; color: var(--muted); }
+    .tag.ok { color: var(--ok); border-color: #35644a; }
+    .tag.error { color: var(--error); border-color: #6c3f3f; }
+    .grid { display: grid; grid-template-columns: minmax(330px, .9fr) minmax(460px, 1.55fr); gap: 18px; }
+    .stack { display: grid; gap: 18px; align-content: start; }
+    .panel { background: color-mix(in srgb, var(--panel) 96%, transparent); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; box-shadow: 0 16px 45px rgb(0 0 0 / .2); }
+    .row { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; }
+    .row > label { flex: 1 1 180px; }
+    .hint, .muted { color: var(--muted); }
+    .message { min-height: 1.6rem; color: var(--muted); margin-top: 10px; }
+    .message.error { color: var(--error); }
+    .message.ok { color: var(--ok); }
+    .skipped { max-height: 9rem; overflow: auto; margin: .5rem 0 0; color: var(--warn); }
+    .progress-track { height: 12px; border-radius: 999px; background: #0e1013; overflow: hidden; border: 1px solid var(--border); }
+    .progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s; }
+    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+    .stat { background: var(--panel-2); padding: 9px; border-radius: 9px; }
+    .stat b { display: block; font-size: 1.1rem; }
+    .queue-layout { display: grid; grid-template-columns: minmax(230px, .65fr) minmax(350px, 1.35fr); gap: 14px; }
+    .queue-list { max-height: 62vh; overflow: auto; display: grid; gap: 7px; align-content: start; }
+    .queue-item { width: 100%; display: grid; grid-template-columns: auto 1fr auto; gap: 9px; text-align: left; align-items: center; }
+    .queue-item.selected { border-color: var(--accent); background: #39352c; }
+    .status-dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--muted); }
+    .status-dot.success { background: var(--ok); }
+    .status-dot.error { background: var(--error); }
+    .status-dot.running { background: var(--accent); box-shadow: 0 0 0 5px rgb(217 164 65 / .14); }
+    .status-dot.stopped { background: var(--warn); }
+    .detail { min-width: 0; }
+    .donation-message { white-space: pre-wrap; overflow-wrap: anywhere; background: #111318; border-radius: 9px; padding: 12px; }
+    .ai-item { border-left: 3px solid var(--accent); padding: 10px 12px; margin: 10px 0; background: var(--panel-2); border-radius: 0 9px 9px 0; }
+    .queries { margin: .4rem 0 0; padding-left: 1.2rem; }
+    details { border-top: 1px solid var(--border); padding-top: 9px; margin-top: 10px; }
+    summary { cursor: pointer; color: var(--accent-2); }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 20rem; overflow: auto; background: #0d0f12; padding: 10px; border-radius: 8px; color: #cbd4df; }
+    .evaluation { display: grid; grid-template-columns: 180px 1fr; gap: 9px; margin-top: 14px; }
+    .hidden { display: none !important; }
+    @media (max-width: 980px) { .grid, .queue-layout { grid-template-columns: 1fr; } .queue-list { max-height: 20rem; } }
+    @media (max-width: 560px) { .shell { padding: 12px; } .stats { grid-template-columns: 1fr 1fr; } .evaluation { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <h1>Экспериментальный AI‑тестер</h1>
+        <p class="muted">Изолированная последовательная проверка донатов. Аукцион и production AI не затрагиваются.</p>
+      </div>
+      <span id="server-status" class="tag">Проверка OpenRouter…</span>
+    </header>
+
+    <div class="grid">
+      <div class="stack">
+        <section class="panel">
+          <h2>1. Загрузить донаты</h2>
+          <label>JSON-файл
+            <input id="file-input" type="file" accept=".json,application/json">
+          </label>
+          <p class="hint">Поддерживаются массив и объект <code>{ donations: [] }</code>, включая поля name/amount/message.</p>
+          <label>Вставить JSON или текст
+            <textarea id="paste-input" placeholder="на копатель онлайн&#10;на игру алеша попович&#10;на майнкрафт"></textarea>
+          </label>
+          <div class="row">
+            <button id="parse-paste">Распознать и загрузить</button>
+          </div>
+          <div id="import-message" class="message" aria-live="polite"></div>
+          <ol id="skipped-list" class="skipped"></ol>
+        </section>
+
+        <section class="panel">
+          <h2>2. Экспериментальный промпт</h2>
+          <div class="row">
+            <span id="prompt-version" class="tag">—</span>
+            <span id="prompt-fingerprint" class="tag">—</span>
+            <span id="prompt-length" class="tag">0 символов</span>
+          </div>
+          <label>Текст промпта
+            <textarea id="prompt-input"></textarea>
+          </label>
+          <div class="row">
+            <button id="save-prompt" class="primary">Сохранить промпт</button>
+            <button id="reset-prompt">Сбросить к исходному</button>
+          </div>
+          <div id="prompt-message" class="message" aria-live="polite"></div>
+        </section>
+
+        <section class="panel">
+          <h2>3. Параметры запуска</h2>
+          <label>Модель OpenRouter
+            <input id="model-input" value="google/gemini-3-flash-preview" maxlength="120">
+          </label>
+          <label>Задержка между запросами, секунд
+            <input id="delay-input" type="number" min="0.5" max="60" step="0.1" value="2">
+          </label>
+          <p class="hint">Задержка начинается после полного завершения анализа. Одновременно выполняется не более одного запроса.</p>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="panel">
+          <h2>Очередь</h2>
+          <div class="row">
+            <button id="start-button" class="primary">Запустить</button>
+            <button id="pause-button">Пауза</button>
+            <button id="resume-button">Продолжить</button>
+            <button id="stop-button">Остановить</button>
+            <button id="retry-button">Повторить ошибки</button>
+            <button id="reprocess-button">Обработать заново выбранный</button>
+            <button id="reset-results-button" class="danger">Сбросить все результаты</button>
+            <button id="export-button">Выгрузить результаты JSON</button>
+          </div>
+          <div class="stats">
+            <div class="stat"><span class="muted">Обработано</span><b id="processed-stat">0 из 0</b></div>
+            <div class="stat"><span class="muted">Успешно</span><b id="success-stat">0</b></div>
+            <div class="stat"><span class="muted">Ошибки</span><b id="error-stat">0</b></div>
+            <div class="stat"><span class="muted">Осталось</span><b id="remaining-stat">0</b></div>
+            <div class="stat"><span class="muted">Текущий донат</span><b id="current-stat">—</b></div>
+            <div class="stat"><span class="muted">До следующего</span><b id="countdown-stat">—</b></div>
+          </div>
+          <div class="progress-track" aria-label="Прогресс"><div id="progress-bar" class="progress-bar"></div></div>
+          <div id="queue-message" class="message" aria-live="polite"></div>
+        </section>
+
+        <section class="panel queue-layout">
+          <div id="queue-list" class="queue-list" aria-label="Донаты"></div>
+          <div id="detail" class="detail"><p class="muted">Загрузите донаты и выберите элемент очереди.</p></div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script src="/ai_tester_logic.js"></script>
+  <script>
+    'use strict';
+    const AI_TESTER_TOKEN = '__AI_TESTER_TOKEN__';
+    const Logic = window.AiTesterLogic;
+    const el = id => document.getElementById(id);
+    const DEFAULT_MODEL = 'google/gemini-3-flash-preview';
+    const LEGACY_DEFAULT_MODEL = 'google/gemini-2.5-flash-lite';
+    const statusNames = { pending: 'Ожидает', running: 'Выполняется', success: 'Успешно', error: 'Ошибка', stopped: 'Остановлено' };
+    let promptDirty = false;
+    let renderPending = false;
+    let persistTimer = 0;
+    let queue = null;
+    let state = {
+      version: 1,
+      source: { fileName: '', mode: '', totalDonations: 0 },
+      items: [],
+      prompt: { version: '', fingerprint: '', text: '' },
+      model: DEFAULT_MODEL,
+      delaySeconds: 2,
+      selectedIndex: -1,
+      queueState: 'idle'
+    };
+
+    function setMessage(target, text, kind) {
+      target.textContent = text || '';
+      target.className = `message${kind ? ` ${kind}` : ''}`;
+    }
+
+    function persist() {
+      state.items = queue ? queue.items : state.items;
+      state.queueState = queue ? queue.state : state.queueState;
+      try { localStorage.setItem(Logic.STORAGE_KEY, JSON.stringify(state)); }
+      catch { setMessage(el('queue-message'), 'Не удалось сохранить весь прогресс в localStorage. Выгрузите текущие результаты.', 'error'); }
+    }
+
+    function persistSoon() {
+      if (persistTimer) return;
+      persistTimer = window.setTimeout(() => { persistTimer = 0; persist(); }, 500);
+    }
+
+    function restore() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(Logic.STORAGE_KEY) || 'null');
+        if (saved && saved.version === 1) {
+          state = { ...state, ...saved };
+          const savedModel = String(state.model || '').trim();
+          state.model = !savedModel || savedModel === LEGACY_DEFAULT_MODEL ? DEFAULT_MODEL : savedModel;
+          state.items = Logic.normalizeRestoredItems(saved.items);
+          state.selectedIndex = Number.isInteger(saved.selectedIndex) ? saved.selectedIndex : -1;
+        }
+      } catch { localStorage.removeItem(Logic.STORAGE_KEY); }
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        method: options.method || 'GET',
+        headers: { 'X-AI-Tester-Token': AI_TESTER_TOKEN, ...(options.body ? { 'Content-Type': 'application/json; charset=utf-8' } : {}) },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        cache: 'no-store'
+      });
+      let payload = null;
+      try { payload = await response.json(); } catch {}
+      if (!response.ok || !payload || payload.ok === false) {
+        const info = payload && payload.error || {};
+        const error = new Error(info.message || `HTTP ${response.status}`);
+        Object.assign(error, {
+          code: info.code || `HTTP_${response.status}`,
+          retryable: Boolean(info.retryable),
+          critical: Boolean(info.critical || response.status === 401 || response.status === 403),
+          retryAfterSeconds: Number(info.retryAfterSeconds) || 0,
+          details: info.details && typeof info.details === 'object' ? info.details : null
+        });
+        throw error;
+      }
+      return payload;
+    }
+
+    function createQueue() {
+      queue = new Logic.SequentialQueue({
+        items: state.items,
+        delayMs: Math.round(state.delaySeconds * 1000),
+        request: async donation => {
+          const response = await api('/api/analyze', { method: 'POST', body: { donation, model: state.model } });
+          response.rawAiContent = String(response.rawAiContent || '').slice(0, 8192);
+          return response;
+        },
+        onChange: () => { persistSoon(); scheduleRender(); }
+      });
+      if (['paused', 'stopped'].includes(state.queueState) || queue.items.some(item => item.status === 'stopped')) {
+        queue.state = state.queueState === 'paused' ? 'paused' : 'stopped';
+      }
+    }
+
+    function scheduleRender() {
+      if (renderPending) return;
+      renderPending = true;
+      requestAnimationFrame(() => { renderPending = false; render(); });
+    }
+
+    function appendText(parent, tag, text, className) {
+      const node = document.createElement(tag);
+      node.textContent = text;
+      if (className) node.className = className;
+      parent.appendChild(node);
+      return node;
+    }
+
+    function renderList() {
+      const list = el('queue-list');
+      list.replaceChildren();
+      for (const item of queue.items) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `queue-item${item.index === state.selectedIndex ? ' selected' : ''}`;
+        const dot = document.createElement('span');
+        dot.className = `status-dot ${item.status}`;
+        button.appendChild(dot);
+        const label = document.createElement('span');
+        label.textContent = `${item.index + 1}. ${item.donation.name}: ${item.donation.message.slice(0, 62)}`;
+        button.appendChild(label);
+        appendText(button, 'small', statusNames[item.status] || item.status, 'muted');
+        button.addEventListener('click', () => { state.selectedIndex = item.index; persist(); render(); });
+        list.appendChild(button);
+      }
+    }
+
+    function detailBlock(title, value) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = title;
+      details.appendChild(summary);
+      const pre = document.createElement('pre');
+      pre.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+      details.appendChild(pre);
+      return details;
+    }
+
+    function renderDetail() {
+      const target = el('detail');
+      target.replaceChildren();
+      const item = queue.items[state.selectedIndex];
+      if (!item) { appendText(target, 'p', 'Выберите донат в очереди.', 'muted'); return; }
+      appendText(target, 'h2', `${item.index + 1}. ${item.donation.name}`);
+      appendText(target, 'p', `${item.donation.amount} ${item.donation.currency} · ${statusNames[item.status] || item.status}`, 'muted');
+      appendText(target, 'div', item.donation.message, 'donation-message');
+      if (item.status === 'error' && item.error) {
+        appendText(target, 'h3', `${item.error.code}: ${item.error.message}`, 'message error');
+        if (item.error.details) target.appendChild(detailBlock('Диагностика ошибки', item.error.details));
+      }
+      if (item.result) {
+        if (item.result.prompt && state.prompt.fingerprint && item.result.prompt.fingerprint !== state.prompt.fingerprint) {
+          appendText(target, 'p', 'Результат получен с другой версией экспериментального промпта.', 'message error');
+        }
+        const response = item.result.aiResponse || { items: [] };
+        const items = Array.isArray(response.items) ? response.items : [];
+        if (!items.length) appendText(target, 'p', 'AI не выделил произведения.', 'muted');
+        for (const recognized of items) {
+          const card = document.createElement('section');
+          card.className = 'ai-item';
+          appendText(card, 'h3', String(recognized.displayTitle || recognized.mentionedTitle || 'Без названия'));
+          appendText(card, 'p', `${recognized.category || 'unknown'} · ${recognized.originalLanguage || 'unknown'} · ${Math.round((Number(recognized.confidence) || 0) * 100)}%`, 'muted');
+          appendText(card, 'p', String(recognized.reason || ''));
+          const queries = document.createElement('ul');
+          queries.className = 'queries';
+          for (const queryText of Array.isArray(recognized.searchQueries) ? recognized.searchQueries : []) appendText(queries, 'li', String(queryText));
+          card.appendChild(queries);
+          target.appendChild(card);
+        }
+        target.appendChild(detailBlock('Нормализованный результат', response));
+        target.appendChild(detailBlock('Сырой ответ AI', item.result.rawAiContent || ''));
+        target.appendChild(detailBlock('Техническая информация', {
+          model: item.result.model,
+          provider: item.result.provider,
+          requestId: item.result.requestId,
+          latencyMs: item.result.latencyMs,
+          usage: item.result.usage,
+          prompt: item.result.prompt,
+          attempts: item.attempts,
+          catalogResults: item.result.catalogResults || {}
+        }));
+      }
+      const evaluation = document.createElement('div');
+      evaluation.className = 'evaluation';
+      const select = document.createElement('select');
+      [['', 'Без оценки'], ['correct', 'Верно'], ['partial', 'Частично верно'], ['incorrect', 'Неверно']].forEach(([value, label]) => {
+        const option = document.createElement('option'); option.value = value; option.textContent = label; select.appendChild(option);
+      });
+      select.value = item.evaluation.verdict || '';
+      select.addEventListener('change', () => { item.evaluation.verdict = select.value; persist(); });
+      const comment = document.createElement('input');
+      comment.type = 'text'; comment.maxLength = Logic.LIMITS.maxEvaluationCommentLength; comment.placeholder = 'Комментарий к оценке'; comment.value = item.evaluation.comment || '';
+      comment.addEventListener('input', () => { item.evaluation.comment = comment.value.slice(0, Logic.LIMITS.maxEvaluationCommentLength); persistSoon(); });
+      evaluation.append(select, comment);
+      target.appendChild(evaluation);
+    }
+
+    function render() {
+      const summary = queue.getSummary();
+      el('processed-stat').textContent = `${summary.processed} из ${summary.total}`;
+      el('success-stat').textContent = String(summary.success);
+      el('error-stat').textContent = String(summary.errors);
+      el('remaining-stat').textContent = String(summary.remaining);
+      el('current-stat').textContent = summary.current ? String(summary.current) : '—';
+      el('countdown-stat').textContent = summary.countdownMs ? `${(summary.countdownMs / 1000).toFixed(1)} сек` : '—';
+      el('progress-bar').style.width = `${summary.total ? (summary.processed / summary.total) * 100 : 0}%`;
+      const busy = ['running', 'pausing', 'stopping'].includes(queue.state);
+      el('start-button').disabled = busy || !summary.remaining || promptDirty;
+      el('pause-button').disabled = queue.state !== 'running';
+      el('resume-button').disabled = !['paused', 'stopped'].includes(queue.state) || !summary.remaining || promptDirty;
+      el('stop-button').disabled = !busy;
+      el('retry-button').disabled = busy || !summary.errors || promptDirty;
+      el('reprocess-button').disabled = busy || !queue.items[state.selectedIndex] || promptDirty;
+      el('reset-results-button').disabled = busy || !queue.items.length;
+      el('export-button').disabled = !queue.items.length;
+      renderList();
+      renderDetail();
+    }
+
+    function loadDonations(parsed, fileName) {
+      if (!parsed.donations.length) throw new Error('Не найдено ни одного валидного доната.');
+      if (queue.items.length && !confirm('Заменить текущую очередь и её результаты?')) return;
+      state.items = Logic.createQueueItems(parsed.donations);
+      state.source = { fileName: fileName || '', mode: parsed.mode, totalDonations: parsed.donations.length };
+      state.selectedIndex = 0;
+      state.queueState = 'idle';
+      createQueue();
+      persist();
+      const modeText = parsed.mode === 'json' ? 'JSON' : 'обычный текст';
+      setMessage(el('import-message'), `Распознан ${modeText}: ${parsed.donations.length} ${parsed.donations.length === 1 ? 'донат' : 'донатов'}. Пропущено: ${parsed.skipped.length}.`, 'ok');
+      const skippedList = el('skipped-list'); skippedList.replaceChildren();
+      parsed.skipped.forEach(info => appendText(skippedList, 'li', `Элемент ${info.index + 1}: ${info.reason}`));
+      render();
+    }
+
+    async function loadFile(file) {
+      if (!file) return;
+      if (file.size > Logic.LIMITS.maxInputBytes) throw new Error(`Файл превышает ${Logic.LIMITS.maxInputBytes} байт.`);
+      loadDonations(Logic.parseDonationInput(await file.text()), file.name.slice(0, 180));
+    }
+
+    function updatePromptUi(prompt) {
+      state.prompt = { version: prompt.version, fingerprint: prompt.fingerprint, text: prompt.text };
+      el('prompt-input').value = prompt.text;
+      el('prompt-version').textContent = `Версия: ${prompt.version}`;
+      el('prompt-fingerprint').textContent = `Fingerprint: ${prompt.fingerprint}`;
+      el('prompt-length').textContent = `${prompt.characterCount} символов`;
+      promptDirty = false;
+      persist();
+      render();
+    }
+
+    function confirmRequests(count) {
+      return count > 0 && confirm(`Будет отправлено ${count} отдельных запросов OpenRouter.\nЗапросы расходуют реальные токены и баланс.\nПри rate limit возможны ограниченные последовательные повторы.`);
+    }
+
+    async function startPending() {
+      if (promptDirty) { setMessage(el('queue-message'), 'Сначала сохраните изменённый промпт.', 'error'); return; }
+      state.model = el('model-input').value.trim();
+      state.delaySeconds = Math.max(.5, Math.min(60, Number(el('delay-input').value) || 2));
+      queue.setDelay(state.delaySeconds * 1000);
+      const count = queue.pendingIndices().length;
+      if (!confirmRequests(count)) return;
+      setMessage(el('queue-message'), `Запущено: ${count} последовательных запросов.`, '');
+      await queue.start();
+    }
+
+    function exportResults() {
+      const payload = Logic.buildExport({ ...state, items: queue.items });
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const link = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+      link.download = `ai-tester-results-${stamp}.json`;
+      link.href = URL.createObjectURL(blob);
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    }
+
+    async function initialize() {
+      restore();
+      el('model-input').value = state.model;
+      el('delay-input').value = String(state.delaySeconds);
+      createQueue();
+      render();
+      try {
+        const status = await api('/api/status');
+        el('server-status').textContent = status.openrouterConfigured ? 'OpenRouter настроен' : 'OpenRouter key не настроен';
+        el('server-status').className = `tag ${status.openrouterConfigured ? 'ok' : 'error'}`;
+        updatePromptUi(status.prompt);
+      } catch (error) {
+        el('server-status').textContent = 'Сервер тестера недоступен';
+        el('server-status').className = 'tag error';
+        setMessage(el('queue-message'), error.message, 'error');
+      }
+    }
+
+    el('file-input').addEventListener('change', async event => {
+      try { await loadFile(event.target.files[0]); } catch (error) { setMessage(el('import-message'), error.message, 'error'); }
+      event.target.value = '';
+    });
+    el('parse-paste').addEventListener('click', () => {
+      try { loadDonations(Logic.parseDonationInput(el('paste-input').value), ''); }
+      catch (error) { setMessage(el('import-message'), error.message, 'error'); }
+    });
+    el('prompt-input').addEventListener('input', () => {
+      promptDirty = el('prompt-input').value !== state.prompt.text;
+      el('prompt-length').textContent = `${el('prompt-input').value.length} символов${promptDirty ? ' · не сохранено' : ''}`;
+      render();
+    });
+    el('save-prompt').addEventListener('click', async () => {
+      try { const result = await api('/api/prompt/save', { method: 'POST', body: { text: el('prompt-input').value } }); updatePromptUi(result.prompt); setMessage(el('prompt-message'), 'Промпт сохранён отдельно от production-настроек.', 'ok'); }
+      catch (error) { setMessage(el('prompt-message'), error.message, 'error'); }
+    });
+    el('reset-prompt').addEventListener('click', async () => {
+      if (!confirm('Сбросить экспериментальный промпт к исходному?')) return;
+      try { const result = await api('/api/prompt/reset', { method: 'POST', body: {} }); updatePromptUi(result.prompt); setMessage(el('prompt-message'), 'Исходный промпт восстановлен.', 'ok'); }
+      catch (error) { setMessage(el('prompt-message'), error.message, 'error'); }
+    });
+    el('start-button').addEventListener('click', startPending);
+    el('pause-button').addEventListener('click', () => queue.pause());
+    el('resume-button').addEventListener('click', async () => { if (confirmRequests(queue.pendingIndices().length)) await queue.resume(); });
+    el('stop-button').addEventListener('click', () => queue.stop());
+    el('retry-button').addEventListener('click', async () => { const count = queue.items.filter(item => item.status === 'error').length; if (confirmRequests(count)) await queue.retryErrors(); });
+    el('reprocess-button').addEventListener('click', async () => { if (confirmRequests(1)) await queue.reprocess(state.selectedIndex); });
+    el('reset-results-button').addEventListener('click', () => {
+      if (!confirm('Удалить все результаты и оценки, сохранив загруженные донаты?')) return;
+      state.items = Logic.createQueueItems(queue.items.map(item => item.donation)); state.queueState = 'idle'; createQueue(); persist(); render();
+    });
+    el('export-button').addEventListener('click', exportResults);
+    window.addEventListener('beforeunload', persist);
+    initialize();
+  </script>
+</body>
+</html>

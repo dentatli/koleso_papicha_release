@@ -26,7 +26,8 @@ function loadHelpers(entries) {
       areAiLotCategoriesCompatible,
       getCurrentEntryFingerprint,
       doesEntryMatchAiFingerprint,
-      findExistingEntryForAiCandidate
+      findExistingEntryForAiCandidate,
+      doesAiManualSuggestionDuplicateCandidate
     };
   `)(entries);
 }
@@ -38,7 +39,7 @@ function assert(condition, message) {
 const identityStart = source.indexOf('    function limitAiServerText');
 const identityEnd = source.indexOf('    function removeDonationAiJob', identityStart);
 if (identityStart < 0 || identityEnd < 0) throw new Error('AI identity helper block not found');
-function loadAiIdentityHelpers(pipelineVersion = 6) {
+function loadAiIdentityHelpers(pipelineVersion = 8) {
   return new Function('LLM_PIPELINE_VERSION', 'getEntriesForAiPayload', `${source.slice(identityStart, identityEnd)}; return {
     limitAiServerText,
     getActiveEntriesForAiIdentity,
@@ -46,7 +47,7 @@ function loadAiIdentityHelpers(pipelineVersion = 6) {
     getDonationAnalysisKey
   };`)(pipelineVersion, () => []);
 }
-const identityHelpers = loadAiIdentityHelpers(6);
+const identityHelpers = loadAiIdentityHelpers(8);
 const identityDonation = {
   source: 'donatepay',
   externalId: 'identity-1',
@@ -62,8 +63,8 @@ const identityEntries = [{
   eliminated: false
 }];
 const identityKey = identityHelpers.getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries });
-assert(identityKey.startsWith('v6:donatepay:identity-1:'), 'Frontend analysis key does not include pipeline version');
-assert(identityKey === 'v6:donatepay:identity-1:b0e109f9', 'Frontend analysisKey no longer matches the server UTF-16 fingerprint contract');
+assert(identityKey.startsWith('v8:donatepay:identity-1:'), 'Frontend analysis key does not include pipeline version');
+assert(identityKey === 'v8:donatepay:identity-1:78d83657', 'Frontend analysisKey no longer matches the server UTF-16 fingerprint contract');
 assert(
   identityHelpers.getDonationAnalysisKey({ ...identityDonation, message: 'на другую игру' }, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
   'Frontend analysis key ignores donation message changes'
@@ -73,16 +74,28 @@ assert(
   'Frontend analysis key ignores active entry changes'
 );
 assert(
-  loadAiIdentityHelpers(7).getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
+  loadAiIdentityHelpers(9).getDonationAnalysisKey(identityDonation, { preferTracked: false, entriesPayload: identityEntries }) !== identityKey,
   'Frontend analysis key ignores pipeline version changes'
 );
 
 const skipStart = source.indexOf('    function shouldSkipDonationAi');
 const skipEnd = source.indexOf('    function getEntriesForAiPayload', skipStart);
 if (skipStart < 0 || skipEnd < 0) throw new Error('AI skip helper not found');
-const { shouldSkipDonationAi } = new Function('LLM_PIPELINE_VERSION', `${source.slice(skipStart, skipEnd)}; return { shouldSkipDonationAi };`)(6);
+const { shouldSkipDonationAi } = new Function('LLM_PIPELINE_VERSION', `${source.slice(skipStart, skipEnd)}; return { shouldSkipDonationAi };`)(8);
 assert(!shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 3, status: 'done' } }), 'Legacy AI result was reused after pipeline upgrade');
-assert(shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 6, status: 'done' } }), 'Current completed AI result was needlessly resubmitted');
+assert(shouldSkipDonationAi({ status: 'pending', llm: { pipelineVersion: 8, status: 'done' } }), 'Current completed AI result was needlessly resubmitted');
+
+const settingsStart = source.indexOf('    function createDefaultLlmSettings');
+const settingsEnd = source.indexOf('    // Cryptographically-strong randomness helpers', settingsStart);
+if (settingsStart < 0 || settingsEnd < 0) throw new Error('LLM settings normalization block not found');
+const settingsHelpers = new Function(
+  'DEFAULT_LLM_MODEL',
+  'LEGACY_DEFAULT_LLM_MODELS',
+  `${source.slice(settingsStart, settingsEnd)}; return { createDefaultLlmSettings, normalizeStoredLlmSettings };`
+)('google/gemini-3-flash-preview', new Set(['google/gemini-2.5-flash-lite']));
+assert(settingsHelpers.createDefaultLlmSettings().model === 'google/gemini-3-flash-preview', 'New installations do not use Gemini 3 Flash Preview.');
+assert(settingsHelpers.normalizeStoredLlmSettings({ model: 'google/gemini-2.5-flash-lite' }).model === 'google/gemini-3-flash-preview', 'Legacy default model is not migrated.');
+assert(settingsHelpers.normalizeStoredLlmSettings({ model: 'custom/provider-model' }).model === 'custom/provider-model', 'A user-selected custom model was overwritten.');
 
 const mojibakeStart = source.indexOf('    function isLikelyMojibakeText');
 const mojibakeEnd = source.indexOf('    function getSafeExternalUrl', mojibakeStart);
@@ -108,15 +121,18 @@ const authDaState = getDonationAlertsServerDisplayState({ status: 'auth_error' }
 assert(authDaState.label.includes('переподключение'), 'DonationAlerts auth failure does not request reconnection');
 
 assert(source.includes('pipelineVersion: LLM_PIPELINE_VERSION,\n          auctionGeneration:'), 'AI job request does not send pipelineVersion');
-assert(source.includes('const LLM_PIPELINE_VERSION = 6;'), 'Frontend pipeline version was not advanced for displayTitle/manual suggestions.');
+assert(source.includes('const LLM_PIPELINE_VERSION = 8;'), 'Frontend pipeline version was not advanced for prompt/model semantics.');
+assert(source.includes("const DEFAULT_LLM_MODEL = 'google/gemini-3-flash-preview';"), 'Frontend default model is not Gemini 3 Flash Preview.');
 assert(source.includes("title.appendChild(document.createTextNode('AI выбрал существующий лот: '))"), 'Existing-entry AI result has no clear Russian UI state');
 assert(!source.includes('AI понял: Неизвестно · unknown'), 'Raw unknown enum is still shown to users');
 assert(source.includes("'LLM_RESPONSE_CONTENT_MISSING'"), 'Missing OpenRouter content has no safe UI state');
 assert(source.includes("'LLM_RESPONSE_REFUSAL'"), 'OpenRouter refusal has no safe UI state');
+assert(source.includes('result.items.length > 0 && !normalized.items.length'), 'A valid empty no-target result is rejected by the frontend.');
 const aiBlockStart = source.indexOf('    function createDonationAiBlock');
 const aiBlockEnd = source.indexOf('    function formatDonationMoney', aiBlockStart);
 const aiBlockSource = source.slice(aiBlockStart, aiBlockEnd);
 assert(aiBlockSource.includes('reason.textContent = getSafeAiDisplayText'), 'AI reason bypasses safe text rendering');
+assert(aiBlockSource.includes("AI не нашёл явного предложения лота"), 'No-target result has no clear frontend state.');
 assert(!aiBlockSource.includes('.innerHTML'), 'AI result UI inserts model output as HTML');
 const aiItemsStart = source.indexOf('    function appendAiCategoryMismatchWarning');
 const aiItemsSource = source.slice(aiItemsStart, aiBlockEnd);
@@ -127,6 +143,7 @@ assert(aiItemsSource.includes('Категория лота:'), 'Cross-category A
 assert(aiItemsSource.includes('llm.items.forEach'), 'Multi-item AI result is not rendered item-by-item');
 assert(aiItemsSource.includes('item.displayTitle || item.officialTitleGuess'), 'AI card does not prioritize displayTitle.');
 assert(aiItemsSource.includes('createEntryFromAiManualSuggestionAndAssign'), 'Manual AI suggestion has no create-and-add action.');
+assert(aiItemsSource.includes('!doesAiManualSuggestionDuplicateCandidate(item)'), 'Manual suggestion duplicates a confirmed catalog create button.');
 for (const text of ['Не подтверждено каталогом', 'временно недоступен', 'отключён', 'внешний каталог не используется']) {
   assert(aiItemsSource.includes(text), `AI UI is missing catalog state: ${text}`);
 }
@@ -172,6 +189,12 @@ assert(multiItemState.items.length === 2, 'Multi-item AI result was collapsed to
 assert(multiItemState.items[0].candidates[0].title === 'Digger Online', 'Confirmed Steam candidate metadata was lost in frontend normalization');
 assert(multiItemState.items[0].displayTitle === 'Digger Online', 'Digger Online display title regressed to a translated/transliterated title.');
 assert(multiItemState.items[0].manualSuggestion?.title === 'Digger Online', 'Digger Online lost its independent manual suggestion.');
+const duplicateHelpers = loadHelpers([]);
+assert(duplicateHelpers.doesAiManualSuggestionDuplicateCandidate(multiItemState.items[0]), 'Identical catalog and manual Digger actions were not detected as duplicates.');
+assert(!duplicateHelpers.doesAiManualSuggestionDuplicateCandidate({
+  candidates: [{ title: 'Alyosha Popovich and the Magic Horse', titleConfirmed: true }],
+  manualSuggestion: { title: 'Алёша Попович и Тугарин Змей' }
+}), 'A distinct canonical Russian manual title was hidden by an English catalog alias.');
 for (const catalogStatus of ['not_found', 'unavailable', 'disabled', 'not_applicable']) {
   const state = normalizeDonationLlmState({
     action: 'ask_manual',

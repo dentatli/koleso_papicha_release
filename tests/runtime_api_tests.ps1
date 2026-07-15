@@ -87,7 +87,9 @@ try {
 
     $Bootstrap = Invoke-JsonPost '/api/app/bootstrap' @{ collector = $null } $Headers
     $Generation = [long]$Bootstrap.collector.llm.auctionGeneration
+    $PipelineVersion = [int]$Bootstrap.collector.llm.pipelineVersion
     Assert-True ($Bootstrap.ok -and $Generation -ge 1) 'Bootstrap did not expose a valid auction generation.'
+    Assert-True ($PipelineVersion -ge 1) 'Bootstrap did not expose the current AI pipeline version.'
     Assert-True (-not $Bootstrap.integrations.openrouter.configured) 'Isolated runtime unexpectedly reused OpenRouter secrets.'
 
     $Paused = Invoke-JsonPost '/api/collector/pause' @{} $Headers
@@ -101,7 +103,7 @@ try {
     $StaleBody = $null
     try {
         [void](Invoke-JsonPost '/api/llm/jobs' @{
-            pipelineVersion = 6
+            pipelineVersion = $PipelineVersion
             auctionGeneration = $Generation + 1
             donation = @{ id = 'runtime-stale'; source = 'manual_test'; externalId = 'runtime-stale'; amount = 1; currency = 'RUB'; message = 'test' }
             entries = @()
@@ -125,7 +127,7 @@ try {
     $OldStatus = 0
     try {
         [void](Invoke-JsonPost '/api/llm/jobs' @{
-            pipelineVersion = 6
+            pipelineVersion = $PipelineVersion
             auctionGeneration = $Generation
             donation = @{ id = 'runtime-old'; source = 'manual_test'; externalId = 'runtime-old'; amount = 1; currency = 'RUB'; message = 'test' }
             entries = @()

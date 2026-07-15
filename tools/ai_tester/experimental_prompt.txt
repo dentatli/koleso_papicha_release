@@ -1,0 +1,104 @@
+Prompt version: auction-precision-v6
+
+Analyze exactly one donation for a local auction. Return only strict schema-valid JSON, without markdown or text outside JSON. Extract auction targets, not every mentioned work.
+
+Decide separately for every mentioned work, in this order.
+
+1. EXCLUSION GATE
+
+Exclude a work mentioned only in:
+- a question about it, review, comparison or recommendation;
+- plot, characters, places or thematic description;
+- gameplay instructions, current gameplay or past experience;
+- a request to check its trailer, page or gameplay;
+- advertising, jokes or examples of channel content;
+- a hypothetical or existing-auction outcome such as “if X wins”.
+
+A question is a target only when it asks which concrete work should receive the donation or be selected for the auction.
+
+Never infer a work from plot details, characters, fictional companies or places.
+
+Exclusions override standalone-title detection. A separate direct allocation cue still wins for the title governed by that cue.
+
+If the reason would say “no auction cue”, “merely mentioned”, “suggested to check” or similar, DO NOT return that item.
+
+2. TARGET GATE
+
+Include a concrete work only when at least one condition applies:
+
+A. A direct allocation cue governs it:
+“на TITLE”, “донат/доначу на”, “кинь/кидаю/докинь/добавь/закинь”, “в аук/лот”, “пикаю/выбираю TITLE”.
+
+B. It is an explicit alternative in an auction or stream-content choice:
+“TITLE_A или TITLE_B”, “хочу TITLE_A, но можно TITLE_B”, “если нельзя TITLE_A — TITLE_B”, “реши сам”.
+Return every concrete alternative, including discouraged or unlikely ones.
+
+C. It is a standalone nomination: the whole message, or an isolated beginning/end of the message, is a recognizable concrete title and the surrounding text does not discuss, review or describe that same work.
+
+A new direct allocation cue starts a new target.
+
+3. EXTRACTION AND NORMALIZATION
+
+Return one item per distinct canonical work, in mention order, maximum five.
+
+Merge repeated mentions and aliases of the same work into one item. Never combine different works.
+
+mentionedTitle:
+- must be the smallest useful verbatim contiguous substring of donation.message;
+- must contain actual title words;
+- must not be only “первый”, “второй”, a pronoun, category or preposition.
+
+displayTitle:
+- use the canonical, correctly spelled title;
+- preserve meaningful numbers, year, season, episode, chapter, edition and subtitle;
+- never infer a sequel from an ordinal alone;
+- Russian-origin works stay in Russian Cyrillic with correct capitalization and “ё”;
+- foreign games use the official Steam/product title;
+- other foreign media use the standard official international product title;
+- avoid literal translations and scholarly romanization when a widely used international title exists.
+
+category must be one of:
+game, anime, movie, tv_show, cartoon, other, unknown.
+
+searchQueries:
+- prefer one canonical query;
+- add a second only for a materially different alias or language;
+- queries must be unique ignoring case and refer only to this item.
+
+confidence covers both auction intent and title identification.
+reason must be brief, Russian and consistent with inclusion.
+
+Never return generic words such as “игра”, “аниме”, “сериал”, “фильм”, “мем”, “хоррор” or “смерть”.
+
+Known aliases, not an exhaustive list:
+- “копатель онлайн” = Digger Online;
+- “булли” = Bully;
+- “коратель/каратель” = The Punisher, game;
+- METEL = Metel - Horror Escape;
+- “край оф фир” = Cry of Fear;
+- “фнафыч 4” = Five Nights at Freddy's 4;
+- “добрыню STORY” = “Добрыня Никитич и Змей Горыныч”, game;
+- “деус секс мд” = Deus Ex: Mankind Divided;
+- “готика ремейк” = Gothic 1 Remake;
+- “цифровой цирк” = The Amazing Digital Circus, cartoon;
+- “The Coffin of Andy and Laylay” = The Coffin of Andy and Leyley, game;
+- AMAZING ONLINE stays AMAZING ONLINE.
+
+Examples:
+- “Кидаю на A. Слышал про B? Чекни трейлер” => A only.
+- “Как тебе A и B? Донат на C” => C only.
+- “Если A выиграет, будешь играть?” => items=[].
+- “Хочу A, но можно B, реши сам” => A and B.
+- A title followed by its plot description, without allocation or nomination => items=[].
+
+Before output silently verify:
+- every item passed the target gate;
+- no exclusion-only mention was included;
+- every direct-cue target and every auction-choice alternative is present;
+- duplicates and aliases are merged;
+- mentionedTitle occurs verbatim in donation.message;
+- installments, seasons, chapters and years were preserved;
+- no title was inferred only from plot context;
+- searchQueries are case-insensitively unique.
+
+Never return lot IDs, external IDs, URLs, catalog availability claims or donation-crediting instructions.
