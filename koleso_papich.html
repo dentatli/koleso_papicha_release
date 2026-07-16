@@ -4024,6 +4024,8 @@
     }
 
     const defaultCenter = "https://cdn.7tv.app/emote/01FB55W7X0000EAYZC08B47GPW/4x.webp";
+    const DEFAULT_LLM_MODEL = 'google/gemini-3-flash-preview';
+    const LEGACY_DEFAULT_LLM_MODELS = new Set(['google/gemini-2.5-flash-lite']);
     
     let entries = [];
     let hideEliminated = false;
@@ -4091,8 +4093,6 @@
     const SERVER_COLLECTOR_POLL_INTERVAL_MS = 10000;
     const AI_ANALYSIS_ALLOWED_CATEGORIES = ['game', 'anime', 'movie', 'tv_show', 'cartoon', 'other', 'unknown'];
     const LLM_PIPELINE_VERSION = 8;
-    const DEFAULT_LLM_MODEL = 'google/gemini-3-flash-preview';
-    const LEGACY_DEFAULT_LLM_MODELS = new Set(['google/gemini-2.5-flash-lite']);
     const MAX_LOT_NAME_LENGTH = 200;
     const MAX_DONATION_MESSAGE_LENGTH = 1000;
     let llmJobsRevision = 0;
@@ -7371,6 +7371,48 @@
       }
     }
 
+    function getAiAutoCreateOption(llm, confidenceThreshold) {
+      if (!llm || typeof llm !== 'object') return null;
+      const numericThreshold = Number(confidenceThreshold);
+      if (!Number.isFinite(numericThreshold)) return null;
+      const threshold = Math.max(0, Math.min(1, numericThreshold));
+
+      if (llm.action === 'create_lot_candidate') {
+        const candidate = llm.candidate;
+        if (
+          !candidate
+          || candidate.titleConfirmed === false
+          || candidate.categoryMismatch
+          || !getSafeExternalUrl(candidate.sourceUrl)
+          || Number(llm.finalConfidence || 0) < threshold
+          || findExistingEntryForAiCandidate(candidate, llm.category)
+          || (llm.candidates.length > 1 && Number(llm.selectionConfidence || 0) <= 0)
+        ) return null;
+        return { candidate, item: null, finalConfidence: Number(llm.finalConfidence || 0) };
+      }
+
+      if (llm.action !== 'ask_manual' || llm.items.length !== 1) return null;
+      const item = llm.items[0];
+      if (!item || item.catalogStatus !== 'ok' || !['game', 'anime'].includes(item.category)) return null;
+
+      const eligible = item.candidates.filter((candidate) => {
+        if (!candidate) return false;
+        const finalConfidence = Math.min(Number(item.intentConfidence || 0), Number(candidate.score || 0));
+        return finalConfidence >= threshold;
+      });
+      if (eligible.length !== 1) return null;
+
+      const candidate = eligible[0];
+      if (
+        candidate.titleConfirmed === false
+        || candidate.categoryMismatch
+        || !getSafeExternalUrl(candidate.sourceUrl)
+        || findExistingEntryForAiCandidate(candidate, item.category)
+      ) return null;
+      const finalConfidence = Math.min(Number(item.intentConfidence || 0), Number(candidate.score || 0));
+      return { candidate, item, finalConfidence };
+    }
+
     function canAutoApplyAiSuggestion(donation) {
       const llm = donation?.llm;
       if (!llm || llm.status !== 'done' || !canCreditDonationAmount(donation)) return false;
@@ -7385,13 +7427,10 @@
           && doesEntryMatchAiFingerprint(entry, llm.entryFingerprint, { auto: true })
           && !isDonationKnownOutsidePending(donation);
       }
-      if (llm.action === 'create_lot_candidate') {
-        return llm.items.length === 0
-          && llmSettings.autoCreateLots
-          && llm.finalConfidence >= llmSettings.confidenceCreateThreshold
-          && validateAiSuggestion(llm, donation)
-          && !findExistingEntryForAiCandidate(llm.candidate, llm.category)
-          && (llm.candidates.length <= 1 || llm.selectionConfidence > 0);
+      if (['create_lot_candidate', 'ask_manual'].includes(llm.action)) {
+        return llmSettings.autoCreateLots
+          && !!getAiAutoCreateOption(llm, llmSettings.confidenceCreateThreshold)
+          && (llm.action !== 'create_lot_candidate' || validateAiSuggestion(llm, donation));
       }
       return false;
     }
@@ -7804,6 +7843,11 @@
       }
       if (donation.llm.action === 'create_lot_candidate') {
         return createEntryFromAiCandidateAndAssign(donationId, donation.llm.candidate);
+      }
+      if (auto && donation.llm.action === 'ask_manual') {
+        const option = getAiAutoCreateOption(donation.llm, llmSettings.confidenceCreateThreshold);
+        if (!option) return false;
+        return createEntryFromAiCandidateAndAssign(donationId, option.candidate, option.item);
       }
       return false;
     }

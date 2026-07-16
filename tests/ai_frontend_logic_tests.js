@@ -123,6 +123,9 @@ assert(authDaState.label.includes('переподключение'), 'DonationAl
 assert(source.includes('pipelineVersion: LLM_PIPELINE_VERSION,\n          auctionGeneration:'), 'AI job request does not send pipelineVersion');
 assert(source.includes('const LLM_PIPELINE_VERSION = 8;'), 'Frontend pipeline version was not advanced for prompt/model semantics.');
 assert(source.includes("const DEFAULT_LLM_MODEL = 'google/gemini-3-flash-preview';"), 'Frontend default model is not Gemini 3 Flash Preview.');
+const defaultModelDeclarationIndex = source.indexOf("const DEFAULT_LLM_MODEL = 'google/gemini-3-flash-preview';");
+const initialLlmSettingsIndex = source.indexOf('let llmSettings = createDefaultLlmSettings();');
+assert(defaultModelDeclarationIndex >= 0 && defaultModelDeclarationIndex < initialLlmSettingsIndex, 'Default LLM model is initialized after its first runtime use.');
 assert(source.includes("title.appendChild(document.createTextNode('AI выбрал существующий лот: '))"), 'Existing-entry AI result has no clear Russian UI state');
 assert(!source.includes('AI понял: Неизвестно · unknown'), 'Raw unknown enum is still shown to users');
 assert(source.includes("'LLM_RESPONSE_CONTENT_MISSING'"), 'Missing OpenRouter content has no safe UI state');
@@ -372,10 +375,74 @@ const autoAssignStart = source.indexOf('    function canAutoApplyAiSuggestion');
 const autoAssignEnd = source.indexOf('    function normalizeAiComparableText', autoAssignStart);
 const autoAssignSource = source.slice(autoAssignStart, autoAssignEnd);
 assert(autoAssignSource.includes('isSafeAiExistingMatchEvidence(llm)'), 'Auto-assign bypasses safe semantic match evidence');
+
+const autoCreateStart = source.indexOf('    function getAiAutoCreateOption');
+const autoCreateEnd = source.indexOf('    function canAutoApplyAiSuggestion', autoCreateStart);
+if (autoCreateStart < 0 || autoCreateEnd < 0) throw new Error('AI auto-create helper not found');
+const { getAiAutoCreateOption } = new Function(
+  'getSafeExternalUrl',
+  'findExistingEntryForAiCandidate',
+  `${source.slice(autoCreateStart, autoCreateEnd)}; return { getAiAutoCreateOption };`
+)(
+  value => /^https:\/\//.test(String(value || '')) ? String(value) : '',
+  candidate => candidate?.matchesExisting ? { id: 'existing' } : null
+);
+const safeAutoCreateItem = {
+  category: 'game',
+  catalogStatus: 'ok',
+  intentConfidence: 1,
+  candidates: [{
+    source: 'steam', externalId: '2378900', title: 'The Coffin of Andy and Leyley',
+    sourceUrl: 'https://store.steampowered.com/app/2378900', titleConfirmed: true,
+    categoryMismatch: false, score: 1
+  }]
+};
+const safeAutoCreateResult = {
+  action: 'ask_manual',
+  items: [safeAutoCreateItem]
+};
+const safeAutoCreateOption = getAiAutoCreateOption(safeAutoCreateResult, 0.92);
+assert(safeAutoCreateOption?.candidate?.externalId === '2378900', 'One confirmed high-confidence catalog candidate cannot auto-create.');
+assert(safeAutoCreateOption.finalConfidence === 1, 'Auto-create confidence does not combine intent and catalog confidence.');
+assert(!getAiAutoCreateOption({ ...safeAutoCreateResult, items: [{ ...safeAutoCreateItem, intentConfidence: 0.9 }] }, 0.92), 'Low intent confidence can auto-create a lot.');
+assert(!getAiAutoCreateOption({ ...safeAutoCreateResult, items: [{ ...safeAutoCreateItem, candidates: [{ ...safeAutoCreateItem.candidates[0], score: 0.9 }] }] }, 0.92), 'Low catalog confidence can auto-create a lot.');
+assert(!getAiAutoCreateOption({ ...safeAutoCreateResult, items: [safeAutoCreateItem, { ...safeAutoCreateItem }] }, 0.92), 'A multi-work donation can auto-create a lot.');
+assert(!getAiAutoCreateOption({
+  ...safeAutoCreateResult,
+  items: [{ ...safeAutoCreateItem, candidates: [safeAutoCreateItem.candidates[0], { ...safeAutoCreateItem.candidates[0], externalId: 'other' }] }]
+}, 0.92), 'Two high-confidence catalog candidates can auto-create a lot.');
+for (const unsafeCandidate of [
+  { titleConfirmed: false },
+  { categoryMismatch: true },
+  { sourceUrl: 'javascript:alert(1)' },
+  { matchesExisting: true }
+]) {
+  assert(!getAiAutoCreateOption({
+    ...safeAutoCreateResult,
+    items: [{ ...safeAutoCreateItem, candidates: [{ ...safeAutoCreateItem.candidates[0], ...unsafeCandidate }] }]
+  }, 0.92), `Unsafe catalog candidate can auto-create: ${JSON.stringify(unsafeCandidate)}`);
+}
+assert(!getAiAutoCreateOption(safeAutoCreateResult, Number.NaN), 'Invalid auto-create threshold became permissive.');
+assert(getAiAutoCreateOption({
+  action: 'create_lot_candidate',
+  category: 'game',
+  finalConfidence: 0.95,
+  selectionConfidence: 0,
+  candidate: safeAutoCreateItem.candidates[0],
+  candidates: [],
+  items: [safeAutoCreateItem]
+}, 0.92), 'Legacy single-candidate result can no longer auto-create after normalization.');
+assert(autoAssignSource.includes("['create_lot_candidate', 'ask_manual'].includes(llm.action)"), 'New items[] results are excluded from auto-create dispatch.');
+assert(!autoAssignSource.includes('llm.items.length === 0'), 'Auto-create still requires an impossible empty normalized items list.');
 const applyAssignStart = source.indexOf('    async function applyAiAssignSuggestion');
 const applyAssignEnd = source.indexOf('    async function applyAiSuggestion', applyAssignStart);
 const applyAssignSource = source.slice(applyAssignStart, applyAssignEnd);
 assert(applyAssignSource.includes('(auto && !isSafeAiExistingMatchEvidence(donation.llm))'), 'Automatic apply bypasses semantic evidence defense-in-depth');
+const applySuggestionStart = source.indexOf('    async function applyAiSuggestion');
+const applySuggestionEnd = source.indexOf('    function rejectAiSuggestion', applySuggestionStart);
+const applySuggestionSource = source.slice(applySuggestionStart, applySuggestionEnd);
+assert(applySuggestionSource.includes("auto && donation.llm.action === 'ask_manual'"), 'Safe items[] auto-create result is not applied.');
+assert(applySuggestionSource.includes('createEntryFromAiCandidateAndAssign(donationId, option.candidate, option.item)'), 'items[] auto-create loses its selected candidate or category.');
 
 const viewModeStart = source.indexOf('    function hasDonationAlertsOAuthAccessToken');
 const viewModeEnd = source.indexOf('    function buildViewUrl', viewModeStart);
