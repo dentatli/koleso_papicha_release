@@ -2,12 +2,16 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const htmlPath = path.join(__dirname, '..', 'koleso_papich.html');
 // GitHub Actions checks out the repository on Windows, where text files may use
 // CRLF. Normalize only the test fixture so source-contract assertions behave
 // identically on Windows and Linux.
 const source = fs.readFileSync(htmlPath, 'utf8').replace(/\r\n?/g, '\n');
+const centrifugeSource = fs.readFileSync(path.join(__dirname, '..', 'centrifuge.min.js'), 'utf8').replace(/\r\n?/g, '\n');
+const centrifugeHash = crypto.createHash('sha256').update(centrifugeSource, 'utf8').digest('hex');
+const thirdPartyNotices = fs.readFileSync(path.join(__dirname, '..', 'assets', 'THIRD_PARTY_NOTICES.md'), 'utf8');
 const inlineScripts = [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
   .map(match => match[1])
   .filter(script => script.trim());
@@ -35,6 +39,17 @@ function loadHelpers(entries) {
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+assert(centrifugeHash === 'c99b88dd95dc8d5e0a8d654ef650d5040efd87cbcfa22eba724f3bfdaef8961a', 'Vendored Centrifuge source no longer matches the documented upstream build');
+assert(thirdPartyNotices.includes('centrifuge@2.8.5') && thirdPartyNotices.includes(centrifugeHash), 'Centrifuge version or integrity metadata is missing');
+
+assert(source.includes('id="show-added-order"') && source.includes('<span>Показать номер добавления</span>'), 'Added-order checkbox is not phrased as an opt-in');
+assert(!source.includes('id="hide-added-order"') && !source.includes('<span>Скрыть номер добавления</span>'), 'Legacy hide-added-order control is still present');
+assert(source.includes('let hideAddedOrder = true;'), 'Added-order numbers are not hidden by default');
+assert(source.includes("document.getElementById('show-added-order').checked = !hideAddedOrder;"), 'Added-order checkbox does not reflect positive show semantics');
+assert(source.includes('hideAddedOrder = !e.target.checked;'), 'Added-order checkbox does not invert the stored hide flag');
+assert(source.includes("title: 'Порядок в текущем списке'") && source.includes('text: displayIdx + 1'), 'Current list position number was removed');
+assert(source.includes("title: 'Порядок добавления'") && source.includes('text: `#${addedOrder}`'), 'Opt-in added-order number is missing');
 
 const identityStart = source.indexOf('    function limitAiServerText');
 const identityEnd = source.indexOf('    function removeDonationAiJob', identityStart);
@@ -281,8 +296,9 @@ function createManualActionHarness({ initialEntries = [], assignSucceeds = true 
      const donationsAdded = [];
      const aiDonationActionLocks = new Set();
      let assignmentCount = 0;
-     function canMutateAuctionState() { return true; }
-     function canCreditDonationAmount(value) { return Number(value?.amount) > 0; }
+      function canMutateAuctionState() { return true; }
+      function canCreateAuctionEntry() { return entries.length < 2000; }
+      function canCreditDonationAmount(value) { return Number(value?.amount) > 0; }
      function getPendingDonationById(id) { return donationsPending.find(item => item.id === id && item.status === 'pending') || null; }
      function isDonationKnownOutsidePending(value) { return donationsAdded.some(item => item.externalId === value.externalId); }
      function tryClaimAiDonationAction(id) { if (aiDonationActionLocks.has(id)) return false; aiDonationActionLocks.add(id); return true; }
@@ -458,6 +474,50 @@ assert(oauthViewHelpers.hasDonationAlertsOAuthAccessToken(), 'DonationAlerts OAu
 assert(oauthViewHelpers.getAppViewMode() === 'admin', 'DonationAlerts OAuth callback did not force admin mode before leader election');
 assert(loadViewModeHelpers({ hash: '', search: '' }).getAppViewMode() === 'wheel', 'Default non-OAuth view mode changed unexpectedly');
 
+const oauthStateStart = source.indexOf('    function createDonationAlertsOAuthState');
+const oauthStateEnd = source.indexOf('    function startDonationAlertsImplicitOAuth', oauthStateStart);
+if (oauthStateStart < 0 || oauthStateEnd < 0) throw new Error('DonationAlerts OAuth state helpers not found');
+const oauthSessionValues = new Map();
+const oauthStateHelpers = new Function(
+  'crypto',
+  'sessionStorage',
+  'DONATIONALERTS_OAUTH_STATE_KEY',
+  'DONATIONALERTS_OAUTH_STATE_MAX_AGE_MS',
+  'DONATIONALERTS_REDIRECT_URL',
+  'DONATIONALERTS_SCOPES',
+  `${source.slice(oauthStateStart, oauthStateEnd)}; return {
+    createDonationAlertsOAuthState,
+    consumeDonationAlertsOAuthState,
+    buildDonationAlertsImplicitOAuthUrl
+  };`
+)(
+  { getRandomValues: bytes => { bytes.forEach((_, index) => { bytes[index] = index; }); return bytes; } },
+  {
+    getItem: key => oauthSessionValues.get(key) ?? null,
+    setItem: (key, value) => oauthSessionValues.set(key, value),
+    removeItem: key => oauthSessionValues.delete(key)
+  },
+  'oauth-state-test',
+  10 * 60 * 1000,
+  'http://127.0.0.1:5500/koleso_papich.html',
+  'oauth-user-show oauth-donation-index'
+);
+const oauthState = oauthStateHelpers.createDonationAlertsOAuthState();
+assert(oauthState.length === 64, 'DonationAlerts OAuth state is not a 256-bit random value');
+assert(oauthStateHelpers.consumeDonationAlertsOAuthState(oauthState), 'Matching DonationAlerts OAuth state was rejected');
+assert(!oauthStateHelpers.consumeDonationAlertsOAuthState(oauthState), 'DonationAlerts OAuth state can be reused');
+const mismatchedState = oauthStateHelpers.createDonationAlertsOAuthState();
+assert(!oauthStateHelpers.consumeDonationAlertsOAuthState(`${mismatchedState}-wrong`), 'Mismatched DonationAlerts OAuth state was accepted');
+oauthSessionValues.set('oauth-state-test', JSON.stringify({ value: 'expired', createdAt: Date.now() - 10 * 60 * 1000 - 1 }));
+assert(!oauthStateHelpers.consumeDonationAlertsOAuthState('expired'), 'Expired DonationAlerts OAuth state was accepted');
+const oauthAuthorizeUrl = new URL(oauthStateHelpers.buildDonationAlertsImplicitOAuthUrl('19587', 'state-value'));
+assert(oauthAuthorizeUrl.searchParams.get('state') === 'state-value', 'DonationAlerts authorization URL has no state binding');
+const oauthStateCallbackSource = source.slice(
+  source.indexOf('    async function handleDonationAlertsOAuthCallback'),
+  source.indexOf('    async function finishDonationAlertsConnection')
+);
+assert(oauthStateCallbackSource.indexOf('consumeDonationAlertsOAuthState') < oauthStateCallbackSource.indexOf('saveDonationAlertsSecretToServer'), 'OAuth token can be stored before state validation');
+
 const legacySecretStripStart = source.indexOf('    function stripLegacyIntegrationSecretsFromStoredState');
 const legacySecretStripEnd = source.indexOf('    function loadData', legacySecretStripStart);
 if (legacySecretStripStart < 0 || legacySecretStripEnd < 0) throw new Error('Legacy secret stripping helper not found');
@@ -495,6 +555,14 @@ assert(!sanitizedIntegrations.donatepay.accessToken, 'Legacy DonatePay token can
 assert(!sanitizedIntegrations.donatepay.apiKey && !sanitizedIntegrations.donatepay.token, 'Legacy DonatePay secret fields survived storage sanitization');
 assert(!sanitizedIntegrations.donationalerts.accessToken && !sanitizedIntegrations.donationalerts.refreshToken, 'DonationAlerts secrets survived storage sanitization');
 assert(!sanitizedIntegrations.openrouter.apiKey && !sanitizedIntegrations.openrouter.proxyUrl, 'OpenRouter secrets survived storage sanitization');
+
+const storageSaveStart = source.indexOf('    function saveData');
+const storageSaveEnd = source.indexOf('    function openResetSiteDataModal', storageSaveStart);
+const storageSaveSource = source.slice(storageSaveStart, storageSaveEnd);
+assert(storageSaveSource.includes('try {\n        localStorage.setItem') && storageSaveSource.includes('notifyStorageFailure(error);'), 'localStorage quota failures are not handled');
+assert(storageSaveSource.includes('MAX_RECENT_SPIN_RESULTS') && source.includes('MAX_ADDED_DONATION_HISTORY = 1000'), 'Persisted history is still unbounded');
+assert(source.includes('MAX_IGNORED_DONATIONS = 1000') && source.includes("donationsAdded.filter(item => item.status === 'ignored').length >= MAX_IGNORED_DONATIONS"), 'Ignored donation queue is still unbounded');
+assert(source.includes('MAX_AUCTION_ENTRIES = 2000') && source.includes('canCreateAuctionEntry({ notify: true })'), 'New lot creation is still unbounded');
 
 const donationNormalizerStart = source.indexOf('    function normalizeDonationForStorage');
 const donationNormalizerEnd = source.indexOf('    function addDonationToPending', donationNormalizerStart);
@@ -588,6 +656,90 @@ assert(unavailablePresentation.amountText.includes('50 EUR') && unavailablePrese
 assert(source.includes("if (!donation || !entry || entry.eliminated || !canCreditDonationAmount(donation)) return false;"), 'assignDonationToEntry does not block unavailable amounts');
 assert(source.includes('if (!canCreditDonationAmount(donation)) return false;\n      const entry = createEntryFromAiCandidate'), 'AI create-and-assign can create a lot before rejecting unavailable amount');
 assert(source.includes("donation.conversionSource = 'manual';") && source.includes("donation.conversionStatus = 'converted';"), 'Manual RUB conversion flow is missing');
+
+const donationAssignmentStart = source.indexOf('    function moveDonationToAdded');
+const donationAssignmentEnd = source.indexOf('    function ignoreDonation', donationAssignmentStart);
+if (donationAssignmentStart < 0 || donationAssignmentEnd < 0) throw new Error('Donation assignment transition helpers not found');
+const donationAssignmentHarness = new Function(`
+  let donationsPending = [{ id: 'pending-1', source: 'donatepay', externalId: 'pending-1', status: 'pending', amount: 25 }];
+  let donationsAdded = [
+    { id: 'ignored-1', source: 'donatepay', externalId: 'ignored-1', status: 'ignored', amount: 50 },
+    { id: 'added-1', source: 'donatepay', externalId: 'added-1', status: 'added', amount: 10 }
+  ];
+  let activeDonationAssignmentId = 'ignored-1';
+  const entries = [{ id: 'lot-1', name: 'Lot 1', price: 100, eliminated: false }];
+  function removeDonationAiJob() {}
+  function canMutateAuctionState() { return true; }
+  function getEntryById(id) { return entries.find(entry => entry.id === id) || null; }
+  function canCreditDonationAmount(donation) { return Number(donation?.amount) > 0; }
+  function addAmountToEntryById(id, amount) {
+    const entry = getEntryById(id);
+    if (!entry) return false;
+    entry.price += Number(amount);
+    return true;
+  }
+  function saveData() {}
+  function renderList() {}
+  function renderDonationsPanel() {}
+  function drawWheel() {}
+  ${source.slice(donationAssignmentStart, donationAssignmentEnd)}
+  return {
+    assignDonationToEntry,
+    findAssignableDonationById,
+    getState: () => ({ donationsPending, donationsAdded, activeDonationAssignmentId, entries })
+  };
+`)();
+assert(donationAssignmentHarness.findAssignableDonationById('pending-1')?.status === 'pending', 'Pending donation is no longer assignable');
+assert(donationAssignmentHarness.findAssignableDonationById('ignored-1')?.status === 'ignored', 'Ignored donation cannot be selected for assignment');
+assert(!donationAssignmentHarness.findAssignableDonationById('added-1'), 'Already credited donation can be assigned twice');
+assert(donationAssignmentHarness.assignDonationToEntry('ignored-1', 'lot-1'), 'Ignored donation could not be assigned to a lot');
+const ignoredAssignmentState = donationAssignmentHarness.getState();
+assert(ignoredAssignmentState.entries[0].price === 150, 'Ignored donation amount was not credited exactly once');
+assert(ignoredAssignmentState.donationsAdded[0].id === 'ignored-1' && ignoredAssignmentState.donationsAdded[0].status === 'added', 'Assigned ignored donation did not become added');
+assert(ignoredAssignmentState.donationsAdded.filter(item => item.id === 'ignored-1').length === 1, 'Assigned ignored donation was duplicated in history');
+
+const assignmentSelectionStart = source.indexOf('    function startDonationAssignment');
+const assignmentSelectionEnd = source.indexOf('    function applyManualDonationRubAmount', assignmentSelectionStart);
+if (assignmentSelectionStart < 0 || assignmentSelectionEnd < 0) throw new Error('Donation assignment selection helper not found');
+const assignmentSelectionHarness = new Function('findAssignableDonationById', `
+  let activeDonationAssignmentId = null;
+  const entries = [{ id: 'lot-1', eliminated: false }];
+  function canRunAdminLeaderActions() { return true; }
+  function canCreditDonationAmount() { return true; }
+  function renderList() {}
+  function renderDonationsPanel() {}
+  function alert() {}
+  ${source.slice(assignmentSelectionStart, assignmentSelectionEnd)}
+  return {
+    select: startDonationAssignment,
+    current: () => activeDonationAssignmentId
+  };
+`)(id => ({ id, status: id.startsWith('ignored') ? 'ignored' : 'pending', amount: 1 }));
+assignmentSelectionHarness.select('pending-1');
+assert(assignmentSelectionHarness.current() === 'pending-1', 'Pending donation did not enter assignment mode');
+assignmentSelectionHarness.select('ignored-1');
+assert(assignmentSelectionHarness.current() === 'ignored-1', 'Selecting an ignored donation did not replace the previous pending selection');
+
+const addedSortStart = source.indexOf('    function sortProcessedDonationsByTime');
+const addedSortEnd = source.indexOf('    function renderAddedDonations', addedSortStart);
+if (addedSortStart < 0 || addedSortEnd < 0) throw new Error('Processed donation sorting helpers not found');
+const { sortProcessedDonationsByTime, sortIgnoredDonationsByDonor } = new Function('getDonationCreatedAtMs', `${source.slice(addedSortStart, addedSortEnd)}; return { sortProcessedDonationsByTime, sortIgnoredDonationsByDonor };`)(
+  donation => Date.parse(donation.createdAt) || 0
+);
+const processedDonations = [
+  { id: 'ignored-zed', username: 'Zed', status: 'ignored', createdAt: '2026-07-20T10:00:00Z' },
+  { id: 'added-new', username: 'Added', status: 'added', createdAt: '2026-07-20T12:00:00Z' },
+  { id: 'ignored-anna-2', username: 'Анна 2', status: 'ignored', createdAt: '2026-07-20T11:00:00Z' },
+  { id: 'ignored-anna-10', username: 'анна 10', status: 'ignored', createdAt: '2026-07-20T09:00:00Z' }
+];
+assert(sortProcessedDonationsByTime(processedDonations).map(item => item.id).join(',') === 'added-new,ignored-anna-2,ignored-zed,ignored-anna-10', 'Processed donation time order is not newest-first');
+assert(sortIgnoredDonationsByDonor(processedDonations.filter(item => item.status === 'ignored')).map(item => item.id).join(',') === 'ignored-anna-2,ignored-anna-10,ignored-zed', 'Ignored donations are not sorted by donor nickname');
+const pendingTabIndex = source.indexOf('data-donations-tab="pending">В ожидании</button>');
+const ignoredTabIndex = source.indexOf('data-donations-tab="ignored">Игнорировано</button>');
+const addedTabIndex = source.indexOf('data-donations-tab="added">Добавлено</button>');
+assert(pendingTabIndex >= 0 && pendingTabIndex < ignoredTabIndex && ignoredTabIndex < addedTabIndex, 'Donation tabs are missing or ordered incorrectly');
+assert(!source.includes('added-donations-sort') && !source.includes('data-donations-sort'), 'Removed donation sorting switch is still present');
+assert(source.includes('function renderIgnoredDonations()') && source.includes('createDonationCard(donation, { assignable: true })'), 'Ignored donation tab has no lot-selection action');
 
 const entries = [
   { id: 'base', name: 'Granny', eliminated: false, source: '', externalId: '', category: '' },
@@ -815,6 +967,7 @@ const beforeWheelEntries = JSON.stringify(wheelEntries);
 const spinRequest = spinHelpers.createWheelSpinRequest('wheel-tab', 3, 1000);
 assert(spinRequest.collectionAction === 'require_stopped', 'Wheel request did not require authoritative collection-state confirmation by default');
 assert(spinHelpers.createWheelSpinRequest('wheel-tab', 3, 1000, 'stop_and_spin').collectionAction === 'stop_and_spin', 'Wheel stop-and-spin decision was lost');
+assert(spinHelpers.normalizeSpinCollectionAction('spin_without_stopping') === 'require_stopped', 'Removed continue-without-stopping action is still accepted');
 const firstSpinRegistration = spinHelpers.registerSpinRequest(spinRegistry, spinRequest, 3);
 assert(firstSpinRegistration.accepted && firstSpinRegistration.value.status === 'processing', 'Current-generation wheel spin request was not reserved before async work');
 const duplicateSpinRegistration = spinHelpers.registerSpinRequest(spinRegistry, spinRequest, 3);
@@ -853,7 +1006,21 @@ const wheelButtonEnd = source.indexOf("document.getElementById('spin-donations-m
 const wheelButtonBlock = source.slice(wheelButtonStart, wheelButtonEnd);
 assert(wheelButtonBlock.indexOf('isDonationCollectionActive()') < wheelButtonBlock.indexOf("appViewMode === 'wheel'"), 'Wheel view still bypasses the active-donation confirmation');
 assert(wheelButtonBlock.includes("requestSpinFromWheel('stop_and_spin')"), 'Wheel stop button does not delegate pause-and-spin to the leader');
-assert(wheelButtonBlock.includes("requestSpinFromWheel('spin_without_stopping')"), 'Wheel continue button lost its explicit collection decision');
+assert(!source.includes('spin-without-stopping') && !source.includes("requestSpinFromWheel('spin_without_stopping')"), 'Continue-without-stopping control was not removed');
+assert(!source.includes('Эта вкладка собирает данные') && !source.includes('Данные собирает другая вкладка'), 'Internal tab leadership notice is still visible');
+assert(!source.includes('<strong>Локальное приложение.</strong>') && !source.includes('Токены донат-сервисов хранятся локально'), 'Removed token storage warnings are still visible');
+assert(!source.includes('Как подключить?'), 'Redundant integration help remains visible');
+assert(source.includes('id="openrouter-proxy-test-result"') && source.includes('Прокси работает') && source.includes('Проверка не пройдена:'), 'Proxy test has no visible success and failure states');
+assert(source.includes('response.status === 202 && payload?.queued && payload?.requestId') && source.includes('pollLocalUpstreamJob(payload.requestId, options)'), 'Frontend does not poll queued external requests');
+assert(source.includes('onPrivateSubscribe: ({ data }, callback) =>') && source.includes("fetchLocalApi('/centrifuge/subscribe'"), 'DonatePay private subscription still depends on a blocking subscribe request');
+const proxyPresentationStart = source.indexOf('    function getOpenRouterProxyTestPresentation');
+const proxyPresentationEnd = source.indexOf('    function renderAiSettings', proxyPresentationStart);
+if (proxyPresentationStart < 0 || proxyPresentationEnd < 0) throw new Error('Proxy test presentation helper not found');
+const { getOpenRouterProxyTestPresentation } = new Function(`${source.slice(proxyPresentationStart, proxyPresentationEnd)}; return { getOpenRouterProxyTestPresentation };`)();
+const proxySuccess = getOpenRouterProxyTestPresentation({ proxyConfigured: true, testStatus: 'проверка OK (125 ms)' });
+assert(proxySuccess.statusClass === 'connected' && proxySuccess.resultClass === 'success' && proxySuccess.resultText === 'Прокси работает · 125 ms', 'Successful proxy check is not shown clearly');
+const proxyFailure = getOpenRouterProxyTestPresentation({ proxyConfigured: true, testStatus: 'ошибка: timeout' });
+assert(proxyFailure.statusClass === 'error' && proxyFailure.resultClass === 'error' && proxyFailure.resultText === 'Проверка не пройдена: timeout', 'Failed proxy check is not shown clearly');
 assert(source.includes('recoverWheelSpinAfterTimeout') && source.includes('findPersistedSpinRequestState'), 'Wheel timeout does not recover authoritative persisted spin state');
 assert(source.includes('function deleteEntryById(entryId) {\n      if (!canMutateAuctionState())'), 'Entry deletion is not protected during authoritative spin');
 const collectionPauseStart = source.indexOf('    async function performDonationCollectionPauseChange');

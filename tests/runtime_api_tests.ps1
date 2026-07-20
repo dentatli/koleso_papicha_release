@@ -3,7 +3,11 @@ param()
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path $PSScriptRoot -Parent
 $ServerPath = Join-Path $Root 'local_server.ps1'
-$Base = 'http://127.0.0.1:5500'
+$PortProbe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+$PortProbe.Start()
+$RuntimePort = ([System.Net.IPEndPoint]$PortProbe.LocalEndpoint).Port
+$PortProbe.Stop()
+$Base = "http://127.0.0.1:$RuntimePort"
 $RuntimeDataDir = Join-Path ([System.IO.Path]::GetTempPath()) "PapichWheelRuntimeTests-$([Guid]::NewGuid().ToString('N'))"
 $ServerStdOut = Join-Path $RuntimeDataDir 'server-stdout.log'
 $ServerStdErr = Join-Path $RuntimeDataDir 'server-stderr.log'
@@ -51,6 +55,7 @@ try {
             '-ExecutionPolicy', 'Bypass',
             '-File', "`"$ServerPath`"",
             '-ServerOnly',
+            '-ListenPort', [string]$RuntimePort,
             '-SkipStartupNetwork'
         ) `
         -RedirectStandardOutput $ServerStdOut `
@@ -84,6 +89,45 @@ try {
     $TokenMatch = [regex]::Match($Html, 'const LOCAL_APP_TOKEN = "([^"]+)";')
     Assert-True $TokenMatch.Success 'Served HTML did not contain the per-process local token.'
     $Headers = @{ 'X-Local-App-Token' = $TokenMatch.Groups[1].Value }
+
+    $DelayedUpstream = Invoke-JsonPost '/api/test/upstream-delay' @{ delayMs = 2500 } $Headers
+    Assert-True ($DelayedUpstream.queued -and $DelayedUpstream.requestId) 'Delayed upstream test request was not queued.'
+    $HealthTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $HealthWhileUpstreamRuns = Invoke-RestMethod -Uri "$Base/api/health" -Headers $Headers -TimeoutSec 2
+    $HealthTimer.Stop()
+    Assert-True $HealthWhileUpstreamRuns.ok 'Health API failed while an upstream request was delayed.'
+    Assert-True ($HealthTimer.ElapsedMilliseconds -lt 1000) 'Delayed upstream request blocked the local HTTP loop.'
+
+    $DelayedResult = $null
+    $DelayedDeadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $DelayedDeadline) {
+        try {
+            $DelayedResult = Invoke-RestMethod `
+                -Uri "$Base/api/upstream/jobs/$($DelayedUpstream.requestId)" `
+                -Headers $Headers `
+                -TimeoutSec 2
+            if ($DelayedResult.ok -and -not $DelayedResult.queued) { break }
+        }
+        catch {
+            if ([int]$_.Exception.Response.StatusCode.value__ -ne 202) { throw }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($DelayedResult.ok -and [int]$DelayedResult.delayMs -eq 2500) 'Delayed upstream background job did not complete.'
+
+    $QueuedBurst = @(1..4 | ForEach-Object {
+        Invoke-JsonPost '/api/test/upstream-delay' @{ delayMs = 1200 } $Headers
+    })
+    Assert-True (@($QueuedBurst | Where-Object { $_.queued }).Count -eq 4) 'Bounded upstream worker pool did not accept four jobs.'
+    $QueueFullStatus = 0
+    $QueueFullBody = $null
+    try { [void](Invoke-JsonPost '/api/test/upstream-delay' @{ delayMs = 1200 } $Headers) }
+    catch {
+        $QueueFullStatus = [int]$_.Exception.Response.StatusCode.value__
+        $QueueFullBody = Get-HttpErrorPayload $_
+    }
+    Assert-True ($QueueFullStatus -eq 429 -and $QueueFullBody.code -eq 'UPSTREAM_QUEUE_FULL') 'Upstream worker concurrency limit is not enforced.'
+    Start-Sleep -Milliseconds 1400
 
     $Bootstrap = Invoke-JsonPost '/api/app/bootstrap' @{ collector = $null } $Headers
     $Generation = [long]$Bootstrap.collector.llm.auctionGeneration

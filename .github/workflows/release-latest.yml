@@ -7,19 +7,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-latest
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  build-release:
+  verify:
     runs-on: windows-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Run frontend logic tests
         shell: pwsh
@@ -27,6 +27,16 @@ jobs:
           node tests/ai_frontend_logic_tests.js
           if ($LASTEXITCODE -ne 0) {
             throw "Frontend logic tests failed."
+          }
+
+          node tests/ai_tester_logic_tests.js
+          if ($LASTEXITCODE -ne 0) {
+            throw "AI tester logic tests failed."
+          }
+
+          node tests/random_logic_tests.js
+          if ($LASTEXITCODE -ne 0) {
+            throw "Random logic tests failed."
           }
 
       - name: Run PowerShell logic tests
@@ -38,6 +48,21 @@ jobs:
         shell: powershell
         run: |
           .\tests\runtime_api_tests.ps1
+
+      - name: Run isolated AI tester server tests
+        shell: powershell
+        run: |
+          .\tests\ai_tester_server_tests.ps1
+
+  build-release:
+    needs: verify
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Build setup BAT
         shell: pwsh
@@ -58,20 +83,21 @@ jobs:
 
           Write-Host "PapichWheel_Setup.bat size: $size bytes"
 
-      - name: Recreate latest release
+          $hash = (Get-FileHash -LiteralPath "dist/PapichWheel_Setup.bat" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  PapichWheel_Setup.bat" | Set-Content -LiteralPath "dist/PapichWheel_Setup.bat.sha256" -Encoding ascii
+
+      - name: Update latest release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view latest *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release delete latest --yes --cleanup-tag
-          } else {
-            Write-Host "No existing latest release. Creating new one."
-          }
+          $releaseExists = $LASTEXITCODE -eq 0
 
           git tag -f latest $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw "Could not update local latest tag." }
           git push origin refs/tags/latest --force
+          if ($LASTEXITCODE -ne 0) { throw "Could not push latest tag." }
 
           @"
           Автоматическая сборка PapichWheel.
@@ -93,8 +119,23 @@ jobs:
           Пользовательские данные и ключи хранятся отдельно и при обновлении не удаляются.
           "@ | Set-Content -LiteralPath "release-notes.md" -Encoding utf8
 
-          gh release create latest `
-            "dist/PapichWheel_Setup.bat" `
-            --target $env:GITHUB_SHA `
-            --title "PapichWheel latest" `
-            --notes-file "release-notes.md"
+          if ($releaseExists) {
+            gh release edit latest `
+              --target $env:GITHUB_SHA `
+              --title "PapichWheel latest" `
+              --notes-file "release-notes.md"
+            if ($LASTEXITCODE -ne 0) { throw "Could not update latest release metadata." }
+            gh release upload latest `
+              "dist/PapichWheel_Setup.bat" `
+              "dist/PapichWheel_Setup.bat.sha256" `
+              --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Could not upload latest release assets." }
+          } else {
+            gh release create latest `
+              "dist/PapichWheel_Setup.bat" `
+              "dist/PapichWheel_Setup.bat.sha256" `
+              --target $env:GITHUB_SHA `
+              --title "PapichWheel latest" `
+              --notes-file "release-notes.md"
+            if ($LASTEXITCODE -ne 0) { throw "Could not create latest release." }
+          }

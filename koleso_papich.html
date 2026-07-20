@@ -341,6 +341,8 @@
 
     .donations-tabs {
       display: flex;
+      align-items: center;
+      flex-wrap: wrap;
       gap: 6px;
       padding: 10px 16px 0;
     }
@@ -775,20 +777,6 @@
       border-color: rgba(224, 49, 49, 0.75);
       color: #ff8787;
     }
-    .integration-card-help {
-      margin-top: 14px;
-      color: var(--text-dimmed);
-      font-size: 11px;
-      line-height: 1.45;
-    }
-    .integration-card-help summary {
-      width: max-content;
-      cursor: pointer;
-      color: #74c0fc;
-    }
-    .integration-card-help p {
-      margin: 8px 0 0;
-    }
     .integration-status::before {
       content: '';
       width: 7px;
@@ -1040,6 +1028,31 @@
     .ai-service-status.error {
       color: #ff8787;
     }
+    .proxy-test-result {
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.035);
+      color: var(--text-dimmed);
+      font-size: var(--ui-small-font-size);
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .proxy-test-result.checking {
+      color: #74c0fc;
+      border-color: rgba(116, 192, 252, 0.45);
+      background: rgba(116, 192, 252, 0.08);
+    }
+    .proxy-test-result.success {
+      color: #8ce99a;
+      border-color: rgba(64, 192, 87, 0.5);
+      background: rgba(64, 192, 87, 0.08);
+    }
+    .proxy-test-result.error {
+      color: #ffa8a8;
+      border-color: rgba(224, 49, 49, 0.55);
+      background: rgba(224, 49, 49, 0.08);
+    }
     .ai-service-actions,
     .ai-preset-row {
       display: flex;
@@ -1171,15 +1184,6 @@
       flex-direction: column;
       gap: 18px;
       background: #1f1f1f;
-    }
-    .settings-warning {
-      padding: 13px 16px;
-      border: 1px solid rgba(255, 212, 59, 0.45);
-      border-radius: 8px;
-      background: rgba(255, 212, 59, 0.08);
-      color: #ffe066;
-      font-size: 13px;
-      line-height: 1.5;
     }
     .settings-top-grid {
       display: grid;
@@ -1775,21 +1779,6 @@
       color: #8fe3a4;
       border-color: #3c9b57;
     }
-    .admin-leader-status {
-      display: none;
-      padding: 5px 9px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      color: var(--text-dimmed);
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    body.app-view-admin .admin-leader-status { display: inline-flex; }
-    body.admin-follower .admin-leader-status {
-      color: #ffd27a;
-      border-color: #8a6a2d;
-      background: rgba(138, 106, 45, 0.12);
-    }
     .spin-confirm-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1820,6 +1809,8 @@
     .entry-item {
       display: flex;
       align-items: stretch;
+      content-visibility: auto;
+      contain-intrinsic-block-size: var(--entry-row-height);
       background: #333333;
       padding: 2px 10px 2px 0;
       border-radius: 4px;
@@ -2854,9 +2845,7 @@
     .settings-card-header span,
     .help-card,
     .integration-help,
-    .integration-card-help,
     .integration-service-message,
-    .settings-warning,
     .integration-warning,
     .test-donation-source-label {
       font-size: var(--ui-small-font-size);
@@ -2943,10 +2932,9 @@
   <div class="modal-overlay" id="spin-donations-modal" aria-hidden="true">
     <div class="modal-content">
       <h3>Приём донатов ещё работает</h3>
-      <p>Можно остановить новые донаты перед запуском колеса или продолжить без остановки.</p>
+      <p>Перед запуском колеса остановите приём новых донатов.</p>
       <div class="spin-confirm-actions">
         <button type="button" id="spin-donations-cancel">Отмена</button>
-        <button type="button" id="spin-without-stopping">Крутить без остановки</button>
         <button type="button" class="btn-primary" id="spin-stop-and-start">Остановить и крутить</button>
       </div>
     </div>
@@ -3178,7 +3166,6 @@
     >Доступна новая версия</a>
     <button type="button" class="view-open-button open-admin-button" id="open-admin-view">Открыть админку</button>
     <button type="button" class="view-open-button open-wheel-button" id="open-wheel-view">Открыть колесо в отдельной вкладке</button>
-    <span class="admin-leader-status" id="admin-leader-status" role="status" aria-live="polite"></span>
   </header>
 
   <section id="tab-auction" class="app-tab-panel">
@@ -3203,8 +3190,8 @@
               <span>Скрыть выбывшие лоты</span>
             </label>
             <label class="checkbox-row">
-              <input type="checkbox" id="hide-added-order">
-              <span>Скрыть номер добавления</span>
+              <input type="checkbox" id="show-added-order">
+              <span>Показать номер добавления</span>
             </label>
           </div>
           <div class="controls-row-actions">
@@ -3228,6 +3215,7 @@
           </div>
           <div class="donations-tabs" role="tablist" aria-label="Состояние донатов">
             <button type="button" class="donations-tab-button active" data-donations-tab="pending">В ожидании</button>
+            <button type="button" class="donations-tab-button" data-donations-tab="ignored">Игнорировано</button>
             <button type="button" class="donations-tab-button" data-donations-tab="added">Добавлено</button>
           </div>
           <div class="donations-panel" id="donations-panel">
@@ -3241,11 +3229,6 @@
 
   <section id="tab-settings" class="app-tab-panel hidden">
     <div class="settings-layout">
-      <div class="settings-warning">
-        <strong>Локальное приложение.</strong>
-        Ключи и токены хранятся локально на этом компьютере в защищённом хранилище Windows и не сохраняются в браузере.
-      </div>
-
       <section class="settings-card settings-card-wide">
         <div class="settings-card-header">
           <h2>Настройки отображения</h2>
@@ -3290,10 +3273,6 @@
               <button type="button" class="btn-primary integration-primary-action" id="donatepay-primary-action">Подключить</button>
               <button type="button" class="integration-secondary-action btn-danger-outline hidden" id="donatepay-unlink-action">Отвязать</button>
             </div>
-            <details class="integration-card-help">
-              <summary>Как подключить?</summary>
-              <p>Нажмите «Подключить», выберите регион и вставьте API Key из DonatePay.</p>
-            </details>
           </section>
 
           <section class="integration-service-card disconnected" id="donationalerts-card" aria-labelledby="donationalerts-title">
@@ -3309,14 +3288,9 @@
               <button type="button" class="btn-primary integration-primary-action" id="donationalerts-primary-action">Подключить</button>
               <button type="button" class="integration-secondary-action btn-danger-outline hidden" id="donationalerts-unlink-action">Отвязать</button>
             </div>
-            <details class="integration-card-help">
-              <summary>Как подключить?</summary>
-              <p>Нажмите «Подключить» → «Быстрое подключение» → разрешите доступ на сайте DonationAlerts.</p>
-            </details>
           </section>
         </div>
         <div class="integration-warning" id="currency-rate-status">Курсы USD/EUR: загрузка...</div>
-        <p class="integration-warning">Токены донат-сервисов хранятся локально на сервере через DPAPI и не сохраняются в браузерном localStorage.</p>
       </section>
 
       <section class="settings-card settings-card-wide">
@@ -3415,6 +3389,7 @@
                   <button type="button" class="btn-primary-outline" id="openrouter-proxy-configure">Настроить proxy</button>
                   <button type="button" class="integration-secondary-action btn-danger-outline" id="openrouter-proxy-clear">Очистить proxy</button>
                 </div>
+                <div class="proxy-test-result hidden" id="openrouter-proxy-test-result" role="status" aria-live="polite"></div>
               </section>
             </div>
           </div>
@@ -3615,6 +3590,7 @@
     const WHEEL_SECTOR_STROKE_WIDTH = 4;
     let wheelDisplayCssPx = 1000;
     let wheelDpr = 1;
+    let wheelGeometryCache = { key: '', data: null };
 
     function syncWheelCanvasResolution() {
       wheelDpr = Math.min(window.devicePixelRatio || 1, 2.5);
@@ -4029,7 +4005,7 @@
     
     let entries = [];
     let hideEliminated = false;
-    let hideAddedOrder = false;
+    let hideAddedOrder = true;
     let hideAuctionTimer = false;
     let centerImageUrl = defaultCenter;
     let leftColWidth = 620;
@@ -4095,11 +4071,17 @@
     const LLM_PIPELINE_VERSION = 8;
     const MAX_LOT_NAME_LENGTH = 200;
     const MAX_DONATION_MESSAGE_LENGTH = 1000;
+    const MAX_AUCTION_ENTRIES = 2000;
+    const MAX_ADDED_DONATION_HISTORY = 1000;
+    const MAX_IGNORED_DONATIONS = 1000;
+    const MAX_RECENT_SPIN_RESULTS = 500;
     let llmJobsRevision = 0;
     let llmResultsSyncInFlight = false;
     const aiDonationActionLocks = new Set();
     let auctionClearInFlight = false;
     let resetAllDataInFlight = false;
+    let storageFailureNotified = false;
+    let entriesSearchRenderTimer = null;
     let donationCollectionPaused = false;
     let donatePaySocket = null;
     let donatePaySocketConnected = false;
@@ -4122,7 +4104,6 @@
     const POINTAUC_VISUAL_MIN_AMOUNT = 1;
     const POINTAUC_VISUAL_MIN_MODIFIER = 0.55;
     const POINTAUC_VISUAL_MAX_MODIFIER = 1.0;
-    const appSessionStartedAt = Date.now();
     const seenDonationKeys = new Set();
     let pendingSpinOperation = null;
     let lastSpinResult = null;
@@ -4144,6 +4125,8 @@
     const DONATIONALERTS_BUILTIN_APP_ID = '19587';
     const DONATIONALERTS_REDIRECT_URL = 'http://127.0.0.1:5500/koleso_papich.html';
     const DONATIONALERTS_SCOPES = 'oauth-user-show oauth-donation-index';
+    const DONATIONALERTS_OAUTH_STATE_KEY = 'pointauc_donationalerts_oauth_state';
+    const DONATIONALERTS_OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1000;
     window.settings = {
       localServerAvailable: false
     };
@@ -4558,12 +4541,6 @@
       const follower = appViewMode === 'admin' && !isAdminLeader;
       const operationBlocked = appViewMode === 'admin' && isAuctionMutationTemporarilyBlocked();
       document.body.classList.toggle('admin-follower', follower);
-      const status = document.getElementById('admin-leader-status');
-      if (status) {
-        status.textContent = follower
-          ? 'Данные собирает другая вкладка'
-          : (operationBlocked ? 'Синхронизация аукциона…' : (appViewMode === 'admin' ? 'Эта вкладка собирает данные' : ''));
-      }
       document.querySelectorAll('button, input, select, textarea').forEach((control) => {
         if (isFollowerAllowedControl(control)) return;
         if (follower || operationBlocked) {
@@ -5391,7 +5368,7 @@
 
       for (const entry of list) {
         acc += Math.max(0, getCandidateWeightAmount(entry));
-        if (randomValue <= acc) return entry;
+        if (randomValue < acc) return entry;
       }
 
       return list[list.length - 1] || null;
@@ -5911,12 +5888,14 @@
             : null;
           recentSpinResults = normalizeRecentSpinResults(
             Array.isArray(parsed.recentSpinResults) ? parsed.recentSpinResults : [],
-            sharedStateAuctionGeneration
+            sharedStateAuctionGeneration,
+            MAX_RECENT_SPIN_RESULTS
           );
           if (lastSpinResult?.spinRequestId) {
             recentSpinResults = normalizeRecentSpinResults(
               [lastSpinResult, ...recentSpinResults],
-              sharedStateAuctionGeneration
+              sharedStateAuctionGeneration,
+              MAX_RECENT_SPIN_RESULTS
             );
           }
           handledSpinRequests.clear();
@@ -5933,11 +5912,15 @@
                 .map(d => normalizeDonationForStorage({ ...d, status: 'pending' }))
                 .filter(Boolean)
             : [];
-          donationsAdded = Array.isArray(parsed.donationsAdded)
-            ? parsed.donationsAdded
-                .map(d => normalizeDonationForStorage(d))
-                .filter(Boolean)
+          const storedProcessedDonations = Array.isArray(parsed.donationsAdded)
+            ? parsed.donationsAdded.map(d => normalizeDonationForStorage(d)).filter(Boolean)
             : [];
+          donationsAdded = [
+            ...storedProcessedDonations.filter(donation => donation.status === 'ignored'),
+            ...storedProcessedDonations
+              .filter(donation => donation.status === 'added')
+              .slice(0, MAX_ADDED_DONATION_HISTORY)
+          ];
           donationIntegrations = normalizeStoredDonationIntegrations(parsed.donationIntegrations);
           llmSettings = normalizeStoredLlmSettings(parsed.llmSettings);
           donationCollectionPaused = !!parsed.donationCollectionPaused;
@@ -5948,14 +5931,20 @@
           delete donationIntegrations.donationalerts.accessToken;
           stripLegacyIntegrationSecretsFromStoredState({ donationIntegrations });
           if (stripLegacyIntegrationSecretsFromStoredState(parsed)) {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+            try {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+            } catch (error) {
+              console.warn('Не удалось очистить устаревшие секреты в localStorage', error);
+            }
           }
           donationRuntimeStatus = createDefaultDonationRuntimeStatus();
           persistedActiveMainTab = ['auction', 'wheel', 'settings'].includes(parsed.activeMainTab)
             ? parsed.activeMainTab
             : 'auction';
           activeMainTab = persistedActiveMainTab;
-          activeDonationsTab = parsed.activeDonationsTab === 'added' ? 'added' : 'pending';
+          activeDonationsTab = ['pending', 'added', 'ignored'].includes(parsed.activeDonationsTab)
+            ? parsed.activeDonationsTab
+            : 'pending';
           loadedTimerState = parsed.timerState && typeof parsed.timerState === 'object'
             ? parsed.timerState
             : null;
@@ -5965,7 +5954,9 @@
           }
 
           hideEliminated = !!parsed.hideEliminated;
-          hideAddedOrder = !!parsed.hideAddedOrder;
+          hideAddedOrder = Object.prototype.hasOwnProperty.call(parsed, 'hideAddedOrder')
+            ? !!parsed.hideAddedOrder
+            : true;
           hideAuctionTimer = !!parsed.hideAuctionTimer;
           centerImageUrl = parsed.centerImageUrl || defaultCenter;
           
@@ -6022,7 +6013,7 @@
       listItemHeight = Math.min(100, Math.max(40, listItemHeight));
 
       document.getElementById('hide-eliminated').checked = hideEliminated;
-      document.getElementById('hide-added-order').checked = hideAddedOrder;
+      document.getElementById('show-added-order').checked = !hideAddedOrder;
       const hideAuctionTimerCheckbox = document.getElementById('hide-auction-timer');
       if (hideAuctionTimerCheckbox) hideAuctionTimerCheckbox.checked = hideAuctionTimer;
       applyAuctionTimerVisibility();
@@ -6067,6 +6058,25 @@
       return safe;
     }
 
+    function pruneProcessedDonationHistory() {
+      donationsAdded = [
+        ...donationsAdded.filter(donation => donation.status === 'ignored'),
+        ...donationsAdded
+          .filter(donation => donation.status === 'added')
+          .slice(0, MAX_ADDED_DONATION_HISTORY)
+      ];
+      return donationsAdded;
+    }
+
+    function notifyStorageFailure(error) {
+      console.error('Не удалось сохранить состояние аукциона', error);
+      if (storageFailureNotified) return;
+      storageFailureNotified = true;
+      setTimeout(() => {
+        alert('Не удалось сохранить изменения в браузере. Освободите место и повторите действие.');
+      }, 0);
+    }
+
     function saveData() {
       if (suppressPersistence || !canRunAdminLeaderActions()) return;
       const spinEl = document.getElementById('spin-duration');
@@ -6091,7 +6101,7 @@
         wheelColorPaletteVersion: WHEEL_COLOR_PALETTE_VERSION,
         wheelAngle: normalizeWheelAngleRad(currentAngle),
         donationsPending,
-        donationsAdded,
+        donationsAdded: pruneProcessedDonationHistory(),
         donationIntegrations: sanitizeDonationIntegrationsForStorage(donationIntegrations),
         llmSettings,
         donationCollectionPaused,
@@ -6109,13 +6119,24 @@
         },
         pendingSpinOperation,
         lastSpinResult,
-        recentSpinResults: normalizeRecentSpinResults(recentSpinResults, currentAuctionGeneration)
+        recentSpinResults: normalizeRecentSpinResults(
+          recentSpinResults,
+          currentAuctionGeneration,
+          MAX_RECENT_SPIN_RESULTS
+        )
       };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      } catch (error) {
+        notifyStorageFailure(error);
+        return false;
+      }
       hasStoredProjectState = true;
+      storageFailureNotified = false;
       lastAppliedStateUpdateId = stateUpdateId;
       sharedStateResetEpoch = String(data.resetEpoch || '');
       notifyStateUpdated(stateUpdateId);
+      return true;
     }
 
     function openResetSiteDataModal() {
@@ -6330,7 +6351,7 @@
       activeMainTab = 'auction';
       activeDonationsTab = 'pending';
       hideEliminated = false;
-      hideAddedOrder = false;
+      hideAddedOrder = true;
       hideAuctionTimer = false;
       centerImageUrl = defaultCenter;
       leftColWidth = 620;
@@ -6521,7 +6542,7 @@
     }
 
     function setActiveDonationsTab(tabName, persist = true) {
-      activeDonationsTab = tabName === 'added' ? 'added' : 'pending';
+      activeDonationsTab = ['pending', 'added', 'ignored'].includes(tabName) ? tabName : 'pending';
       document.querySelectorAll('[data-donations-tab]').forEach((button) => {
         button.classList.toggle('active', button.dataset.donationsTab === activeDonationsTab);
       });
@@ -6531,6 +6552,12 @@
 
     function getEntryById(entryId) {
       return entries.find(entry => entry.id === entryId) || null;
+    }
+
+    function canCreateAuctionEntry({ notify = false } = {}) {
+      if (entries.length < MAX_AUCTION_ENTRIES) return true;
+      if (notify) alert(`Достигнут лимит: ${MAX_AUCTION_ENTRIES} лотов.`);
+      return false;
     }
 
     function addAmountToEntryById(entryId, amount, deferRefresh = false) {
@@ -6975,15 +7002,30 @@
       donation.assignedEntryId = entry.id;
       donation.assignedEntryName = entry.name;
       donationsPending = donationsPending.filter(item => item.id !== donation.id);
+      donationsAdded = donationsAdded.filter(item => item.id !== donation.id);
       donationsAdded.unshift(donation);
+    }
+
+    function findAssignableDonationById(donationId, pending = donationsPending, processed = donationsAdded) {
+      const normalizedId = String(donationId || '');
+      if (!normalizedId) return null;
+      return (Array.isArray(pending)
+        ? pending.find(item => String(item?.id || '') === normalizedId && item.status === 'pending')
+        : null)
+        || (Array.isArray(processed)
+          ? processed.find(item => String(item?.id || '') === normalizedId && item.status === 'ignored')
+          : null)
+        || null;
     }
 
     function assignDonationToEntry(donationId, entryId) {
       if (!canMutateAuctionState()) return false;
-      const donation = donationsPending.find(item => item.id === donationId && item.status === 'pending');
+      const donation = findAssignableDonationById(donationId);
       const entry = getEntryById(entryId);
       if (!donation || !entry || entry.eliminated || !canCreditDonationAmount(donation)) return false;
-      if (donationsAdded.some(item => item.source === donation.source && String(item.externalId) === String(donation.externalId))) {
+      if (donationsAdded.some(item => item.id !== donation.id
+        && item.source === donation.source
+        && String(item.externalId) === String(donation.externalId))) {
         return false;
       }
       if (!addAmountToEntryById(entry.id, donation.amount, true)) return false;
@@ -6991,6 +7033,7 @@
       if (activeDonationAssignmentId === donationId) activeDonationAssignmentId = null;
       saveData();
       renderList();
+      renderDonationsPanel();
       drawWheel();
       return true;
     }
@@ -6999,6 +7042,10 @@
       if (!canRunAdminLeaderActions()) return false;
       const donation = donationsPending.find(item => item.id === donationId && item.status === 'pending');
       if (!donation) return false;
+      if (donationsAdded.filter(item => item.status === 'ignored').length >= MAX_IGNORED_DONATIONS) {
+        alert(`Сначала обработайте часть игнорированных донатов. Лимит: ${MAX_IGNORED_DONATIONS}.`);
+        return false;
+      }
       removeDonationAiJob(donation);
       donation.status = 'ignored';
       donation.assignedEntryId = null;
@@ -7008,12 +7055,13 @@
       if (activeDonationAssignmentId === donationId) activeDonationAssignmentId = null;
       saveData();
       renderList();
+      renderDonationsPanel();
       return true;
     }
 
     function startDonationAssignment(donationId) {
       if (!canRunAdminLeaderActions()) return;
-      const donation = donationsPending.find(item => item.id === donationId && item.status === 'pending');
+      const donation = findAssignableDonationById(donationId);
       if (!donation) return;
       if (!canCreditDonationAmount(donation)) {
         alert('Сначала укажите итоговую сумму доната в RUB.');
@@ -7023,13 +7071,14 @@
         alert('Сначала добавьте активные лоты.');
         return;
       }
-      activeDonationAssignmentId = donationId;
+      activeDonationAssignmentId = donation.id;
       renderList();
+      renderDonationsPanel();
     }
 
     function applyManualDonationRubAmount(donationId, value) {
       if (!canMutateAuctionState()) return false;
-      const donation = getPendingDonationById(donationId);
+      const donation = findAssignableDonationById(donationId);
       const numeric = Number(value);
       if (!donation || !isDonationConversionUnavailable(donation) || !Number.isFinite(numeric) || numeric <= 0) {
         return false;
@@ -7053,6 +7102,7 @@
       if (!canRunAdminLeaderActions()) return;
       activeDonationAssignmentId = null;
       renderList();
+      renderDonationsPanel();
     }
 
     function assignActiveDonationToEntry(entryId) {
@@ -7626,6 +7676,7 @@
       const expectedCategory = AI_ANALYSIS_ALLOWED_CATEGORIES.includes(category) ? category : donation.llm?.category;
       const existing = findExistingEntryForAiCandidate(candidate, expectedCategory);
       if (existing) return existing.eliminated ? null : existing;
+      if (!canCreateAuctionEntry()) return null;
       const insertAt = entries.length;
       const newId = `${Date.now()}-${cryptoRandomUint32().toString(16)}`;
       const entry = {
@@ -7693,6 +7744,7 @@
           return appliedToExisting;
         }
 
+        if (!canCreateAuctionEntry()) return false;
         const insertAt = entries.length;
         const newId = `${Date.now()}-${cryptoRandomUint32().toString(16)}`;
         createdEntry = {
@@ -8400,7 +8452,9 @@
         card.appendChild(manual);
       }
 
-      const aiBlock = options.assignable ? createDonationAiBlock(donation) : null;
+      const aiBlock = options.assignable && donation.status === 'pending'
+        ? createDonationAiBlock(donation)
+        : null;
       if (aiBlock) card.appendChild(aiBlock);
 
       const meta = document.createElement('div');
@@ -8437,12 +8491,15 @@
             startDonationAssignment(donation.id);
           }
         });
-        const ignoreButton = document.createElement('button');
-        ignoreButton.type = 'button';
-        ignoreButton.className = 'btn-danger-outline';
-        ignoreButton.textContent = 'Игнорировать';
-        ignoreButton.addEventListener('click', () => ignoreDonation(donation.id));
-        actions.append(assignButton, ignoreButton);
+        actions.appendChild(assignButton);
+        if (donation.status === 'pending') {
+          const ignoreButton = document.createElement('button');
+          ignoreButton.type = 'button';
+          ignoreButton.className = 'btn-danger-outline';
+          ignoreButton.textContent = 'Игнорировать';
+          ignoreButton.addEventListener('click', () => ignoreDonation(donation.id));
+          actions.appendChild(ignoreButton);
+        }
         card.appendChild(actions);
       }
 
@@ -8484,16 +8541,64 @@
       return root;
     }
 
+    function sortProcessedDonationsByTime(source) {
+      return (Array.isArray(source) ? source : [])
+        .map((donation, index) => ({ donation, index }))
+        .sort((left, right) => {
+          const timeDifference = getDonationCreatedAtMs(right.donation) - getDonationCreatedAtMs(left.donation);
+          return timeDifference || left.index - right.index;
+        })
+        .map(item => item.donation);
+    }
+
+    function sortIgnoredDonationsByDonor(source) {
+      return (Array.isArray(source) ? source : [])
+        .map((donation, index) => ({ donation, index }))
+        .sort((left, right) => {
+          const leftName = String(left.donation?.username || '').trim();
+          const rightName = String(right.donation?.username || '').trim();
+          if (!leftName && rightName) return 1;
+          if (leftName && !rightName) return -1;
+          const nameDifference = leftName.localeCompare(rightName, 'ru', {
+            numeric: true,
+            sensitivity: 'base'
+          });
+          if (nameDifference) return nameDifference;
+          const timeDifference = getDonationCreatedAtMs(right.donation) - getDonationCreatedAtMs(left.donation);
+          return timeDifference || left.index - right.index;
+        })
+        .map(item => item.donation);
+    }
+
     function renderAddedDonations() {
       const root = document.createDocumentFragment();
-      if (donationsAdded.length === 0) {
+      const added = donationsAdded.filter(donation => donation.status === 'added');
+      if (added.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'donation-empty';
-        empty.textContent = 'История обработанных донатов пуста';
+        empty.textContent = 'Добавленных донатов пока нет';
         root.appendChild(empty);
         return root;
       }
-      donationsAdded.forEach(donation => root.appendChild(createDonationCard(donation)));
+      sortProcessedDonationsByTime(added).forEach(donation => {
+        root.appendChild(createDonationCard(donation));
+      });
+      return root;
+    }
+
+    function renderIgnoredDonations() {
+      const root = document.createDocumentFragment();
+      const ignored = donationsAdded.filter(donation => donation.status === 'ignored');
+      if (ignored.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'donation-empty';
+        empty.textContent = 'Игнорированных донатов пока нет';
+        root.appendChild(empty);
+        return root;
+      }
+      sortIgnoredDonationsByDonor(ignored).forEach(donation => {
+        root.appendChild(createDonationCard(donation, { assignable: true }));
+      });
       return root;
     }
 
@@ -8507,7 +8612,10 @@
       document.querySelectorAll('[data-donations-tab]').forEach((button) => {
         button.classList.toggle('active', button.dataset.donationsTab === activeDonationsTab);
       });
-      scroll.replaceChildren(activeDonationsTab === 'added' ? renderAddedDonations() : renderPendingDonations());
+      const content = activeDonationsTab === 'added'
+        ? renderAddedDonations()
+        : (activeDonationsTab === 'ignored' ? renderIgnoredDonations() : renderPendingDonations());
+      scroll.replaceChildren(content);
       updateAdminLeadershipUi();
     }
 
@@ -8819,10 +8927,19 @@
           };
 
           const socket = new window.Centrifuge(getDonatePayCentrifugoUrl(settings.region), {
-            subscribeEndpoint: '/centrifuge/subscribe',
-            subscribeHeaders: Object.fromEntries(withLocalAppTokenHeaders().entries()),
-            subscribeParams: {
-              region: settings.region || 'ru'
+            onPrivateSubscribe: ({ data }, callback) => {
+              fetchLocalApi('/centrifuge/subscribe', {
+                ...(data || {}),
+                region: settings.region || 'ru'
+              }).then((payload) => {
+                callback({ data: payload, status: 200 });
+              }).catch((error) => {
+                callback({
+                  error: error?.message || 'DonatePay subscription failed',
+                  status: Number(error?.status || 500),
+                  data: null
+                });
+              });
             },
             disableWithCredentials: true
           });
@@ -9167,6 +9284,30 @@
       updateAdminLeadershipUi();
     }
 
+    function getOpenRouterProxyTestPresentation(openrouterSettings) {
+      const openrouter = openrouterSettings && typeof openrouterSettings === 'object' ? openrouterSettings : {};
+      const testStatus = String(openrouter.testStatus || '');
+      const checking = testStatus === 'проверка...';
+      const passed = testStatus.startsWith('проверка OK');
+      const failed = !!testStatus && !checking && !passed;
+      let resultText = '';
+      if (checking) {
+        resultText = 'Проверяем соединение…';
+      } else if (passed) {
+        const elapsed = testStatus.match(/\(([^)]+)\)/)?.[1] || '';
+        const successText = openrouter.proxyConfigured ? 'Прокси работает' : 'Соединение работает без proxy';
+        resultText = elapsed ? `${successText} · ${elapsed}` : successText;
+      } else if (failed) {
+        resultText = `Проверка не пройдена: ${testStatus.replace(/^ошибка:\s*/i, '')}`;
+      }
+      return {
+        testStatus,
+        statusClass: failed ? 'error' : (openrouter.proxyConfigured ? 'connected' : 'warning'),
+        resultClass: checking ? 'checking' : (passed ? 'success' : (failed ? 'error' : '')),
+        resultText
+      };
+    }
+
     function renderAiSettings() {
       const enabled = document.getElementById('llm-enabled');
       if (!enabled) return;
@@ -9200,16 +9341,20 @@
       }
       const openrouterProxyStatus = document.getElementById('openrouter-proxy-status');
       if (openrouterProxyStatus) {
-        const proxyStatusClass = openrouter.testStatus && openrouter.testStatus.startsWith('ошибка')
-          ? 'error'
-          : (openrouter.proxyConfigured ? 'connected' : 'warning');
-        openrouterProxyStatus.className = `ai-service-status ${proxyStatusClass}`;
+        const proxyTest = getOpenRouterProxyTestPresentation(openrouter);
+        openrouterProxyStatus.className = `ai-service-status ${proxyTest.statusClass}`;
         openrouterProxyStatus.textContent = openrouter.proxyConfigured
           ? `Задан ${openrouter.maskedProxyUrl || '***'}`
           : 'Не задан';
         if (proxyCard) {
           proxyCard.classList.toggle('connected', !!openrouter.proxyConfigured);
-          proxyCard.classList.toggle('error', proxyStatusClass === 'error');
+          proxyCard.classList.toggle('error', proxyTest.statusClass === 'error');
+        }
+        const proxyTestResult = document.getElementById('openrouter-proxy-test-result');
+        if (proxyTestResult) {
+          proxyTestResult.className = `proxy-test-result${proxyTest.resultClass ? ` ${proxyTest.resultClass}` : ''}`;
+          proxyTestResult.classList.toggle('hidden', !proxyTest.testStatus);
+          proxyTestResult.textContent = proxyTest.resultText;
         }
       }
       const configureButton = document.getElementById('openrouter-configure');
@@ -9229,8 +9374,8 @@
         proxyConfigureButton.textContent = openrouter.proxyConfigured ? 'Изменить proxy' : 'Настроить proxy';
       }
       const testButton = document.getElementById('openrouter-test');
-      if (testButton && openrouter.testStatus) {
-        testButton.title = openrouter.testStatus;
+      if (testButton) {
+        testButton.title = openrouter.testStatus || '';
       }
 
     }
@@ -9298,11 +9443,21 @@
           renderAiSettings();
         });
       });
-      document.getElementById('openrouter-test').addEventListener('click', () => {
-        testOpenRouterConnection().catch((error) => {
-          donationIntegrations.openrouter.testStatus = error?.message || 'OpenRouter test failed';
+      document.getElementById('openrouter-test').addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        donationIntegrations.openrouter.testStatus = 'проверка...';
+        renderAiSettings();
+        try {
+          await testOpenRouterConnection();
+        } catch (error) {
+          donationIntegrations.openrouter.testStatus = `ошибка: ${error?.message || 'OpenRouter test failed'}`;
+          saveData();
           renderAiSettings();
-        });
+        } finally {
+          button.disabled = false;
+          updateAdminLeadershipUi();
+        }
       });
       renderAiSettings();
     }
@@ -9427,6 +9582,53 @@
       });
     }
 
+    function createLocalApiError(path, response, payload) {
+      const proxyError = new Error(payload?.error || `Local proxy HTTP ${response.status}`);
+      proxyError.status = response.status;
+      proxyError.upstreamStatus = Number(payload?.upstreamStatus || payload?.upstream_status || 0) || null;
+      proxyError.upstreamBody = payload?.upstreamBody || '';
+      proxyError.endpoint = payload?.endpoint || path;
+      proxyError.exceptionMessage = payload?.exceptionMessage || '';
+      proxyError.proxyPayload = payload;
+      return proxyError;
+    }
+
+    function waitForLocalApiPoll(delayMs, signal) {
+      return new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason || new DOMException('Aborted', 'AbortError'));
+          return;
+        }
+        const handleAbort = () => {
+          clearTimeout(timer);
+          reject(signal.reason || new DOMException('Aborted', 'AbortError'));
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', handleAbort);
+          resolve();
+        }, delayMs);
+        signal?.addEventListener('abort', handleAbort, { once: true });
+      });
+    }
+
+    async function pollLocalUpstreamJob(requestId, options = {}) {
+      const path = `/api/upstream/jobs/${encodeURIComponent(requestId)}`;
+      while (true) {
+        await waitForLocalApiPoll(250, options.signal);
+        let response;
+        try {
+          response = await localApiFetch(path, { signal: options.signal });
+        } catch (error) {
+          throw Object.assign(error, { code: 'LOCAL_SERVER_UNAVAILABLE' });
+        }
+        let payload = null;
+        try { payload = await response.json(); } catch (error) {}
+        if (response.status === 202 && payload?.queued) continue;
+        if (!response.ok) throw createLocalApiError(path, response, payload);
+        return payload;
+      }
+    }
+
     async function fetchLocalApi(path, body, options = {}) {
       if (location.protocol === 'file:') {
         throw Object.assign(new Error('Local server unavailable'), { code: 'LOCAL_SERVER_UNAVAILABLE' });
@@ -9448,15 +9650,11 @@
       } catch (error) {
         payload = null;
       }
+      if (response.status === 202 && payload?.queued && payload?.requestId) {
+        return pollLocalUpstreamJob(payload.requestId, options);
+      }
       if (!response.ok) {
-        const proxyError = new Error(payload?.error || `Local proxy HTTP ${response.status}`);
-        proxyError.status = response.status;
-        proxyError.upstreamStatus = Number(payload?.upstreamStatus || payload?.upstream_status || 0) || null;
-        proxyError.upstreamBody = payload?.upstreamBody || '';
-        proxyError.endpoint = payload?.endpoint || path;
-        proxyError.exceptionMessage = payload?.exceptionMessage || '';
-        proxyError.proxyPayload = payload;
-        throw proxyError;
+        throw createLocalApiError(path, response, payload);
       }
       return payload;
     }
@@ -10173,12 +10371,47 @@
         && location.port === '5500';
     }
 
-    function buildDonationAlertsImplicitOAuthUrl(appId) {
+    function createDonationAlertsOAuthState() {
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      const value = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+      sessionStorage.setItem(DONATIONALERTS_OAUTH_STATE_KEY, JSON.stringify({
+        value,
+        createdAt: Date.now()
+      }));
+      return value;
+    }
+
+    function consumeDonationAlertsOAuthState(returnedState) {
+      let stored = null;
+      try {
+        stored = JSON.parse(sessionStorage.getItem(DONATIONALERTS_OAUTH_STATE_KEY) || 'null');
+      } catch (error) {
+        stored = null;
+      }
+      try {
+        sessionStorage.removeItem(DONATIONALERTS_OAUTH_STATE_KEY);
+      } catch (error) {}
+
+      const value = String(stored?.value || '');
+      const createdAt = Number(stored?.createdAt || 0);
+      const ageMs = Date.now() - createdAt;
+      return Boolean(
+        value
+        && String(returnedState || '') === value
+        && Number.isFinite(ageMs)
+        && ageMs >= 0
+        && ageMs <= DONATIONALERTS_OAUTH_STATE_MAX_AGE_MS
+      );
+    }
+
+    function buildDonationAlertsImplicitOAuthUrl(appId, state) {
       const url = new URL('https://www.donationalerts.com/oauth/authorize');
       url.searchParams.set('client_id', appId);
       url.searchParams.set('redirect_uri', DONATIONALERTS_REDIRECT_URL);
       url.searchParams.set('response_type', 'token');
       url.searchParams.set('scope', DONATIONALERTS_SCOPES);
+      url.searchParams.set('state', state);
       return url.toString();
     }
 
@@ -10205,7 +10438,17 @@
       settings.lastError = '';
       saveData();
 
-      location.href = buildDonationAlertsImplicitOAuthUrl(settings.appId);
+      let oauthState = '';
+      try {
+        oauthState = createDonationAlertsOAuthState();
+      } catch (error) {
+        settings.status = 'error';
+        settings.lastError = 'Не удалось подготовить безопасное OAuth-подключение.';
+        saveData();
+        setIntegrationModalError('donationalerts', settings.lastError);
+        return;
+      }
+      location.href = buildDonationAlertsImplicitOAuthUrl(settings.appId, oauthState);
     }
 
     function startDonationAlertsCustomOAuth() {
@@ -10244,6 +10487,7 @@
       const hashParams = getOAuthHashParams();
       const accessToken = hashParams.get('access_token');
       if (!accessToken) return false;
+      const oauthStateValid = consumeDonationAlertsOAuthState(hashParams.get('state'));
 
       try {
         if (history.replaceState) {
@@ -10254,6 +10498,10 @@
         }
       } catch (error) {
         console.warn('Не удалось очистить OAuth hash из адресной строки', error);
+      }
+      if (!oauthStateValid) {
+        console.warn('DonationAlerts OAuth callback rejected: state mismatch or expired state.');
+        return true;
       }
       await adminLeaderReadyPromise;
       const settings = donationIntegrations.donationalerts;
@@ -10777,8 +11025,8 @@
       saveData();
       renderList();
     });
-    document.getElementById('hide-added-order').addEventListener('change', (e) => {
-      hideAddedOrder = e.target.checked;
+    document.getElementById('show-added-order').addEventListener('change', (e) => {
+      hideAddedOrder = !e.target.checked;
       saveData();
       renderList();
     });
@@ -10788,7 +11036,15 @@
       saveData();
     });
 
-    document.getElementById('search-filter').addEventListener('input', renderList);
+    function scheduleEntriesSearchRender() {
+      if (entriesSearchRenderTimer) clearTimeout(entriesSearchRenderTimer);
+      entriesSearchRenderTimer = setTimeout(() => {
+        entriesSearchRenderTimer = null;
+        renderList();
+      }, 120);
+    }
+
+    document.getElementById('search-filter').addEventListener('input', scheduleEntriesSearchRender);
 
     function setupColumnResizers() {
       const layout = document.querySelector('.wheel-layout');
@@ -11093,6 +11349,10 @@
     }
 
     function renderList() {
+      if (entriesSearchRenderTimer) {
+        clearTimeout(entriesSearchRenderTimer);
+        entriesSearchRenderTimer = null;
+      }
       const list = document.getElementById('entries-list');
       
       const auctionEntries = entries.filter(entry => entry);
@@ -11272,7 +11532,7 @@
       const parsedPrice = parseFloat(rawPrice);
       const price = Number.isFinite(parsedPrice) ? Math.max(0, parsedPrice) : 0;
       
-      if (name) {
+      if (name && canCreateAuctionEntry({ notify: true })) {
         document.getElementById('search-filter').value = '';
         const insertAt = cryptoRandomInt(0, entries.length + 1);
         const leftHex = insertAt > 0 ? entries[insertAt - 1].color : null;
@@ -11424,7 +11684,50 @@
       return null;
     }
 
-    function drawWheel(eliminatedIndex = -1) {
+    function getWheelGeometryCacheKey(activeEntries, wheelLabelFontPx) {
+      return JSON.stringify({
+        font: wheelLabelFontPx,
+        initialCount: Number(spinSeriesInitialCount) || 0,
+        entries: activeEntries.map(entry => [
+          String(entry.id),
+          String(entry.name || ''),
+          String(entry.color || ''),
+          getEntryAmount(entry)
+        ])
+      });
+    }
+
+    function buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx) {
+      const wheelData = activeEntries.map(entry => {
+        let weight = getCurrentWheelWeight(entry, activeEntries);
+        if (shrinkingTarget && entry.id === shrinkingTarget.id) {
+          weight *= (1 - shrinkingProgress);
+        }
+        return { entry, weight };
+      });
+      const totalWeight = wheelData.reduce((sum, item) => sum + item.weight, 0);
+      if (totalWeight <= 0) return null;
+
+      let relativeStartAngle = 0;
+      wheelData.forEach(item => {
+        item.slicePercent = (item.weight / totalWeight) * 100;
+        item.sliceAngle = (item.slicePercent / 100) * 2 * Math.PI;
+        item.relativeStartAngle = relativeStartAngle;
+        relativeStartAngle += item.sliceAngle;
+        item.labelLayout = pickWheelSectorLabelLayout(
+          ctx,
+          item.entry.name,
+          radius,
+          innerHoleRadiusLogical,
+          item.sliceAngle,
+          wheelLabelFontPx,
+          { noFontShrink: Boolean(shrinkingTarget && item.entry.id === shrinkingTarget.id) }
+        );
+      });
+      return wheelData;
+    }
+
+    function drawWheel() {
       const LOGICAL = WHEEL_DRAW_LOGICAL_PX;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -11443,35 +11746,28 @@
       /* Центральный круг в вёрстке: 18% ширины колеса → радиус отверстия = 9% логического размера холста */
       const innerHoleRadiusLogical = WHEEL_DRAW_LOGICAL_PX * 0.09;
 
-      // 1. Подготовка данных секторов с учетом возможного анимационного уменьшения (shrinking)
-      let wheelData = [];
-      let totalWeight = 0;
+      let wheelData = null;
+      if (shrinkingTarget) {
+        wheelData = buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx);
+      } else {
+        const cacheKey = getWheelGeometryCacheKey(activeEntries, wheelLabelFontPx);
+        if (wheelGeometryCache.key !== cacheKey || !wheelGeometryCache.data) {
+          wheelGeometryCache = {
+            key: cacheKey,
+            data: buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx)
+          };
+        }
+        wheelData = wheelGeometryCache.data;
+      }
 
-      activeEntries.forEach(entry => {
-          let w = getCurrentWheelWeight(entry, activeEntries);
-          // Если лот находится в стадии исчезновения - искусственно уменьшаем его вес
-          if (shrinkingTarget && entry.id === shrinkingTarget.id) {
-              w *= (1 - shrinkingProgress);
-          }
-          totalWeight += w;
-          wheelData.push({ entry, weight: w });
-      });
-
-      if (totalWeight <= 0) {
+      if (!wheelData) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         return;
       }
 
-      let startAngle = currentAngle - Math.PI / 2;
-      
-      // Расчет углов
+      const startAngle = currentAngle - Math.PI / 2;
       wheelData.forEach(item => {
-          const slicePercent = (item.weight / totalWeight) * 100;
-          const sliceAngle = (slicePercent / 100) * 2 * Math.PI;
-          item.sliceAngle = sliceAngle;
-          item.slicePercent = slicePercent;
-          item.startAngle = startAngle;
-          startAngle += sliceAngle;
+          item.startAngle = startAngle + item.relativeStartAngle;
       });
 
       // 2. Отрисовка цветных секций
@@ -11500,16 +11796,7 @@
           let textAngle = (item.startAngle + item.sliceAngle / 2) % (2 * Math.PI);
           if (textAngle < 0) textAngle += 2 * Math.PI;
 
-          const isShrinkingSector = shrinkingTarget && item.entry.id === shrinkingTarget.id;
-          const layout = pickWheelSectorLabelLayout(
-            ctx,
-            item.entry.name,
-            radius,
-            innerHoleRadiusLogical,
-            item.sliceAngle,
-            wheelLabelFontPx,
-            { noFontShrink: isShrinkingSector }
-          );
+          const layout = item.labelLayout;
           if (layout) {
             ctx.save();
             ctx.translate(cx, cy);
@@ -11549,7 +11836,7 @@
     }
 
     function normalizeSpinCollectionAction(value) {
-      return ['stop_and_spin', 'spin_without_stopping', 'require_stopped'].includes(value)
+      return ['stop_and_spin', 'require_stopped'].includes(value)
         ? value
         : 'require_stopped';
     }
@@ -11574,7 +11861,8 @@
       lastSpinResult = result;
       recentSpinResults = normalizeRecentSpinResults(
         [result, ...recentSpinResults],
-        currentAuctionGeneration
+        currentAuctionGeneration,
+        MAX_RECENT_SPIN_RESULTS
       );
       handledSpinRequests.set(String(result.spinRequestId), { status: 'done', result });
     }
@@ -12170,11 +12458,6 @@
       startSpinNow();
     });
     document.getElementById('spin-donations-cancel').addEventListener('click', closeSpinDonationsModal);
-    document.getElementById('spin-without-stopping').addEventListener('click', () => {
-      closeSpinDonationsModal();
-      if (appViewMode === 'wheel') requestSpinFromWheel('spin_without_stopping');
-      else startSpinNow();
-    });
     document.getElementById('spin-stop-and-start').addEventListener('click', async () => {
       closeSpinDonationsModal();
       if (appViewMode === 'wheel') {
@@ -12201,7 +12484,7 @@
       // Является ли этот прокрут финальным (если останется 1 сегмент после удаления)
       const isFinal = activeEntries.length <= 2; 
 
-      drawWheel(globalVictimIdx); // Затеняем остальные сектора
+      drawWheel();
       
       const overlay = document.getElementById('center-text-overlay');
       const topText = document.getElementById('top-winner-text');
@@ -12261,7 +12544,7 @@
           const progress = Math.min((timestamp - shrinkStart) / shrinkDuration, 1);
           shrinkingProgress = easeInOutQuad(progress); 
           
-          drawWheel(globalVictimIdx); 
+          drawWheel();
           
           if (progress < 1) {
               shrinkAnimFrame = requestAnimationFrame(animateShrink);
@@ -12272,7 +12555,6 @@
               shrinkAnimFrame = null;
               victimRef.eliminated = true;
               shiftSpinSeriesQueueAfterVictim(victimRef);
-              const remainingAfterElimination = entries.filter(e => !e.eliminated);
               isDelaying = false;
               isSpinning = false; 
               

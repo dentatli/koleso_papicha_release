@@ -6,6 +6,9 @@
     [AllowNull()][object]$DonationAlertsPollInput = $null,
     [switch]$DonatePayRecoveryWorkerOnly,
     [AllowNull()][object]$DonatePayRecoveryWorkerInput = $null,
+    [switch]$UpstreamWorkerOnly,
+    [AllowNull()][object]$UpstreamWorkerInput = $null,
+    [int]$ListenPort = 0,
     [switch]$SkipStartupNetwork,
     [hashtable]$TrayState = $null
 )
@@ -708,7 +711,7 @@ function Get-OpenRouterSecretStatus {
 }
 
 $HostAddress = "127.0.0.1"
-$Ports = @(5500)
+$Ports = if ($ListenPort -ge 1024 -and $ListenPort -le 65535) { @($ListenPort) } else { @(5500) }
 $Listener = $null
 $SelectedPort = 5500
 $script:SelectedPort = $SelectedPort
@@ -1207,6 +1210,7 @@ function Send-Json {
 
     $StatusText = switch ($StatusCode) {
         200 { "OK" }
+        202 { "Accepted" }
         204 { "No Content" }
         400 { "Bad Request" }
         401 { "Unauthorized" }
@@ -1216,7 +1220,10 @@ function Send-Json {
         409 { "Conflict" }
         413 { "Payload Too Large" }
         431 { "Request Header Fields Too Large" }
+        429 { "Too Many Requests" }
         502 { "Bad Gateway" }
+        503 { "Service Unavailable" }
+        504 { "Gateway Timeout" }
         default { "Internal Server Error" }
     }
     $Json = if ($null -eq $Data) { "" } else { $Data | ConvertTo-Json -Depth 20 -Compress }
@@ -1440,12 +1447,6 @@ function Test-LotCategoriesCompatible {
         $Expected -eq $Existing
 }
 
-function Get-LotVariantTokens {
-    param([AllowNull()][string]$Text)
-
-    return @(Get-LotTitleTokens $Text -IgnoreSafeArticles | Where-Object { Test-LotVariantToken $_ } | Select-Object -Unique)
-}
-
 function Get-NormalizedEditSimilarity {
     param(
         [AllowNull()][string]$Left,
@@ -1591,63 +1592,6 @@ function Get-LlmManualLotSuggestion {
     }
 }
 
-function Get-LlmExistingSelectionEvidence {
-    param(
-        [AllowNull()][string]$Query,
-        [AllowNull()][object]$Entry,
-        [AllowNull()][string]$TrustedSource = '',
-        [AllowNull()][string]$TrustedExternalId = ''
-    )
-
-    if (-not $Entry -or [bool]$Entry.eliminated) {
-        return [pscustomobject]@{ safe = $false; matchKind = ''; reason = 'entry_unavailable'; comparison = $null }
-    }
-    $EntryInfo = Get-LlmTitleInformation ([string]$Entry.name)
-    if (-not $EntryInfo.usable) {
-        return [pscustomobject]@{ safe = $false; matchKind = ''; reason = 'opaque_entry_name'; comparison = $null }
-    }
-    $QueryInfo = Get-LlmTitleInformation $Query
-    if (-not $QueryInfo.usable) {
-        return [pscustomobject]@{ safe = $false; matchKind = ''; reason = 'low_information_query'; comparison = $null }
-    }
-    if (
-        -not [string]::IsNullOrWhiteSpace($TrustedSource) -and
-        -not [string]::IsNullOrWhiteSpace($TrustedExternalId) -and
-        [string]$Entry.source -eq $TrustedSource -and
-        [string]$Entry.externalId -eq $TrustedExternalId
-    ) {
-        return [pscustomobject]@{ safe = $true; matchKind = 'exact_external_identity'; reason = ''; comparison = $null }
-    }
-    $Comparison = Compare-LotTitles $Query ([string]$Entry.name)
-    if ($Comparison.exact) {
-        return [pscustomobject]@{ safe = $true; matchKind = 'exact_title'; reason = ''; comparison = $Comparison }
-    }
-    return [pscustomobject]@{
-        safe = $false
-        matchKind = ''
-        reason = if ($Comparison.hasVariantConflict) { 'variant_conflict' } else { 'semantic_mismatch' }
-        comparison = $Comparison
-    }
-}
-
-function Get-TokenSimilarity {
-    param(
-        [AllowNull()][string]$Left,
-        [AllowNull()][string]$Right
-    )
-
-    $A = @(Get-LotTitleTokens $Left -IgnoreSafeArticles)
-    $B = @(Get-LotTitleTokens $Right -IgnoreSafeArticles)
-    if ($A.Count -eq 0 -or $B.Count -eq 0) { return 0.0 }
-    $SetA = @{}
-    foreach ($Item in $A) { $SetA[$Item] = $true }
-    $Hits = 0
-    foreach ($Item in $B) {
-        if ($SetA.ContainsKey($Item)) { $Hits += 1 }
-    }
-    return [double]$Hits / [double]([Math]::Max($A.Count, $B.Count))
-}
-
 function Get-SafeEntriesForLlm {
     param([object]$Entries)
 
@@ -1731,26 +1675,6 @@ function Get-EntryFingerprint {
         source = Limit-LogText ([string]$Entry.source) 40
         externalId = Limit-LogText ([string]$Entry.externalId) 200
     }
-}
-
-function Find-EliminatedEntryMatch {
-    param(
-        [AllowNull()][string]$Text,
-        [object[]]$Entries,
-        [AllowNull()][string]$ExpectedCategory = ''
-    )
-
-    $ActiveCopies = @($Entries | Where-Object { $_ -and [bool]$_.eliminated } | ForEach-Object {
-        [pscustomobject]@{
-            id = [string]$_.id
-            name = [string]$_.name
-            source = [string]$_.source
-            externalId = [string]$_.externalId
-            category = [string]$_.category
-            eliminated = $false
-        }
-    })
-    return Find-ExistingEntryMatch $Text $ActiveCopies $ExpectedCategory
 }
 
 function ConvertTo-LlmResult {
@@ -3011,138 +2935,6 @@ function Search-ExistingEntryByCandidate {
     return $null
 }
 
-function Test-EliminatedEntryByCandidate {
-    param(
-        [object]$Candidate,
-        [object[]]$Entries,
-        [AllowNull()][string]$ExpectedCategory = ''
-    )
-
-    if (-not $Candidate) { return $false }
-    foreach ($Entry in @($Entries)) {
-        if (-not $Entry -or -not [bool]$Entry.eliminated) { continue }
-        if (
-            [string]$Entry.source -eq [string]$Candidate.source -and
-            -not [string]::IsNullOrWhiteSpace([string]$Candidate.externalId) -and
-            [string]$Entry.externalId -eq [string]$Candidate.externalId
-        ) { return $true }
-    }
-    return $null -ne (Find-EliminatedEntryMatch ([string]$Candidate.title) $Entries $ExpectedCategory)
-}
-
-function Get-CandidateComparableTitles {
-    param([object]$Candidate)
-
-    if (-not $Candidate) { return @() }
-    return @(
-        @($Candidate.title, $Candidate.titleEnglish, $Candidate.titleRomaji, $Candidate.titleNative) + @($Candidate.synonyms) |
-            ForEach-Object { Normalize-LotTitle ([string]$_) } |
-            Where-Object { $_ } |
-            Select-Object -Unique
-    )
-}
-
-function Test-CandidateQualifierConflict {
-    param(
-        [string]$Query,
-        [object]$Candidate
-    )
-
-    if (-not $Candidate) { return $true }
-    $QueryYearMatch = [System.Text.RegularExpressions.Regex]::Match((Normalize-LotTitle $Query), '\b(19|20)\d{2}\b')
-    if ($QueryYearMatch.Success -and $Candidate.seasonYear) {
-        if ([string]$Candidate.seasonYear -ne $QueryYearMatch.Value) { return $true }
-    }
-    return $false
-}
-
-function Test-FranchiseVariantAlternative {
-    param(
-        [string]$Query,
-        [object]$ExactCandidate,
-        [object[]]$OtherCandidates
-    )
-
-    if (@(Get-LotVariantTokens $Query).Count -gt 0) { return $false }
-    foreach ($Candidate in @($OtherCandidates)) {
-        foreach ($Title in @(Get-CandidateComparableTitles $Candidate)) {
-            $Comparison = Compare-LotTitles $Query $Title
-            if (
-                $Comparison.hasVariantConflict -and
-                @(Get-LotVariantTokens $Title).Count -gt 0 -and
-                (Get-TokenSimilarity $Query $Title) -ge 0.40
-            ) {
-                return $true
-            }
-        }
-    }
-    return $false
-}
-
-function Get-UniqueExactCatalogCandidate {
-    param(
-        [string]$Query,
-        [object[]]$Candidates
-    )
-
-    $QueryNormalized = Normalize-LotTitle $Query
-    $ExactCandidates = @($Candidates | Select-Object -First 5 | Where-Object {
-        $Candidate = $_
-        @(
-            Get-CandidateComparableTitles $Candidate |
-                Where-Object { (Compare-LotTitles $QueryNormalized $_).exact }
-        ).Count -gt 0
-    })
-    if ($ExactCandidates.Count -eq 1) { return $ExactCandidates[0] }
-    return $null
-}
-
-function Test-CatalogCandidatesAmbiguous {
-    param(
-        [string]$Query,
-        [object[]]$Candidates
-    )
-
-    $List = @($Candidates | Select-Object -First 5)
-    if ($List.Count -eq 0) { return $true }
-    $QueryNormalized = Normalize-LotTitle $Query
-    $ExactCandidates = @($List | Where-Object {
-        $Candidate = $_
-        @(Get-CandidateComparableTitles $Candidate | Where-Object { (Compare-LotTitles $QueryNormalized $_).exact }).Count -gt 0
-    })
-    if ($ExactCandidates.Count -eq 1) {
-        $ExactCandidate = Get-UniqueExactCatalogCandidate $QueryNormalized $List
-        $Others = @($List | Where-Object { [string]$_.candidateId -ne [string]$ExactCandidate.candidateId })
-        if (
-            -not (Test-CandidateQualifierConflict $QueryNormalized $ExactCandidate) -and
-            -not (Test-FranchiseVariantAlternative $QueryNormalized $ExactCandidate $Others)
-        ) {
-            return $false
-        }
-    }
-    elseif ($ExactCandidates.Count -gt 1) {
-        return $true
-    }
-
-    $Top = $List[0]
-    $TopScore = [double]$Top.score
-    if ($TopScore -lt 0.88) { return $true }
-    if ($List.Count -eq 1) { return $TopScore -lt 0.94 }
-
-    $Second = $List[1]
-    $SecondScore = [double]$Second.score
-    if (($TopScore - $SecondScore) -lt 0.12) { return $true }
-
-    $TopName = Normalize-LotTitle ([string]$Top.title)
-    $SecondName = Normalize-LotTitle ([string]$Second.title)
-    $FranchiseSimilarity = Get-TokenSimilarity $TopName $SecondName
-    $HasVariantQualifier = @(Get-LotVariantTokens $TopName).Count -gt 0 -or @(Get-LotVariantTokens $SecondName).Count -gt 0
-    $QueryHasQualifier = @(Get-LotVariantTokens $QueryNormalized).Count -gt 0
-    if ($FranchiseSimilarity -ge 0.45 -and $HasVariantQualifier -and -not $QueryHasQualifier) { return $true }
-
-    return $false
-}
-
 function Get-AnimeSearchCache {
     $Data = Read-JsonFileSafe $script:AnimeSearchCachePath ([pscustomobject]@{})
     if (-not $Data) { return [pscustomobject]@{} }
@@ -3371,22 +3163,6 @@ function Get-OpenRouterMessageContentInfo {
         contentClrType = $ContentType
         contentPartCount = $PartCount
     }
-}
-
-function Get-OpenRouterMessageContentText {
-    param([AllowNull()][object]$Message)
-
-    $Refusal = if ($Message -and $Message.PSObject.Properties['refusal']) {
-        Normalize-OpenRouterContentText ([string]$Message.refusal)
-    } else { "" }
-    if (-not [string]::IsNullOrWhiteSpace($Refusal)) {
-        Throw-LlmError "LLM_RESPONSE_REFUSAL" "OpenRouter refused to produce the requested structured response."
-    }
-    $Info = Get-OpenRouterMessageContentInfo $Message
-    if ([string]::IsNullOrWhiteSpace([string]$Info.text)) {
-        Throw-LlmError "LLM_RESPONSE_CONTENT_MISSING" "OpenRouter returned no text content."
-    }
-    return [string]$Info.text
 }
 
 function Get-OpenRouterContentFingerprint {
@@ -6058,11 +5834,6 @@ function Reset-DonationAlertsFailureState {
     $ServiceState.FailureEscalated = $false
 }
 
-function Set-CollectorBackoff {
-    param([hashtable]$ServiceState, [object]$Result)
-    [void](Set-DonationAlertsFailureState $ServiceState $Result)
-}
-
 function Clear-CollectorBackoff {
     param([hashtable]$ServiceState)
     Clear-DonationAlertsFailureState $ServiceState
@@ -7023,6 +6794,273 @@ function Stop-LlmWorkerRunspace {
     try { $Handle.Runspace.Close(); $Handle.Runspace.Dispose() } catch {}
 }
 
+$script:UpstreamJobs = @{}
+$script:MaxConcurrentUpstreamJobs = 4
+$script:UpstreamJobTimeout = [TimeSpan]::FromSeconds(45)
+$script:UpstreamJobRetention = [TimeSpan]::FromSeconds(60)
+
+function Invoke-UpstreamWorkerRequest {
+    param([object]$InputData)
+
+    $Kind = [string]$InputData.kind
+    $Payload = $InputData.payload
+    switch ($Kind) {
+        "openrouter-test" {
+            $Result = Test-OpenRouterIntegration ([string]$Payload.model)
+            return [pscustomobject]@{ kind = $Kind; result = $Result }
+        }
+        "donationalerts-user" {
+            $AccessToken = [string]$Payload.access_token
+            if ([string]::IsNullOrWhiteSpace($AccessToken)) { $AccessToken = Get-DonationAlertsStoredToken }
+            if ([string]::IsNullOrWhiteSpace($AccessToken)) {
+                return [pscustomobject]@{
+                    kind = $Kind
+                    result = [pscustomobject]@{ ok = $false; error = "DonationAlerts access token is not configured."; status = 401 }
+                }
+            }
+            $Result = Invoke-DonationAlertsApi `
+                "https://www.donationalerts.com/api/v1/user/oauth" `
+                $AccessToken `
+                "/api/da/user"
+            return [pscustomobject]@{
+                kind = $Kind
+                tokenFingerprint = Get-DonationAlertsTokenFingerprint $AccessToken
+                result = $Result
+            }
+        }
+        "donationalerts-donations" {
+            $AccessToken = [string]$Payload.access_token
+            if ([string]::IsNullOrWhiteSpace($AccessToken)) { $AccessToken = Get-DonationAlertsStoredToken }
+            if ([string]::IsNullOrWhiteSpace($AccessToken)) {
+                return [pscustomobject]@{
+                    kind = $Kind
+                    result = [pscustomobject]@{ ok = $false; error = "DonationAlerts access token is not configured."; status = 401 }
+                }
+            }
+            $Result = Invoke-DonationAlertsApi `
+                "https://www.donationalerts.com/api/v1/alerts/donations" `
+                $AccessToken `
+                "/api/da/donations"
+            return [pscustomobject]@{ kind = $Kind; result = $Result }
+        }
+        "donatepay-socket-token" {
+            return [pscustomobject]@{ kind = $Kind; result = Invoke-DonatePaySocketToken $Payload }
+        }
+        "donatepay-user" {
+            return [pscustomobject]@{
+                kind = $Kind
+                result = Invoke-DonatePayApi ([string]$Payload.region) "/api/v1/user" $Payload "/api/dp/user"
+            }
+        }
+        "donatepay-transactions" {
+            return [pscustomobject]@{
+                kind = $Kind
+                result = Invoke-DonatePayApi ([string]$Payload.region) "/api/v1/transactions" $Payload "/api/dp/transactions"
+            }
+        }
+        "donatepay-subscribe" {
+            return [pscustomobject]@{ kind = $Kind; result = Invoke-DonatePaySubscribe $Payload }
+        }
+        "startup-refresh" {
+            [void](Initialize-CurrencyRates)
+            Test-AppVersion
+            return [pscustomobject]@{
+                kind = $Kind
+                result = [pscustomobject]@{
+                    currency = Get-CurrencyRateStatus
+                    version = Get-AppVersionStatus
+                }
+            }
+        }
+        "test-delay" {
+            $DelayMs = [Math]::Min(10000, [Math]::Max(0, [int]$Payload.delayMs))
+            Start-Sleep -Milliseconds $DelayMs
+            return [pscustomobject]@{ kind = $Kind; result = [pscustomobject]@{ ok = $true; delayMs = $DelayMs } }
+        }
+        default {
+            throw "Unknown upstream worker kind."
+        }
+    }
+}
+
+function Start-UpstreamWorkerRunspace {
+    param([object]$WorkerInput)
+
+    $Runspace = [runspacefactory]::CreateRunspace()
+    $Runspace.ApartmentState = "MTA"
+    $Runspace.Open()
+    $PowerShell = [powershell]::Create()
+    $PowerShell.Runspace = $Runspace
+    [void]$PowerShell.AddCommand($PSCommandPath)
+    [void]$PowerShell.AddParameter("Root", $RootPath)
+    [void]$PowerShell.AddParameter("ServerOnly", $true)
+    [void]$PowerShell.AddParameter("UpstreamWorkerOnly", $true)
+    [void]$PowerShell.AddParameter("UpstreamWorkerInput", $WorkerInput)
+    try {
+        $AsyncResult = $PowerShell.BeginInvoke()
+        return [pscustomobject]@{ Runspace = $Runspace; PowerShell = $PowerShell; AsyncResult = $AsyncResult }
+    }
+    catch {
+        $PowerShell.Dispose()
+        $Runspace.Close()
+        $Runspace.Dispose()
+        throw
+    }
+}
+
+function Stop-UpstreamWorkerRunspace {
+    param([AllowNull()][object]$Handle)
+
+    if (-not $Handle) { return }
+    try {
+        if ($Handle.AsyncResult -and -not $Handle.AsyncResult.IsCompleted) { $Handle.PowerShell.Stop() }
+        elseif ($Handle.AsyncResult) { [void]$Handle.PowerShell.EndInvoke($Handle.AsyncResult) }
+    } catch {}
+    try { $Handle.PowerShell.Dispose() } catch {}
+    try { $Handle.Runspace.Close(); $Handle.Runspace.Dispose() } catch {}
+}
+
+function Get-UpstreamResultStatusCode {
+    param([object]$Result)
+
+    if (-not $Result -or $Result.ok -ne $false) { return 200 }
+    $StatusCode = 500
+    try {
+        $ParsedStatus = 0
+        if ([int]::TryParse([string]$Result.status, [ref]$ParsedStatus) -and $ParsedStatus -ge 400 -and $ParsedStatus -le 599) {
+            $StatusCode = $ParsedStatus
+        }
+    } catch {}
+    return $StatusCode
+}
+
+function Queue-UpstreamRequest {
+    param(
+        [string]$Kind,
+        [AllowNull()][object]$Payload = $null
+    )
+
+    Update-UpstreamJobs
+    $ActiveCount = @($script:UpstreamJobs.Values | Where-Object { -not $_.CompletedAt }).Count
+    if ($ActiveCount -ge $script:MaxConcurrentUpstreamJobs) {
+        return [pscustomobject]@{
+            ok = $false
+            error = "Too many external requests are already running."
+            code = "UPSTREAM_QUEUE_FULL"
+            status = 429
+        }
+    }
+
+    $RequestId = "upstream-$([guid]::NewGuid().ToString('N'))"
+    try {
+        $Handle = Start-UpstreamWorkerRunspace ([pscustomobject]@{ kind = $Kind; payload = $Payload })
+    }
+    catch {
+        Write-AppLog -Level "ERROR" -Message "Upstream worker start failed: $($_.Exception.Message)"
+        return [pscustomobject]@{ ok = $false; error = "Could not start external request."; status = 503 }
+    }
+
+    $script:UpstreamJobs[$RequestId] = [pscustomobject]@{
+        RequestId = $RequestId
+        Kind = $Kind
+        Handle = $Handle
+        CreatedAt = [DateTimeOffset]::UtcNow
+        CompletedAt = $null
+        StatusCode = 202
+        Result = $null
+    }
+    return [pscustomobject]@{ ok = $true; queued = $true; requestId = $RequestId }
+}
+
+function Update-UpstreamJobs {
+    $Now = [DateTimeOffset]::UtcNow
+    foreach ($RequestId in @($script:UpstreamJobs.Keys)) {
+        $Job = $script:UpstreamJobs[$RequestId]
+        if (-not $Job) { continue }
+        if ($Job.CompletedAt) {
+            if (($Now - [DateTimeOffset]$Job.CompletedAt) -gt $script:UpstreamJobRetention) {
+                $script:UpstreamJobs.Remove($RequestId)
+            }
+            continue
+        }
+
+        $Handle = $Job.Handle
+        $TimedOut = ($Now - [DateTimeOffset]$Job.CreatedAt) -gt $script:UpstreamJobTimeout
+        if (-not $TimedOut -and $Handle -and -not $Handle.AsyncResult.IsCompleted) { continue }
+
+        try {
+            if ($TimedOut) {
+                Stop-UpstreamWorkerRunspace $Handle
+                $Job.StatusCode = 504
+                $Job.Result = [pscustomobject]@{ ok = $false; error = "External request timed out."; status = 504 }
+            }
+            else {
+                $Output = @($Handle.PowerShell.EndInvoke($Handle.AsyncResult))
+                $Envelope = @($Output | Where-Object { $_ -and $_.PSObject.Properties['kind'] -and $_.PSObject.Properties['result'] } | Select-Object -Last 1)[0]
+                if (-not $Envelope) { throw "Upstream worker returned no result." }
+                $Job.Result = $Envelope.result
+                $Job.StatusCode = Get-UpstreamResultStatusCode $Job.Result
+
+                if ([string]$Envelope.kind -eq "donationalerts-user" -and $Job.StatusCode -eq 200) {
+                    $CurrentToken = Get-DonationAlertsStoredToken
+                    $CurrentFingerprint = Get-DonationAlertsTokenFingerprint $CurrentToken
+                    if ([string]$Envelope.tokenFingerprint -ceq $CurrentFingerprint) {
+                        $ProfileCurrency = Get-DonationAlertsProfileCurrency $Job.Result
+                        if (-not [string]::IsNullOrWhiteSpace($ProfileCurrency)) {
+                            [void](Set-DonationAlertsStoredUserCurrencyForToken `
+                                -Currency $ProfileCurrency `
+                                -AccessToken $CurrentToken `
+                                -ExpectedTokenFingerprint $CurrentFingerprint `
+                                -UpdateRuntime)
+                        }
+                    }
+                }
+                elseif ([string]$Envelope.kind -eq "startup-refresh" -and $Job.StatusCode -eq 200) {
+                    $script:CurrencyRateSnapshot = $Job.Result.currency
+                    $script:CurrencyRatesInitialized = $true
+                    $script:CurrencyRatesLoadCount = 1
+                    $script:AppVersionStatus = $Job.Result.version
+                    Write-AppVersionLog
+                }
+            }
+        }
+        catch {
+            Write-AppLog -Level "ERROR" -Message "Upstream worker failed: $($_.Exception.Message)"
+            $Job.StatusCode = 503
+            $Job.Result = [pscustomobject]@{ ok = $false; error = "External request failed."; status = 503 }
+        }
+        finally {
+            if (-not $TimedOut) {
+                try { $Handle.PowerShell.Dispose() } catch {}
+                try { $Handle.Runspace.Close(); $Handle.Runspace.Dispose() } catch {}
+            }
+            $Job.Handle = $null
+            $Job.CompletedAt = [DateTimeOffset]::UtcNow
+        }
+    }
+}
+
+function Get-UpstreamJobResponse {
+    param([string]$RequestId)
+
+    Update-UpstreamJobs
+    if (-not $script:UpstreamJobs.ContainsKey($RequestId)) {
+        return [pscustomobject]@{ HttpStatus = 404; Body = [pscustomobject]@{ ok = $false; error = "External request not found."; status = 404 } }
+    }
+    $Job = $script:UpstreamJobs[$RequestId]
+    if (-not $Job.CompletedAt) {
+        return [pscustomobject]@{ HttpStatus = 202; Body = [pscustomobject]@{ ok = $true; queued = $true; requestId = $RequestId } }
+    }
+    return [pscustomobject]@{ HttpStatus = [int]$Job.StatusCode; Body = $Job.Result }
+}
+
+function Stop-AllUpstreamJobs {
+    foreach ($Job in @($script:UpstreamJobs.Values)) {
+        if ($Job -and $Job.Handle) { Stop-UpstreamWorkerRunspace $Job.Handle }
+    }
+    $script:UpstreamJobs.Clear()
+}
+
 if ($DonationAlertsPollWorkerOnly) {
     $PollToken = [string]$DonationAlertsPollInput.accessToken
     $PollSignature = [string]$DonationAlertsPollInput.signature
@@ -7043,6 +7081,11 @@ if ($DonatePayRecoveryWorkerOnly) {
     $RecoveryContext | Add-Member -NotePropertyName tokenFingerprint -NotePropertyValue ([string]$DonatePayRecoveryWorkerInput.tokenFingerprint) -Force
     $RecoveryResult = Invoke-DonatePayRecoveryFetch $DonatePayRecoveryWorkerInput
     Write-Output ([pscustomobject]@{ context = $RecoveryContext; result = $RecoveryResult })
+    return
+}
+
+if ($UpstreamWorkerOnly) {
+    Write-Output (Invoke-UpstreamWorkerRequest $UpstreamWorkerInput)
     return
 }
 
@@ -7108,15 +7151,25 @@ if ($SkipStartupNetwork) {
     $script:CurrencyRateSnapshot = New-UnavailableCurrencyRateSnapshot "Startup network is disabled for runtime tests."
 }
 else {
-    [void](Initialize-CurrencyRates)
-    Test-AppVersion
-    Write-AppVersionLog
+    $CachedRates = $null
+    $RatesMutex = Enter-NamedMutex $script:CurrencyRatesMutexName
+    try { $CachedRates = Get-CachedCurrencyRateSnapshot $script:CurrencyRatesCachePath "Background refresh is running." }
+    finally { Exit-NamedMutex $RatesMutex }
+    $script:CurrencyRatesInitialized = $true
+    $script:CurrencyRatesLoadCount = 1
+    $script:CurrencyRateSnapshot = if ($CachedRates) {
+        $CachedRates
+    } else {
+        New-UnavailableCurrencyRateSnapshot "Background refresh is running."
+    }
+    [void](Queue-UpstreamRequest "startup-refresh")
 }
 $script:LlmWorkerHandle = Start-LlmWorkerRunspace
 
 try {
     while (-not (Test-ServerStopRequested)) {
         try {
+            Update-UpstreamJobs
             Invoke-CollectorTickIfDue
 
             if (-not $Listener.Pending()) {
@@ -7232,6 +7285,33 @@ try {
                 continue
             }
 
+            if ($DecodedTarget -match '^/api/upstream/jobs/(upstream-[a-f0-9]{32})$') {
+                if ($Method -ne "GET") {
+                    Send-Json $Stream 405 @{ ok = $false; error = "Method not allowed."; status = 405 }
+                }
+                else {
+                    $JobResponse = Get-UpstreamJobResponse $Matches[1]
+                    Send-Json $Stream ([int]$JobResponse.HttpStatus) $JobResponse.Body $HeadOnly
+                }
+                continue
+            }
+
+            if ($DecodedTarget -eq "/api/test/upstream-delay") {
+                if (-not $SkipStartupNetwork) {
+                    Send-Json $Stream 404 @{ ok = $false; error = "API endpoint not found."; status = 404 }
+                }
+                elseif ($Method -ne "POST") {
+                    Send-Json $Stream 405 @{ ok = $false; error = "Method not allowed."; status = 405 }
+                }
+                else {
+                    $InputData = Read-JsonBody $Reader $ContentLength
+                    $Result = Queue-UpstreamRequest "test-delay" $InputData
+                    $StatusCode = if ($Result.ok) { 202 } else { [int]$Result.status }
+                    Send-Json $Stream $StatusCode $Result
+                }
+                continue
+            }
+
             if ($DecodedTarget -eq "/api/app/bootstrap") {
                 if ($Method -ne "POST") {
                     Send-Json $Stream 405 @{ ok = $false; error = "Method not allowed."; status = 405 }
@@ -7298,21 +7378,9 @@ try {
                 }
                 try {
                     $InputData = Read-JsonBody $Reader $ContentLength
-                    $Result = Invoke-DonatePaySubscribe $InputData
-                    if ($Result -and $Result.ok -eq $false) {
-                        Write-AppLog -Level "ERROR" -Message "DonatePay subscribe proxy request failed."
-                        $StatusCode = 500
-                        try {
-                            $ParsedStatus = 0
-                            if ([int]::TryParse([string]$Result.status, [ref]$ParsedStatus) -and $ParsedStatus -ge 400) {
-                                $StatusCode = $ParsedStatus
-                            }
-                        } catch {}
-                        Send-Json $Stream $StatusCode $Result
-                    }
-                    else {
-                        Send-Json $Stream 200 $Result
-                    }
+                    $Result = Queue-UpstreamRequest "donatepay-subscribe" $InputData
+                    $StatusCode = if ($Result.ok) { 202 } else { [int]$Result.status }
+                    Send-Json $Stream $StatusCode $Result
                 }
                 catch {
                     $FriendlyError = if ($_.Exception -is [System.ArgumentException]) {
@@ -7400,8 +7468,8 @@ try {
                                 break
                             }
                             $InputData = Read-JsonBody $Reader $ContentLength
-                            $Result = Test-OpenRouterIntegration ([string]$InputData.model)
-                            $StatusCode = if ($Result.ok) { 200 } else { 503 }
+                            $Result = Queue-UpstreamRequest "openrouter-test" $InputData
+                            $StatusCode = if ($Result.ok) { 202 } else { [int]$Result.status }
                             Send-Json $Stream $StatusCode $Result
                         }
                         "/api/integrations/openrouter/disconnect" {
@@ -7690,38 +7758,10 @@ try {
                             $ApiFound = $false
                         }
                         "/api/da/user" {
-                            $AccessToken = [string]$InputData.access_token
-                            if ([string]::IsNullOrWhiteSpace($AccessToken)) {
-                                $AccessToken = Get-DonationAlertsStoredToken
-                            }
-                            $RequestTokenFingerprint = Get-DonationAlertsTokenFingerprint $AccessToken
-                            $Result = Invoke-DonationAlertsApi `
-                                "https://www.donationalerts.com/api/v1/user/oauth" `
-                                $AccessToken `
-                                $DecodedTarget
-                            if (-not ($Result -and $Result.ok -eq $false)) {
-                                $ProfileCurrency = Get-DonationAlertsProfileCurrency $Result
-                                if (-not [string]::IsNullOrWhiteSpace($ProfileCurrency)) {
-                                    $CurrencySaved = Set-DonationAlertsStoredUserCurrencyForToken `
-                                        -Currency $ProfileCurrency `
-                                        -AccessToken $AccessToken `
-                                        -ExpectedTokenFingerprint $RequestTokenFingerprint `
-                                        -UpdateRuntime
-                                    if (-not $CurrencySaved) {
-                                        Write-AppLog -Level "WARN" -Message "DonationAlerts profile currency was not saved because the token changed or secure storage was unavailable."
-                                    }
-                                }
-                            }
+                            $Result = Queue-UpstreamRequest "donationalerts-user" $InputData
                         }
                         "/api/da/donations" {
-                            $AccessToken = [string]$InputData.access_token
-                            if ([string]::IsNullOrWhiteSpace($AccessToken)) {
-                                $AccessToken = Get-DonationAlertsStoredToken
-                            }
-                            $Result = Invoke-DonationAlertsApi `
-                                "https://www.donationalerts.com/api/v1/alerts/donations" `
-                                $AccessToken `
-                                $DecodedTarget
+                            $Result = Queue-UpstreamRequest "donationalerts-donations" $InputData
                         }
                         default {
                             $ApiFound = $false
@@ -7729,11 +7769,10 @@ try {
                     }
                     if ($ApiFound) {
                         if ($Result -and $Result.ok -eq $false) {
-                            Write-UpstreamErrorLog "DonationAlerts" $Result
-                            Send-Json $Stream 500 $Result
+                            Send-Json $Stream ([int]$Result.status) $Result
                         }
                         else {
-                            Send-Json $Stream 200 $Result
+                            Send-Json $Stream 202 $Result
                         }
                     }
                     else {
@@ -7773,16 +7812,15 @@ try {
                     $InputData = Read-JsonBody $Reader $ContentLength
                     $ApiFound = $true
                     $Result = $null
-                    $Region = [string]$InputData.region
                     switch ($DecodedTarget) {
                         "/api/dp/socket-token" {
-                            $Result = Invoke-DonatePaySocketToken $InputData
+                            $Result = Queue-UpstreamRequest "donatepay-socket-token" $InputData
                         }
                         "/api/dp/user" {
-                            $Result = Invoke-DonatePayApi $Region "/api/v1/user" $InputData $DecodedTarget
+                            $Result = Queue-UpstreamRequest "donatepay-user" $InputData
                         }
                         "/api/dp/transactions" {
-                            $Result = Invoke-DonatePayApi $Region "/api/v1/transactions" $InputData $DecodedTarget
+                            $Result = Queue-UpstreamRequest "donatepay-transactions" $InputData
                         }
                         "/api/dp/recovery-transactions" {
                             $Result = Queue-DonatePayRecoveryRequest $InputData
@@ -7793,19 +7831,11 @@ try {
                     }
                     if ($ApiFound) {
                         if ($Result -and $Result.ok -eq $false) {
-                            Write-Host "DonatePay proxy request failed." -ForegroundColor Yellow
-                            Write-AppLog -Level "ERROR" -Message "DonatePay proxy request failed."
-                            $StatusCode = 500
-                            try {
-                                $ParsedStatus = 0
-                                if ([int]::TryParse([string]$Result.status, [ref]$ParsedStatus) -and $ParsedStatus -ge 400) {
-                                    $StatusCode = $ParsedStatus
-                                }
-                            } catch {}
-                            Send-Json $Stream $StatusCode $Result
+                            Send-Json $Stream ([int]$Result.status) $Result
                         }
                         else {
-                            Send-Json $Stream 200 $Result
+                            $StatusCode = if ($DecodedTarget -eq "/api/dp/recovery-transactions") { 200 } else { 202 }
+                            Send-Json $Stream $StatusCode $Result
                         }
                     }
                     else {
@@ -7901,6 +7931,7 @@ try {
 }
 finally {
     Write-AppLog -Level "INFO" -Message "Server runtime stopping"
+    Stop-AllUpstreamJobs
     Stop-DonationAlertsPollRunspace $script:DonationAlertsPollHandle
     $script:DonationAlertsPollHandle = $null
     Stop-DonatePayRecoveryRunspace $script:DonatePayRecoveryHandle

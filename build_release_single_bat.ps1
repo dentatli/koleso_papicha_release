@@ -72,6 +72,7 @@ else {
 $ReleaseFiles = @(
     @{ Source = "koleso_papich.html"; Target = "assets/koleso_papich.html"; InjectBuildSha = $true },
     @{ Source = "centrifuge.min.js"; Target = "assets/centrifuge.min.js"; InjectBuildSha = $false },
+    @{ Source = "assets/THIRD_PARTY_NOTICES.md"; Target = "assets/THIRD_PARTY_NOTICES.md"; InjectBuildSha = $false },
     @{ Source = "local_server.ps1"; Target = "assets/local_server.ps1"; InjectBuildSha = $true },
     @{ Source = "tray.ico"; Target = "assets/tray.ico"; InjectBuildSha = $false },
     @{ Source = "tray-error.ico"; Target = "assets/tray-error.ico"; InjectBuildSha = $false },

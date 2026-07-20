@@ -23,22 +23,18 @@ $FunctionNames = @(
     'Get-LotTitleTokens',
     'Test-ValidRomanNumeral',
     'Test-LotVariantToken',
-    'Get-LotVariantTokens',
     'Get-NormalizedEditSimilarity',
     'Compare-LotTitles',
     'Get-LlmTitleInformation',
     'Normalize-LlmDisplayTitle',
     'Get-LlmManualLotSuggestion',
-    'Get-LlmExistingSelectionEvidence',
     'Normalize-LotCategory',
     'Test-LotCategoriesCompatible',
-    'Get-TokenSimilarity',
     'Normalize-LlmText',
     'Get-SafeEntriesForLlm',
     'Get-ActiveEntriesForLlmIntent',
     'Find-ExistingEntryMatch',
     'Get-EntryFingerprint',
-    'Find-EliminatedEntryMatch',
     'ConvertTo-LlmResult',
     'Resolve-LlmIntentDecision',
     'Get-LlmItemCatalog',
@@ -50,19 +46,12 @@ $FunctionNames = @(
     'ConvertTo-LlmNormalizedIntentEnvelope',
     'ConvertTo-LlmIntentItems',
     'Search-ExistingEntryByCandidate',
-    'Test-EliminatedEntryByCandidate',
-    'Get-CandidateComparableTitles',
-    'Test-CandidateQualifierConflict',
-    'Test-FranchiseVariantAlternative',
-    'Get-UniqueExactCatalogCandidate',
-    'Test-CatalogCandidatesAmbiguous',
     'Test-LlmIntentReadyForCatalog',
     'New-LlmCodedException',
     'Throw-LlmError',
     'ConvertFrom-LlmStructuredJson',
     'Normalize-OpenRouterContentText',
     'Get-OpenRouterMessageContentInfo',
-    'Get-OpenRouterMessageContentText',
     'Get-OpenRouterContentFingerprint',
     'Test-OpenRouterStructuredObject',
     'Get-OpenRouterParsedTopLevelType',
@@ -289,7 +278,7 @@ $ArrayDiagnostics = $null
 $ArrayParsed = ConvertFrom-OpenRouterStructuredContent $ArrayMessage -Diagnostics ([ref]$ArrayDiagnostics)
 Assert-Equal $ArrayParsed.reason 'Распознана игра The Outlast Trials.' 'Text-part array content was not joined in order.'
 Assert-Equal $ArrayDiagnostics.contentPartCount 3 'OpenRouter content part count is incorrect.'
-Assert-False ((Get-OpenRouterMessageContentText $ArrayMessage).Contains('image_url')) 'Non-text content leaked into structured JSON.'
+Assert-False ((Get-OpenRouterMessageContentInfo $ArrayMessage).text.Contains('image_url')) 'Non-text content leaked into structured JSON.'
 
 $ObjectMessage = [pscustomobject]@{ content = [pscustomobject]@{ text = $StructuredFixture } }
 Assert-Equal (ConvertFrom-OpenRouterStructuredContent $ObjectMessage).category 'game' 'Object text content was not parsed.'
@@ -840,7 +829,7 @@ Assert-Equal $DonatePayRow.amount 700 'DonatePay amount mapping changed.'
 Assert-Equal $DonatePayRow.currency 'RUB' 'DonatePay currency mapping changed.'
 
 $DonatePayFunctionStart = $ServerSource.IndexOf('function Convert-DonatePayNotificationRow')
-$DonatePayFunctionEnd = $ServerSource.IndexOf('function Set-CollectorBackoff', $DonatePayFunctionStart)
+$DonatePayFunctionEnd = $ServerSource.IndexOf('function Clear-CollectorBackoff', $DonatePayFunctionStart)
 $DonatePayFunctionSource = $ServerSource.Substring($DonatePayFunctionStart, $DonatePayFunctionEnd - $DonatePayFunctionStart)
 Assert-False ($DonatePayFunctionSource.Contains('CurrencyRate')) 'DonatePay converter unexpectedly uses currency subsystem.'
 Assert-False ($DonatePayFunctionSource.Contains('Convert-DonationAlertsAmountToRub')) 'DonatePay converter unexpectedly converts currencies.'
@@ -904,32 +893,6 @@ Assert-True ((Search-ExistingEntryByCandidate $CrossCategoryCandidate @($CrossCa
 $Eliminated = New-TestEntry 'gone' 'Granny 3' $true
 Assert-True ($null -eq (Find-ExistingEntryMatch 'Granny 3' @($Eliminated))) 'Eliminated entry must not be assignable.'
 
-$GrannyCandidates = @(
-    [pscustomobject]@{ candidateId = 'steam:1'; title = 'Granny 3'; score = 1.0; source = 'steam' },
-    [pscustomobject]@{ candidateId = 'steam:2'; title = 'Granny'; score = 0.92; source = 'steam' },
-    [pscustomobject]@{ candidateId = 'steam:3'; title = 'Granny: Chapter Two'; score = 0.88; source = 'steam' }
-)
-Assert-False (Test-CatalogCandidatesAmbiguous 'Granny 3' $GrannyCandidates) 'Unique exact Granny 3 should skip candidate-selection LLM.'
-$DbdCandidates = @(
-    [pscustomobject]@{ candidateId = 'steam:10'; title = 'Dead by Daylight'; score = 1.0; source = 'steam' },
-    [pscustomobject]@{ candidateId = 'steam:11'; title = 'Dead by Daylight Mobile'; score = 0.93; source = 'steam' }
-)
-Assert-False (Test-CatalogCandidatesAmbiguous 'Dead by Daylight' $DbdCandidates) 'Unique exact Dead by Daylight should skip candidate-selection LLM.'
-$AnimeExact = @(
-    [pscustomobject]@{ candidateId = 'anilist:1'; title = 'Jujutsu Kaisen'; titleRomaji = 'Jujutsu Kaisen'; score = 1.0; source = 'anilist'; format = 'TV' },
-    [pscustomobject]@{ candidateId = 'anilist:2'; title = 'Jujutsu Kaisen Phantom Parade'; score = 0.65; source = 'anilist'; format = 'ONA' }
-)
-Assert-False (Test-CatalogCandidatesAmbiguous 'Jujutsu Kaisen' $AnimeExact) 'Unique exact anime candidate should skip candidate-selection LLM when alternatives are not close.'
-$NarutoCandidates = @(
-    [pscustomobject]@{ candidateId = 'anilist:10'; title = 'Naruto'; score = 1.0; source = 'anilist'; format = 'TV' },
-    [pscustomobject]@{ candidateId = 'anilist:11'; title = 'Naruto Shippuden'; score = 0.92; source = 'anilist'; format = 'TV' }
-)
-Assert-True (Test-CatalogCandidatesAmbiguous 'Naruto' $NarutoCandidates) 'Naruto franchise variants should require selection LLM or manual review.'
-$SeriesCandidates = @(
-    [pscustomobject]@{ candidateId = 'steam:20'; title = 'Granny'; score = 1.0; source = 'steam' },
-    [pscustomobject]@{ candidateId = 'steam:21'; title = 'Granny 2'; score = 0.90; source = 'steam' }
-)
-Assert-True (Test-CatalogCandidatesAmbiguous 'Granny' $SeriesCandidates) 'A franchise query without a part number should be ambiguous.'
 Assert-True (Test-LlmIntentReadyForCatalog 'anime' 'Naruto' 0.90) 'Known ambiguous Naruto franchise should reach catalog search.'
 Assert-False (Test-LlmIntentReadyForCatalog 'unknown' '' 0.90) 'Unknown intent must remain manual.'
 
@@ -1219,14 +1182,6 @@ $FnafVariantPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'на �
 Assert-False ($FnafVariantPipeline.result.action -eq 'assign_existing') 'FNAF 4 was assigned to FNAF 2.'
 Assert-Equal $script:SteamSearchCalls 1 'Variant conflict did not continue to safe catalog handling.'
 
-foreach ($OpaqueName in @('1', '???', 'test', 'лот')) {
-    $OpaqueEvidence = Get-LlmExistingSelectionEvidence 'The Outlast Trials' (New-TestEntry "opaque-$OpaqueName" $OpaqueName $false '' '' 'game')
-    Assert-False $OpaqueEvidence.safe "Placeholder/opaque title '$OpaqueName' was accepted for AI assignment."
-}
-$ExternalEvidenceEntry = New-TestEntry 'external-evidence' 'Bully Scholarship Edition' $false 'steam' '12200' 'game'
-$ExternalEvidence = Get-LlmExistingSelectionEvidence 'Bully' $ExternalEvidenceEntry 'steam' '12200'
-Assert-True $ExternalEvidence.safe 'Locally proven external identity was rejected.'
-Assert-Equal $ExternalEvidence.matchKind 'exact_external_identity' 'External identity evidence has the wrong match kind.'
 $script:SteamSearchCalls = 0
 $CatalogPipeline = Invoke-LlmDonationPipeline (New-TestPipelineInput 'На Outlast Trials, смешной микровидос: https://example.test/video' @()) $CatalogIntent $RegionLimitedSteamSearcher
 Assert-Equal $CatalogPipeline.result.action 'ask_manual' 'Catalog candidates must require an explicit user choice.'
