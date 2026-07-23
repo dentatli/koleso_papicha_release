@@ -1204,10 +1204,122 @@ assert(allAuctionSpinResults.length === 20, 'Spin idempotency history was trunca
 const wheelAnimationStart = source.indexOf('    function shouldStartWheelSpinAnimation');
 const wheelAnimationEnd = source.indexOf('    function cancelWheelSpinAnimation', wheelAnimationStart);
 if (wheelAnimationStart < 0 || wheelAnimationEnd < 0) throw new Error('Wheel animation idempotency helper not found');
-const { shouldStartWheelSpinAnimation } = new Function(`${source.slice(wheelAnimationStart, wheelAnimationEnd)}; return { shouldStartWheelSpinAnimation };`)();
+let wheelTargetCalculationCount = 0;
+const wheelAnimationHelpers = new Function(
+  'normalizeWheelAngleRad',
+  'calculateReversePlTargetProbabilityState',
+  `${source.slice(wheelAnimationStart, wheelAnimationEnd)}; return {
+    shouldStartWheelSpinAnimation,
+    createWheelSpinAcceptedVisualState,
+    prepareWheelSpinRemovalState,
+    canRequestWheelSpin
+  };`
+)(
+  angle => {
+    const numeric = Number(angle) || 0;
+    const twoPi = Math.PI * 2;
+    return ((numeric % twoPi) + twoPi) % twoPi;
+  },
+  (entries, victim) => {
+    wheelTargetCalculationCount += 1;
+    return {
+      signature: `target:${victim.id}`,
+      dropoutChances: new Map(entries.filter(entry => entry.id !== victim.id).map(entry => [entry.id, 1])),
+      currentWinChances: new Map(),
+      calculationMs: 1
+    };
+  }
+);
+const { shouldStartWheelSpinAnimation } = wheelAnimationHelpers;
 assert(shouldStartWheelSpinAnimation('', 'spin-1'), 'First wheel animation was rejected');
 assert(!shouldStartWheelSpinAnimation('spin-1', 'spin-1'), 'Duplicate SPIN_ACCEPTED restarted the same wheel animation');
 assert(shouldStartWheelSpinAnimation('spin-1', 'spin-2'), 'A new spin ID could not replace the previous wheel animation');
+const wheelAcceptedEntries = [
+  { id: 'wheel-a', name: 'A', price: 1, eliminated: false },
+  { id: 'wheel-b', name: 'B', price: 2, eliminated: false }
+];
+const wheelAcceptedProbabilityState = {
+  signature: 'wheel-signature',
+  dropoutChances: new Map([['wheel-a', 0.6], ['wheel-b', 0.4]]),
+  currentWinChances: new Map([['wheel-a', 0.25], ['wheel-b', 0.75]]),
+  calculationMs: 2
+};
+const wheelAcceptedVisualState = wheelAnimationHelpers.createWheelSpinAcceptedVisualState({
+  spinRequestId: 'wheel-spin',
+  spinId: 'wheel-operation',
+  probabilityStateSignature: 'wheel-signature',
+  finalAngle: Math.PI * 5
+}, wheelAcceptedEntries, wheelAcceptedProbabilityState);
+assert(
+  wheelAcceptedVisualState?.spinRequestId === 'wheel-spin'
+    && wheelAcceptedVisualState.operationId === 'wheel-operation'
+    && wheelAcceptedVisualState.activeEntries.length === 2,
+  'SPIN_ACCEPTED did not preserve the wheel operation and active entries'
+);
+wheelAcceptedEntries[0].name = 'changed-after-accept';
+wheelAcceptedProbabilityState.dropoutChances.set('wheel-a', 0);
+assert(
+  wheelAcceptedVisualState.activeEntries[0].name === 'A'
+    && wheelAcceptedVisualState.oldProbabilityState.dropoutChances.get('wheel-a') === 0.6,
+  'SPIN_ACCEPTED visual snapshot still aliases mutable wheel state'
+);
+const wheelFinalRemovalState = wheelAnimationHelpers.prepareWheelSpinRemovalState(
+  wheelAcceptedVisualState,
+  {
+    spinRequestId: 'wheel-spin',
+    victimId: 'wheel-b',
+    finalAngle: Math.PI,
+    final: true
+  }
+);
+assert(
+  wheelFinalRemovalState?.victim.id === 'wheel-b'
+    && wheelFinalRemovalState.isFinal
+    && wheelFinalRemovalState.targetProbabilityState.signature === 'target:wheel-b',
+  'Final two-participant wheel removal was not prepared from the accepted snapshot'
+);
+assert(wheelTargetCalculationCount === 1, 'Wheel target Reverse PL state was not calculated exactly once before animation');
+wheelAcceptedVisualState.resultApplied = true;
+assert(
+  wheelAnimationHelpers.prepareWheelSpinRemovalState(
+    wheelAcceptedVisualState,
+    { spinRequestId: 'wheel-spin', victimId: 'wheel-b' }
+  ) === null,
+  'The same wheel result can be applied twice'
+);
+assert(
+  wheelAnimationHelpers.canRequestWheelSpin('wheel', null, false, false)
+    && !wheelAnimationHelpers.canRequestWheelSpin('wheel', null, false, true),
+  'Wheel repeat-spin gate does not block the shrink phase'
+);
+const wheelResultStart = source.indexOf('    function applyWheelSpinResult');
+const wheelResultEnd = source.indexOf('    function scheduleWheelSpinRequestTimeout', wheelResultStart);
+const wheelResultSource = source.slice(wheelResultStart, wheelResultEnd);
+const wheelResultAnimationStart = wheelResultSource.indexOf('animateReversePlSectorRemoval({');
+const wheelResultCompletionStart = wheelResultSource.indexOf('onComplete: () => {', wheelResultAnimationStart);
+const authoritativeWheelReload = wheelResultSource.indexOf('applyExternalStateUpdate({', wheelResultCompletionStart);
+assert(
+  wheelResultAnimationStart >= 0
+    && wheelResultCompletionStart > wheelResultAnimationStart
+    && authoritativeWheelReload > wheelResultCompletionStart,
+  'SPIN_RESULT applies authoritative state before the wheel shrink animation completes'
+);
+assert(
+  wheelResultSource.includes('isDelaying = true;')
+    && wheelResultSource.includes('durationMs: 1000')
+    && wheelResultSource.includes('onFrame: displayProbabilityState => drawWheel(displayProbabilityState)'),
+  'Wheel SPIN_RESULT does not run the shared one-second shrink animation'
+);
+assert(
+  !wheelResultSource.includes('eliminateEntryAtCurrentPlace(')
+    && !wheelResultSource.includes('assignedPlace ='),
+  'Wheel SPIN_RESULT mutates authoritative elimination or place state'
+);
+assert(
+  wheelResultSource.includes('probabilityState: targetProbabilityState')
+    && wheelResultSource.includes('wheelAngle: removalState.finalAngle'),
+  'Wheel does not reuse target geometry and final angle while loading authoritative state'
+);
 
 const wheelButtonStart = source.indexOf("document.getElementById('btn-spin').addEventListener");
 const wheelButtonEnd = source.indexOf("document.getElementById('spin-donations-modal').addEventListener", wheelButtonStart);
@@ -1273,20 +1385,22 @@ assert(source.includes("message.type === 'RESET_STARTED') {\n            if (mes
 const externalUpdateStart = source.indexOf('    function applyExternalStateUpdate');
 const externalUpdateEnd = source.indexOf('    function createDefaultDonationIntegrations', externalUpdateStart);
 if (externalUpdateStart < 0 || externalUpdateEnd < 0) throw new Error('External state update helper not found');
-function createExternalUpdateHarness({ leader = false, spinning = false, delaying = false } = {}) {
+function createExternalUpdateHarness({ viewMode = 'admin', leader = false, spinning = false, delaying = false } = {}) {
   const events = [];
   return new Function('events', `
-    let appViewMode = 'admin';
+    let appViewMode = ${JSON.stringify(viewMode)};
     let isAdminLeader = ${leader};
     let isSpinning = ${spinning};
     let isDelaying = ${delaying};
     let isApplyingRemoteState = false;
     let lastAppliedStateUpdateId = 'already-applied';
+    let entries = [{ id: 'authoritative', price: 1, eliminated: false }];
     let shrinkAnimFrame = 11;
     let strikeActivationTimeout = 12;
     let pendingAuthoritativeSpinTimer = 13;
     let pendingWheelSpinTimeout = 14;
     let pendingWheelSpinRequest = { spinRequestId: 'stale-spin' };
+    let pendingWheelSpinVisualState = { spinRequestId: 'stale-spin' };
     let shrinkingTarget = { id: 'stale' };
     let shrinkingTargetProbabilityState = { signature: 'stale' };
     const document = { body: { classList: { remove: value => events.push('class:' + value) } } };
@@ -1298,6 +1412,12 @@ function createExternalUpdateHarness({ leader = false, spinning = false, delayin
       strikeActivationTimeout = null;
       events.push('overlay-clear:' + String(options?.redraw));
     };
+    const createReversePlStateSignature = () => 'authoritative-signature';
+    const installReversePlProbabilityState = state => {
+      events.push('probability:' + state.signature);
+      return state;
+    };
+    const normalizeWheelAngleRad = value => Number(value) || 0;
     const loadData = () => events.push('load');
     const applyViewMode = () => events.push('view');
     const renderList = () => events.push('list');
@@ -1313,7 +1433,7 @@ function createExternalUpdateHarness({ leader = false, spinning = false, delayin
     return {
       applyExternalStateUpdate,
       getEvents: () => events.slice(),
-      getState: () => ({ isSpinning, isDelaying, shrinkAnimFrame, strikeActivationTimeout, pendingAuthoritativeSpinTimer, pendingWheelSpinTimeout, pendingWheelSpinRequest, shrinkingTarget, shrinkingTargetProbabilityState, isApplyingRemoteState, lastAppliedStateUpdateId })
+      getState: () => ({ isSpinning, isDelaying, shrinkAnimFrame, strikeActivationTimeout, pendingAuthoritativeSpinTimer, pendingWheelSpinTimeout, pendingWheelSpinRequest, pendingWheelSpinVisualState, shrinkingTarget, shrinkingTargetProbabilityState, isApplyingRemoteState, lastAppliedStateUpdateId })
     };
   `)(events);
 }
@@ -1323,6 +1443,9 @@ assert(leaderExternalHarness.getEvents().length === 0, 'Forced external reload c
 const ordinaryExternalHarness = createExternalUpdateHarness({ spinning: true });
 assert(!ordinaryExternalHarness.applyExternalStateUpdate(), 'Ordinary external update interrupted an active animation');
 assert(ordinaryExternalHarness.getEvents().length === 0, 'Ordinary external update changed an active follower animation before returning');
+const delayingWheelExternalHarness = createExternalUpdateHarness({ viewMode: 'wheel', delaying: true });
+assert(!delayingWheelExternalHarness.applyExternalStateUpdate({ stateUpdateId: 'admin-result' }), 'STATE_UPDATED interrupted the wheel shrink animation');
+assert(delayingWheelExternalHarness.getEvents().length === 0, 'STATE_UPDATED redrew wheel sectors before shrink completion');
 const duplicateExternalHarness = createExternalUpdateHarness();
 assert(!duplicateExternalHarness.applyExternalStateUpdate({ stateUpdateId: 'already-applied' }), 'Duplicate storage/BroadcastChannel update was rendered twice');
 assert(duplicateExternalHarness.getEvents().length === 0, 'Duplicate state update touched follower UI before returning');
@@ -1337,6 +1460,7 @@ assert(
     && forcedExternalState.pendingAuthoritativeSpinTimer === null
     && forcedExternalState.pendingWheelSpinTimeout === null
     && forcedExternalState.pendingWheelSpinRequest === null
+    && forcedExternalState.pendingWheelSpinVisualState === null
     && forcedExternalState.shrinkingTarget === null
     && forcedExternalState.shrinkingTargetProbabilityState === null,
   'Forced follower reload left stale animation handles or state'
@@ -1348,6 +1472,20 @@ assert(forcedExternalEvents.includes('timeout:14'), 'Forced follower reload did 
 assert(forcedExternalEvents.includes('overlay-clear:false'), 'Forced follower reload did not clear the stale spin result overlay');
 assert(forcedExternalEvents.filter(event => event === 'load').length === 1, 'Forced follower reload did not load authoritative shared state exactly once');
 assert(forcedExternalEvents.indexOf('load') > forcedExternalEvents.indexOf('wheel-cancel'), 'Forced follower reload loaded state before cancelling stale animation work');
+const targetReuseExternalHarness = createExternalUpdateHarness({ viewMode: 'wheel' });
+assert(targetReuseExternalHarness.applyExternalStateUpdate({
+  probabilityState: {
+    signature: 'authoritative-signature',
+    dropoutChances: new Map([['authoritative', 1]])
+  },
+  wheelAngle: Math.PI
+}), 'Wheel completion did not apply authoritative admin state');
+const targetReuseEvents = targetReuseExternalHarness.getEvents();
+assert(
+  targetReuseEvents.includes('probability:authoritative-signature')
+    && targetReuseEvents.indexOf('probability:authoritative-signature') < targetReuseEvents.indexOf('draw'),
+  'Wheel completion did not install target Reverse PL state before the authoritative redraw'
+);
 
 const spinOverlayStart = source.indexOf('    function cancelScheduledSpinResultClear');
 const spinOverlayEnd = source.indexOf('    function scheduleClearSpinResult', spinOverlayStart);
