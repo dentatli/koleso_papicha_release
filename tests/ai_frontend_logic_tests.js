@@ -1212,6 +1212,7 @@ const wheelAnimationHelpers = new Function(
     shouldStartWheelSpinAnimation,
     createWheelSpinAcceptedVisualState,
     prepareWheelSpinRemovalState,
+    isDuplicateWheelSpinResultInFlight,
     canRequestWheelSpin
   };`
 )(
@@ -1292,8 +1293,34 @@ assert(
     && !wheelAnimationHelpers.canRequestWheelSpin('wheel', null, false, true),
   'Wheel repeat-spin gate does not block the shrink phase'
 );
+assert(
+  wheelAnimationHelpers.isDuplicateWheelSpinResultInFlight(
+    { spinRequestId: 'wheel-spin', resultApplied: true },
+    { spinRequestId: 'wheel-spin' },
+    true,
+    { spinRequestId: 'wheel-spin' }
+  ),
+  'An in-flight duplicate wheel result is not recognized'
+);
+assert(
+  !wheelAnimationHelpers.isDuplicateWheelSpinResultInFlight(
+    { spinRequestId: 'wheel-spin', resultApplied: true },
+    { spinRequestId: 'wheel-spin' },
+    false,
+    { spinRequestId: 'wheel-spin' }
+  )
+    && !wheelAnimationHelpers.isDuplicateWheelSpinResultInFlight(
+      { spinRequestId: 'wheel-spin', resultApplied: true },
+      { spinRequestId: 'other-spin' },
+      true,
+      { spinRequestId: 'wheel-spin' }
+    ),
+  'Finished or mismatched wheel results are treated as in-flight duplicates'
+);
+const wheelResultRuntimeStart = source.indexOf('    function renderWheelSpinResultOverlay');
 const wheelResultStart = source.indexOf('    function applyWheelSpinResult');
 const wheelResultEnd = source.indexOf('    function scheduleWheelSpinRequestTimeout', wheelResultStart);
+if (wheelResultRuntimeStart < 0 || wheelResultStart < 0 || wheelResultEnd < 0) throw new Error('Wheel result runtime not found');
 const wheelResultSource = source.slice(wheelResultStart, wheelResultEnd);
 const wheelResultAnimationStart = wheelResultSource.indexOf('animateReversePlSectorRemoval({');
 const wheelResultCompletionStart = wheelResultSource.indexOf('onComplete: () => {', wheelResultAnimationStart);
@@ -1319,6 +1346,249 @@ assert(
   wheelResultSource.includes('probabilityState: targetProbabilityState')
     && wheelResultSource.includes('wheelAngle: removalState.finalAngle'),
   'Wheel does not reuse target geometry and final angle while loading authoritative state'
+);
+const duplicateWheelResultGuard = wheelResultSource.indexOf('isDuplicateWheelSpinResultInFlight(');
+const wheelResultPreparation = wheelResultSource.indexOf('prepareWheelSpinRemovalState(');
+assert(
+  duplicateWheelResultGuard >= 0 && duplicateWheelResultGuard < wheelResultPreparation,
+  'Duplicate SPIN_RESULT is checked only after the visual state can be cleared'
+);
+const missingVisualFallbackStart = wheelResultSource.indexOf('if (!removalState) {');
+const missingVisualFallbackEnd = wheelResultSource.indexOf('pendingWheelSpinVisualState.resultApplied = true;', missingVisualFallbackStart);
+const missingVisualFallbackSource = wheelResultSource.slice(missingVisualFallbackStart, missingVisualFallbackEnd);
+assert(
+  missingVisualFallbackSource.includes('applyExternalStateUpdate({ wheelAngle: result.finalAngle });')
+    && missingVisualFallbackSource.includes('renderWheelSpinResultOverlay(result, result.final === true);')
+    && missingVisualFallbackSource.includes('isSpinning = false;')
+    && missingVisualFallbackSource.includes('isDelaying = false;')
+    && !missingVisualFallbackSource.includes('setTimeout('),
+  'SPIN_RESULT without SPIN_ACCEPTED still waits or does not immediately apply authoritative state'
+);
+
+function createWheelResultRuntimeHarness({
+  visualState = null,
+  removalState = null,
+  spinning = true,
+  delaying = false
+} = {}) {
+  const events = [];
+  return new Function(
+    'events',
+    'initialVisualState',
+    'preparedRemovalState',
+    'initialSpinning',
+    'initialDelaying',
+    'duplicateResultHelper',
+    `
+      let pendingWheelSpinVisualState = initialVisualState;
+      let pendingWheelSpinTimeout = 17;
+      let pendingWheelSpinRequest = { spinRequestId: 'pending-spin' };
+      let isSpinning = initialSpinning;
+      let isDelaying = initialDelaying;
+      let shrinkingTarget = { id: 'stale-target' };
+      let shrinkingSpinContext = null;
+      let shrinkingTargetProbabilityState = { signature: 'stale-target-state' };
+      let shrinkAnimFrame = 19;
+      let currentAngle = 0;
+      let capturedAnimation = null;
+      let animationCount = 0;
+      let externalApplyCount = 0;
+      let externalOptions = null;
+      const appViewMode = 'wheel';
+      const WIN_CHANCE_DECIMALS = 2;
+      const bodyClasses = new Set(['is-spinning']);
+      const elements = {
+        'center-text-overlay': { textContent: '' },
+        'top-winner-text': { textContent: 'old winner' }
+      };
+      const document = {
+        body: {
+          classList: {
+            add: value => {
+              bodyClasses.add(value);
+              events.push('class-add:' + value);
+            },
+            remove: value => {
+              bodyClasses.delete(value);
+              events.push('class-remove:' + value);
+            }
+          }
+        },
+        getElementById: id => elements[id]
+      };
+      const clearTimeout = value => events.push('timeout-clear:' + value);
+      const cancelAnimationFrame = value => events.push('raf-cancel:' + value);
+      const cancelWheelSpinAnimation = () => events.push('wheel-cancel');
+      const applyExternalStateUpdate = options => {
+        externalApplyCount += 1;
+        externalOptions = options || {};
+        events.push('external-apply');
+        return true;
+      };
+      const renderFinalWinnerOverlay = (overlay, value) => {
+        overlay.final = value;
+        events.push('overlay-final:' + value.winnerName);
+      };
+      const renderStrikeOverlay = (overlay, value) => {
+        overlay.strike = value;
+        events.push('overlay-strike:' + value);
+      };
+      const scheduleSpinResultStrikeActivation = () => events.push('strike-activate');
+      const scheduleClearSpinResult = delay => events.push('overlay-clear-scheduled:' + delay);
+      const drawWheel = state => events.push('draw:' + String(state?.signature || 'display'));
+      const animateReversePlSectorRemoval = options => {
+        animationCount += 1;
+        capturedAnimation = options;
+        shrinkAnimFrame = 23;
+        events.push('shrink-start');
+      };
+      const prepareWheelSpinRemovalState = () => preparedRemovalState;
+      const isDuplicateWheelSpinResultInFlight = duplicateResultHelper;
+      ${source.slice(wheelResultRuntimeStart, wheelResultEnd)}
+      return {
+        applyWheelSpinResult,
+        complete: () => capturedAnimation?.onComplete(),
+        getEvents: () => events.slice(),
+        getState: () => ({
+          pendingWheelSpinVisualState,
+          pendingWheelSpinTimeout,
+          pendingWheelSpinRequest,
+          isSpinning,
+          isDelaying,
+          shrinkingTarget,
+          shrinkingSpinContext,
+          shrinkingTargetProbabilityState,
+          shrinkAnimFrame,
+          currentAngle,
+          animationCount,
+          externalApplyCount,
+          externalOptions,
+          bodyClasses: Array.from(bodyClasses),
+          overlay: { ...elements['center-text-overlay'] }
+        })
+      };
+    `
+  )(
+    events,
+    visualState,
+    removalState,
+    spinning,
+    delaying,
+    wheelAnimationHelpers.isDuplicateWheelSpinResultInFlight
+  );
+}
+
+const duplicateVictim = { id: 'wheel-b', name: 'B', eliminated: false, assignedPlace: null };
+const duplicateVisualState = {
+  spinRequestId: 'wheel-spin-duplicate',
+  resultApplied: false
+};
+const duplicateRemovalState = {
+  spinRequestId: 'wheel-spin-duplicate',
+  operationId: 'wheel-operation-duplicate',
+  victim: duplicateVictim,
+  activeEntries: [{ id: 'wheel-a' }, duplicateVictim],
+  oldProbabilityState: { signature: 'old-wheel-state' },
+  targetProbabilityState: { signature: 'target-wheel-state' },
+  finalAngle: Math.PI,
+  isFinal: false
+};
+const duplicateWheelResult = {
+  spinRequestId: 'wheel-spin-duplicate',
+  victimId: 'wheel-b',
+  victimName: 'B',
+  finalAngle: Math.PI
+};
+const duplicateResultHarness = createWheelResultRuntimeHarness({
+  visualState: duplicateVisualState,
+  removalState: duplicateRemovalState
+});
+assert(duplicateResultHarness.applyWheelSpinResult(duplicateWheelResult), 'Initial wheel SPIN_RESULT was not handled');
+const beforeDuplicateResultState = duplicateResultHarness.getState();
+const beforeDuplicateResultEvents = duplicateResultHarness.getEvents();
+assert(
+  beforeDuplicateResultState.animationCount === 1
+    && beforeDuplicateResultState.externalApplyCount === 0
+    && beforeDuplicateResultState.isDelaying
+    && beforeDuplicateResultState.pendingWheelSpinVisualState?.resultApplied === true,
+  'Initial wheel SPIN_RESULT did not enter the shrink phase'
+);
+assert(duplicateResultHarness.applyWheelSpinResult(duplicateWheelResult), 'Duplicate wheel SPIN_RESULT was not idempotently handled');
+const afterDuplicateResultState = duplicateResultHarness.getState();
+assert(
+  afterDuplicateResultState.animationCount === 1
+    && afterDuplicateResultState.externalApplyCount === 0
+    && afterDuplicateResultState.isDelaying
+    && afterDuplicateResultState.pendingWheelSpinVisualState === duplicateVisualState
+    && duplicateResultHarness.getEvents().length === beforeDuplicateResultEvents.length,
+  'Duplicate wheel SPIN_RESULT cancelled, restarted, or mutated the active shrink animation'
+);
+duplicateResultHarness.complete();
+const completedDuplicateResultState = duplicateResultHarness.getState();
+assert(
+  completedDuplicateResultState.externalApplyCount === 1
+    && !completedDuplicateResultState.isSpinning
+    && !completedDuplicateResultState.isDelaying
+    && completedDuplicateResultState.pendingWheelSpinVisualState === null,
+  'Wheel shrink did not reach onComplete exactly once after a duplicate SPIN_RESULT'
+);
+assert(
+  duplicateVictim.eliminated === false && duplicateVictim.assignedPlace === null,
+  'Duplicate wheel SPIN_RESULT applied elimination or place state locally'
+);
+
+const fallbackResultHarness = createWheelResultRuntimeHarness();
+assert(fallbackResultHarness.applyWheelSpinResult({
+  spinRequestId: 'missing-accepted',
+  victimId: 'wheel-b',
+  victimName: 'B',
+  finalAngle: Math.PI / 2,
+  final: false
+}), 'Fallback SPIN_RESULT without SPIN_ACCEPTED was not handled');
+const fallbackResultState = fallbackResultHarness.getState();
+const fallbackResultEvents = fallbackResultHarness.getEvents();
+assert(
+  fallbackResultState.externalApplyCount === 1
+    && fallbackResultState.externalOptions.wheelAngle === Math.PI / 2
+    && fallbackResultState.animationCount === 0,
+  'Fallback SPIN_RESULT did not immediately apply the authoritative angle exactly once'
+);
+assert(
+  !fallbackResultState.isSpinning
+    && !fallbackResultState.isDelaying
+    && fallbackResultState.pendingWheelSpinVisualState === null
+    && fallbackResultState.pendingWheelSpinRequest === null
+    && fallbackResultState.pendingWheelSpinTimeout === null
+    && fallbackResultState.shrinkingTarget === null
+    && fallbackResultState.shrinkingSpinContext === null
+    && fallbackResultState.shrinkingTargetProbabilityState === null
+    && fallbackResultState.shrinkAnimFrame === null,
+  'Fallback SPIN_RESULT left active flags or stale wheel visual state'
+);
+assert(
+  fallbackResultEvents.includes('overlay-strike:B')
+    && fallbackResultEvents.includes('class-add:show-result')
+    && fallbackResultEvents.includes('strike-activate'),
+  'Fallback SPIN_RESULT did not show and activate the ordinary strike overlay'
+);
+
+const finalFallbackResultHarness = createWheelResultRuntimeHarness();
+assert(finalFallbackResultHarness.applyWheelSpinResult({
+  spinRequestId: 'missing-final-accepted',
+  victimId: 'wheel-b',
+  victimName: 'B',
+  winnerName: 'A',
+  winnerInitialChance: 0.75,
+  finalAngle: Math.PI,
+  final: true
+}), 'Final fallback SPIN_RESULT without SPIN_ACCEPTED was not handled');
+const finalFallbackResultState = finalFallbackResultHarness.getState();
+assert(
+  finalFallbackResultState.externalApplyCount === 1
+    && finalFallbackResultState.animationCount === 0
+    && finalFallbackResultHarness.getEvents().includes('overlay-final:A')
+    && finalFallbackResultState.bodyClasses.includes('show-result'),
+  'Final fallback SPIN_RESULT did not immediately apply state and show the winner overlay'
 );
 
 const wheelButtonStart = source.indexOf("document.getElementById('btn-spin').addEventListener");

@@ -12816,6 +12816,20 @@
       };
     }
 
+    function isDuplicateWheelSpinResultInFlight(
+      visualState,
+      result,
+      delaying,
+      spinContext
+    ) {
+      const spinRequestId = String(result?.spinRequestId || '');
+      return !!spinRequestId
+        && visualState?.spinRequestId === spinRequestId
+        && visualState.resultApplied === true
+        && delaying === true
+        && String(spinContext?.spinRequestId || '') === spinRequestId;
+    }
+
     function canRequestWheelSpin(viewMode, pendingRequest, spinning, delaying) {
       return viewMode === 'wheel' && !pendingRequest && !spinning && !delaying;
     }
@@ -12878,8 +12892,37 @@
       }
     }
 
+    function renderWheelSpinResultOverlay(result, isFinal) {
+      const overlay = document.getElementById('center-text-overlay');
+      const topText = document.getElementById('top-winner-text');
+      if (isFinal && result?.winnerName) {
+        const initialChance = Number(result.winnerInitialChance);
+        topText.textContent = '';
+        renderFinalWinnerOverlay(overlay, {
+          winnerName: result.winnerName,
+          victimName: result.victimName,
+          winChance: Number.isFinite(initialChance)
+            ? (Math.max(0, Math.min(1, initialChance)) * 100).toFixed(WIN_CHANCE_DECIMALS)
+            : '0.00',
+          includeVictim: true
+        });
+      } else if (result?.victimName) {
+        renderStrikeOverlay(overlay, result.victimName);
+      }
+      document.body.classList.add('show-result');
+      scheduleSpinResultStrikeActivation();
+    }
+
     function applyWheelSpinResult(result) {
       if (!result) return false;
+      if (isDuplicateWheelSpinResultInFlight(
+        pendingWheelSpinVisualState,
+        result,
+        isDelaying,
+        shrinkingSpinContext
+      )) {
+        return true;
+      }
       let removalState;
       try {
         removalState = prepareWheelSpinRemovalState(pendingWheelSpinVisualState, result);
@@ -12893,15 +12936,17 @@
       cancelWheelSpinAnimation();
       if (!removalState) {
         pendingWheelSpinVisualState = null;
+        shrinkingTarget = null;
+        shrinkingSpinContext = null;
+        shrinkingTargetProbabilityState = null;
+        if (shrinkAnimFrame) cancelAnimationFrame(shrinkAnimFrame);
+        shrinkAnimFrame = null;
         isSpinning = false;
-        isDelaying = true;
+        isDelaying = false;
         document.body.classList.remove('is-spinning');
-        setTimeout(() => {
-          if (!isDelaying || appViewMode !== 'wheel') return;
-          isDelaying = false;
-          applyExternalStateUpdate();
-        }, 1000);
-        return false;
+        applyExternalStateUpdate({ wheelAngle: result.finalAngle });
+        renderWheelSpinResultOverlay(result, result.final === true);
+        return true;
       }
 
       pendingWheelSpinVisualState.resultApplied = true;
@@ -12915,26 +12960,8 @@
       };
       shrinkingTargetProbabilityState = removalState.targetProbabilityState;
       document.body.classList.add('is-spinning');
-      document.body.classList.add('show-result');
       drawWheel(removalState.oldProbabilityState);
-
-      const overlay = document.getElementById('center-text-overlay');
-      const topText = document.getElementById('top-winner-text');
-      if (removalState.isFinal && result.winnerName) {
-        const initialChance = Number(result.winnerInitialChance);
-        topText.textContent = '';
-        renderFinalWinnerOverlay(overlay, {
-          winnerName: result.winnerName,
-          victimName: result.victimName,
-          winChance: Number.isFinite(initialChance)
-            ? (Math.max(0, Math.min(1, initialChance)) * 100).toFixed(WIN_CHANCE_DECIMALS)
-            : '0.00',
-          includeVictim: true
-        });
-      } else if (result.victimName) {
-        renderStrikeOverlay(overlay, result.victimName);
-      }
-      scheduleSpinResultStrikeActivation();
+      renderWheelSpinResultOverlay(result, removalState.isFinal);
 
       animateReversePlSectorRemoval({
         activeEntries: removalState.activeEntries,
