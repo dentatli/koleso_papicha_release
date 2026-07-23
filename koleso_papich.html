@@ -4972,7 +4972,7 @@
         clearSpinResultOverlay({ redraw: false });
         shrinkingTarget = null;
         shrinkingSpinContext = null;
-        shrinkingProgress = 0;
+        shrinkingTargetProbabilityState = null;
         isSpinning = false;
         isDelaying = false;
         document.body.classList.remove('is-spinning');
@@ -5174,7 +5174,7 @@
     // Глобальные переменные для анимации сужения (удаления) сектора
     let shrinkingTarget = null;
     let shrinkingSpinContext = null;
-    let shrinkingProgress = 0;
+    let shrinkingTargetProbabilityState = null;
     let shrinkAnimFrame = null;
     let strikeActivationTimeout = null;
     let spinResultClearTimeout = null;
@@ -5315,6 +5315,25 @@
       }
       normalized[largestIndex] = Math.max(0, normalized[largestIndex] + (1 - normalizedTotal));
       return normalized;
+    }
+
+    function interpolateReversePlDropoutChances(
+      activeEntries,
+      oldDropoutChances,
+      targetDropoutChances,
+      easedProgress
+    ) {
+      const progress = Math.max(0, Math.min(1, Number(easedProgress) || 0));
+      const interpolated = new Map();
+      (Array.isArray(activeEntries) ? activeEntries : []).forEach(entry => {
+        if (!entry) return;
+        const oldValue = Number(oldDropoutChances instanceof Map ? oldDropoutChances.get(entry.id) : 0);
+        const targetValue = Number(targetDropoutChances instanceof Map ? targetDropoutChances.get(entry.id) : 0);
+        const oldWeight = Number.isFinite(oldValue) && oldValue >= 0 ? oldValue : 0;
+        const targetWeight = Number.isFinite(targetValue) && targetValue >= 0 ? targetValue : 0;
+        interpolated.set(entry.id, (1 - progress) * oldWeight + progress * targetWeight);
+      });
+      return interpolated;
     }
 
     function normalizeLogProbabilityValues(logValues) {
@@ -5739,11 +5758,8 @@
       return JSON.stringify({ active, eliminated });
     }
 
-    function ensureReversePlProbabilityState(sourceEntries = entries) {
+    function calculateReversePlProbabilityState(sourceEntries) {
       const signature = createReversePlStateSignature(sourceEntries);
-      if (reversePlProbabilityCache.signature === signature) {
-        return reversePlProbabilityCache;
-      }
       const activeEntries = sourceEntries.filter(entry => entry && !entry.eliminated);
       const eliminatedEntries = sourceEntries.filter(entry => entry && entry.eliminated);
       const now = () => (
@@ -5754,14 +5770,59 @@
       const startedAt = now();
       const dropoutChances = calculateReversePlDropoutChances(activeEntries, eliminatedEntries);
       const currentWinChances = calculateReversePlCurrentWinChances(activeEntries, eliminatedEntries);
-      reversePlProbabilityCache = {
+      return {
         signature,
         dropoutChances,
         currentWinChances,
         calculationMs: now() - startedAt
       };
+    }
+
+    function installReversePlProbabilityState(probabilityState) {
+      reversePlProbabilityCache = probabilityState;
       wheelGeometryCache = { key: '', data: null };
       return reversePlProbabilityCache;
+    }
+
+    function ensureReversePlProbabilityState(sourceEntries = entries) {
+      const signature = createReversePlStateSignature(sourceEntries);
+      if (reversePlProbabilityCache.signature === signature) {
+        return reversePlProbabilityCache;
+      }
+      return installReversePlProbabilityState(calculateReversePlProbabilityState(sourceEntries));
+    }
+
+    function calculateReversePlTargetProbabilityState(sourceEntries, victimRef) {
+      let victimFound = false;
+      const targetEntries = (Array.isArray(sourceEntries) ? sourceEntries : []).map(entry => {
+        if (!entry || entry.id !== victimRef?.id || entry.eliminated) return entry;
+        victimFound = true;
+        return { ...entry, eliminated: true };
+      });
+      if (!victimFound) {
+        throw new Error('Выбывающий сектор отсутствует в текущем состоянии колеса.');
+      }
+      return calculateReversePlProbabilityState(targetEntries);
+    }
+
+    function buildReversePlDisplayProbabilityState(
+      activeEntries,
+      oldProbabilityState,
+      targetProbabilityState,
+      easedProgress
+    ) {
+      const progress = Math.max(0, Math.min(1, Number(easedProgress) || 0));
+      return {
+        signature: targetProbabilityState.signature,
+        dropoutChances: interpolateReversePlDropoutChances(
+          activeEntries,
+          oldProbabilityState.dropoutChances,
+          targetProbabilityState.dropoutChances,
+          progress
+        ),
+        currentWinChances: targetProbabilityState.currentWinChances,
+        calculationMs: oldProbabilityState.calculationMs + targetProbabilityState.calculationMs
+      };
     }
 
     function getCurrentWheelWeight(entry, dropoutChances) {
@@ -6014,7 +6075,7 @@
               shrinkAnimFrame = null;
               shrinkingTarget = null;
               shrinkingSpinContext = null;
-              shrinkingProgress = 0;
+              shrinkingTargetProbabilityState = null;
               isDelaying = false;
               isSpinning = false;
               document.body.classList.remove('is-spinning');
@@ -6025,18 +6086,22 @@
           shrinkAnimFrame = null;
           const interruptedVictim = shrinkingTarget;
           const interruptedContext = shrinkingSpinContext;
+          const interruptedProbabilityState = shrinkingTargetProbabilityState;
           const elimination = eliminateEntryAtCurrentPlace(interruptedVictim);
+          if (interruptedProbabilityState) {
+            installReversePlProbabilityState(interruptedProbabilityState);
+          }
           rememberCompletedSpinOutcome(interruptedContext, interruptedVictim, elimination.winner);
           const remainingAfterInterrupt = entries.filter(e => !e.eliminated);
           shrinkingTarget = null;
           shrinkingSpinContext = null;
-          shrinkingProgress = 0;
+          shrinkingTargetProbabilityState = null;
           isDelaying = false;
           isSpinning = false;
           document.body.classList.remove('is-spinning');
           saveData();
           renderList();
-          drawWheel();
+          drawWheel(interruptedProbabilityState);
           updateAdminLeadershipUi();
           if (remainingAfterInterrupt.length > 1) {
             scheduleClearSpinResult(3000);
@@ -6468,7 +6533,7 @@
       currentAngle = 0;
       shrinkingTarget = null;
       shrinkingSpinContext = null;
-      shrinkingProgress = 0;
+      shrinkingTargetProbabilityState = null;
       isSpinning = false;
       isDelaying = false;
       const search = document.getElementById('search-filter');
@@ -6589,7 +6654,7 @@
       strikeActivationTimeout = null;
       shrinkingTarget = null;
       shrinkingSpinContext = null;
-      shrinkingProgress = 0;
+      shrinkingTargetProbabilityState = null;
       isSpinning = false;
       isDelaying = false;
       activeAuctionResyncOperationId = '';
@@ -11953,13 +12018,10 @@
       wheelLabelFontPx,
       dropoutChances
     ) {
-      const wheelData = activeEntries.map(entry => {
-        let weight = getCurrentWheelWeight(entry, dropoutChances);
-        if (shrinkingTarget && entry.id === shrinkingTarget.id) {
-          weight *= (1 - shrinkingProgress);
-        }
-        return { entry, weight };
-      });
+      const wheelData = activeEntries.map(entry => ({
+        entry,
+        weight: getCurrentWheelWeight(entry, dropoutChances)
+      }));
       const totalWeight = wheelData.reduce((sum, item) => sum + item.weight, 0);
       if (totalWeight <= 0) return null;
 
@@ -12832,6 +12894,17 @@
       
       // Является ли этот прокрут финальным (если останется 1 сегмент после удаления)
       const isFinal = activeEntries.length <= 2; 
+      let targetProbabilityState = null;
+      try {
+        targetProbabilityState = calculateReversePlTargetProbabilityState(entries, victimRef);
+      } catch (error) {
+        console.error('Не удалось подготовить целевую геометрию Reverse Plackett–Luce', error);
+        isSpinning = false;
+        document.body.classList.remove('is-spinning');
+        updateAdminLeadershipUi();
+        alert('Не удалось рассчитать вероятности для прокрута.');
+        return;
+      }
 
       drawWheel(probabilityState);
       
@@ -12870,7 +12943,7 @@
       // Анимация плавного исчезновения сегмента на протяжении 1 секунды
       shrinkingTarget = victimRef;
       shrinkingSpinContext = spinContext;
-      shrinkingProgress = 0;
+      shrinkingTargetProbabilityState = targetProbabilityState;
       
       const shrinkDuration = 1000;
       const shrinkStart = performance.now();
@@ -12883,7 +12956,7 @@
           if (!canRunAdminLeaderActions()) {
               shrinkingTarget = null;
               shrinkingSpinContext = null;
-              shrinkingProgress = 0;
+              shrinkingTargetProbabilityState = null;
               shrinkAnimFrame = null;
               isDelaying = false;
               isSpinning = false;
@@ -12893,21 +12966,27 @@
           }
 
           const progress = Math.min((timestamp - shrinkStart) / shrinkDuration, 1);
-          shrinkingProgress = easeInOutQuad(progress); 
-          
-          drawWheel(probabilityState);
+          const easedProgress = easeInOutQuad(progress);
+          const displayProbabilityState = buildReversePlDisplayProbabilityState(
+            activeEntries,
+            probabilityState,
+            targetProbabilityState,
+            easedProgress
+          );
+          drawWheel(displayProbabilityState);
           
           if (progress < 1) {
               shrinkAnimFrame = requestAnimationFrame(animateShrink);
           } else {
               // Естественное окончание 1 сек без прерывания
-              shrinkingTarget = null;
               const completedSpinContext = shrinkingSpinContext;
-              shrinkingSpinContext = null;
-              shrinkingProgress = 0;
-              shrinkAnimFrame = null;
               const elimination = eliminateEntryAtCurrentPlace(victimRef);
+              installReversePlProbabilityState(targetProbabilityState);
               rememberCompletedSpinOutcome(completedSpinContext, victimRef, elimination.winner);
+              shrinkingTarget = null;
+              shrinkingSpinContext = null;
+              shrinkingTargetProbabilityState = null;
+              shrinkAnimFrame = null;
               isDelaying = false;
               isSpinning = false;
               document.body.classList.remove('is-spinning');
@@ -12915,7 +12994,6 @@
               updateAdminLeadershipUi();
               setTimeout(() => {
                 renderList();
-                drawWheel();
                 if (!isFinal) scheduleClearSpinResult(3000);
               }, 0);
           }

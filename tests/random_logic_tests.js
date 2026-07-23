@@ -14,6 +14,7 @@ const helpers = new Function(`${source.slice(coreStart, coreEnd)}
   return {
     TWO_PI,
     normalizeReversePlRate,
+    interpolateReversePlDropoutChances,
     calculateAmountWinChances,
     calculateReversePlDropoutWeights,
     calculateReversePlCurrentWinWeights,
@@ -61,6 +62,18 @@ function normalizeReferenceWeights(values) {
   return values.map(value => value / total);
 }
 
+function buildSectorBounds(orderedEntries, weights) {
+  const total = orderedEntries.reduce((sum, entry) => sum + Number(weights.get(entry.id) || 0), 0);
+  let start = 0;
+  const bounds = new Map();
+  orderedEntries.forEach(entry => {
+    const angle = (Number(weights.get(entry.id) || 0) / total) * helpers.TWO_PI;
+    bounds.set(entry.id, { start, end: start + angle });
+    start += angle;
+  });
+  return bounds;
+}
+
 function subsetIntegral(anchorRate, factorRates) {
   let result = 0;
   const subsetCount = 2 ** factorRates.length;
@@ -99,6 +112,83 @@ function exactSmallCurrentWinWeights(rates, eliminatedRateSum) {
 const twoRates = helpers.calculateReversePlDropoutWeights([1, 3], 0);
 assertApprox(twoRates[0], 3 / 4, 2e-8, 'Two-lot dropout chance for A is wrong');
 assertApprox(twoRates[1], 1 / 4, 2e-8, 'Two-lot dropout chance for B is wrong');
+
+const shrinkEntries = createEntries([1, 2, 3], 'shrink');
+const shrinkVictim = shrinkEntries[1];
+const oldShrinkWeights = helpers.calculateReversePlDropoutChances(shrinkEntries, []);
+const targetShrinkEntries = shrinkEntries.map(entry => (
+  entry.id === shrinkVictim.id ? { ...entry, eliminated: true } : entry
+));
+const targetShrinkWeights = helpers.calculateReversePlDropoutChances(
+  targetShrinkEntries.filter(entry => !entry.eliminated),
+  targetShrinkEntries.filter(entry => entry.eliminated)
+);
+const firstShrinkFrame = helpers.interpolateReversePlDropoutChances(
+  shrinkEntries,
+  oldShrinkWeights,
+  targetShrinkWeights,
+  0
+);
+const middleShrinkFrame = helpers.interpolateReversePlDropoutChances(
+  shrinkEntries,
+  oldShrinkWeights,
+  targetShrinkWeights,
+  0.4
+);
+const lastShrinkFrame = helpers.interpolateReversePlDropoutChances(
+  shrinkEntries,
+  oldShrinkWeights,
+  targetShrinkWeights,
+  1
+);
+shrinkEntries.forEach(entry => {
+  assertApprox(
+    firstShrinkFrame.get(entry.id),
+    oldShrinkWeights.get(entry.id),
+    1e-15,
+    `First shrink frame changed old geometry for ${entry.id}`
+  );
+});
+assertApprox(
+  Array.from(middleShrinkFrame.values()).reduce((sum, weight) => sum + weight, 0),
+  1,
+  1e-15,
+  'Intermediate shrink weights do not sum to one'
+);
+assertApprox(
+  middleShrinkFrame.get(shrinkVictim.id),
+  oldShrinkWeights.get(shrinkVictim.id) * 0.6,
+  1e-15,
+  'Victim weight does not shrink smoothly'
+);
+assertApprox(lastShrinkFrame.get(shrinkVictim.id), 0, 1e-15, 'Victim does not reach zero weight');
+shrinkEntries.filter(entry => entry.id !== shrinkVictim.id).forEach(entry => {
+  assertApprox(
+    lastShrinkFrame.get(entry.id),
+    targetShrinkWeights.get(entry.id),
+    1e-15,
+    `Last shrink frame differs from target Reverse PL geometry for ${entry.id}`
+  );
+});
+const lastShrinkBounds = buildSectorBounds(shrinkEntries, lastShrinkFrame);
+const committedShrinkBounds = buildSectorBounds(
+  shrinkEntries.filter(entry => entry.id !== shrinkVictim.id),
+  targetShrinkWeights
+);
+for (const entry of shrinkEntries.filter(item => item.id !== shrinkVictim.id)) {
+  assertApprox(
+    lastShrinkBounds.get(entry.id).start,
+    committedShrinkBounds.get(entry.id).start,
+    1e-15,
+    `Sector start changes after shrink commit for ${entry.id}`
+  );
+  assertApprox(
+    lastShrinkBounds.get(entry.id).end,
+    committedShrinkBounds.get(entry.id).end,
+    1e-15,
+    `Sector end changes after shrink commit for ${entry.id}`
+  );
+}
 
 const exactRates = [0.75, 2.5, 6, 11];
 const exactEliminatedRateSum = 4.25;
@@ -282,7 +372,40 @@ const shrinkAnimationEnd = source.indexOf('      // Сохраняем ID ани
 const shrinkAnimationSource = source.slice(shrinkAnimationStart, shrinkAnimationEnd);
 assert(shrinkAnimationStart >= 0 && shrinkAnimationEnd > shrinkAnimationStart, 'Sector shrink animation body not found');
 assert(!shrinkAnimationSource.includes('ensureReversePlProbabilityState'), 'Sector shrink animation can recalculate Reverse PL probabilities inside requestAnimationFrame');
-assert(shrinkAnimationSource.includes('drawWheel(probabilityState)'), 'Sector shrink animation does not reuse the prepared probability snapshot');
+assert(!shrinkAnimationSource.includes('calculateReversePl'), 'Sector shrink animation integrates Reverse PL probabilities inside requestAnimationFrame');
+assert(
+  shrinkAnimationSource.includes('buildReversePlDisplayProbabilityState(')
+    && shrinkAnimationSource.includes('drawWheel(displayProbabilityState)'),
+  'Sector shrink animation does not interpolate the prepared probability snapshots'
+);
+const finishSpinStart = source.indexOf('    function finishSpinWithPointerVictim');
+const targetStatePreparation = source.indexOf(
+  'targetProbabilityState = calculateReversePlTargetProbabilityState(entries, victimRef);',
+  finishSpinStart
+);
+assert(
+  finishSpinStart >= 0 && targetStatePreparation > finishSpinStart && targetStatePreparation < shrinkAnimationStart,
+  'Target Reverse PL state is not prepared before the shrink animation'
+);
+const shrinkCommitStart = shrinkAnimationSource.indexOf('const elimination = eliminateEntryAtCurrentPlace(victimRef);');
+const shrinkCommitEnd = shrinkAnimationSource.indexOf('rememberCompletedSpinOutcome(', shrinkCommitStart);
+const shrinkCommitSource = shrinkAnimationSource.slice(shrinkCommitStart, shrinkCommitEnd);
+assert(shrinkCommitStart >= 0 && shrinkCommitEnd > shrinkCommitStart, 'Shrink commit sequence not found');
+assert(
+  shrinkCommitSource.includes('installReversePlProbabilityState(targetProbabilityState);'),
+  'Target Reverse PL state is not installed immediately after elimination'
+);
+const deferredShrinkRenderStart = shrinkAnimationSource.indexOf('setTimeout(() => {', shrinkCommitEnd);
+const deferredShrinkRenderEnd = shrinkAnimationSource.indexOf('}, 0);', deferredShrinkRenderStart);
+const deferredShrinkRenderSource = shrinkAnimationSource.slice(deferredShrinkRenderStart, deferredShrinkRenderEnd);
+assert(
+  deferredShrinkRenderStart >= 0 && deferredShrinkRenderEnd > deferredShrinkRenderStart,
+  'Deferred post-shrink render block not found'
+);
+assert(
+  !deferredShrinkRenderSource.includes('drawWheel('),
+  'Shrink commit performs an extra deferred wheel redraw'
+);
 
 const eliminationStart = source.indexOf('    function eliminateEntryAtCurrentPlace');
 const eliminationEnd = source.indexOf('    function rememberCompletedSpinOutcome', eliminationStart);

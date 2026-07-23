@@ -1080,7 +1080,7 @@ function createExternalUpdateHarness({ leader = false, spinning = false, delayin
     let pendingWheelSpinTimeout = 14;
     let pendingWheelSpinRequest = { spinRequestId: 'stale-spin' };
     let shrinkingTarget = { id: 'stale' };
-    let shrinkingProgress = 0.5;
+    let shrinkingTargetProbabilityState = { signature: 'stale' };
     const document = { body: { classList: { remove: value => events.push('class:' + value) } } };
     const cancelAnimationFrame = value => events.push('raf:' + value);
     const clearTimeout = value => events.push('timeout:' + value);
@@ -1105,7 +1105,7 @@ function createExternalUpdateHarness({ leader = false, spinning = false, delayin
     return {
       applyExternalStateUpdate,
       getEvents: () => events.slice(),
-      getState: () => ({ isSpinning, isDelaying, shrinkAnimFrame, strikeActivationTimeout, pendingAuthoritativeSpinTimer, pendingWheelSpinTimeout, pendingWheelSpinRequest, shrinkingTarget, shrinkingProgress, isApplyingRemoteState, lastAppliedStateUpdateId })
+      getState: () => ({ isSpinning, isDelaying, shrinkAnimFrame, strikeActivationTimeout, pendingAuthoritativeSpinTimer, pendingWheelSpinTimeout, pendingWheelSpinRequest, shrinkingTarget, shrinkingTargetProbabilityState, isApplyingRemoteState, lastAppliedStateUpdateId })
     };
   `)(events);
 }
@@ -1130,7 +1130,7 @@ assert(
     && forcedExternalState.pendingWheelSpinTimeout === null
     && forcedExternalState.pendingWheelSpinRequest === null
     && forcedExternalState.shrinkingTarget === null
-    && forcedExternalState.shrinkingProgress === 0,
+    && forcedExternalState.shrinkingTargetProbabilityState === null,
   'Forced follower reload left stale animation handles or state'
 );
 assert(forcedExternalEvents.includes('wheel-cancel'), 'Forced follower reload did not cancel the wheel animation');
