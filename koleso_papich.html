@@ -3451,7 +3451,7 @@
           </div>
           <div class="wheel-readonly-metrics">
             <strong id="wheel-readonly-total">0 ₽</strong>
-            <span class="wheel-readonly-percent-label" title="Текущий шанс победы среди оставшихся. Размер сектора — визуальный риск выбывания Pointauc New.">Шанс победы</span>
+            <span class="wheel-readonly-percent-label" title="Текущая условная вероятность победы с учётом уже выбывших мест. Размер сектора — вероятность выбыть на следующем прокруте.">Шанс победы</span>
           </div>
         </div>
         <div class="wheel-readonly-list" id="wheel-readonly-list"></div>
@@ -3546,6 +3546,9 @@
               <svg id="timer-icon-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
               <svg id="timer-icon-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="display:none"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
             </button>
+            <button type="button" class="timer-icon-btn" id="timer-reset" title="Сбросить таймер" aria-label="Сбросить таймер">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-7"/><path d="M3 3v6h6"/></svg>
+            </button>
           </div>
         </div>
         </section>
@@ -3615,11 +3618,9 @@
     let timerResetTargetMs = 0;
     let timerRunning = false;
     let timerRaf = null;
-    let timerLastFrameTs = 0;
+    let timerEndsAtMs = 0;
     let timerFitObs = null;
     let timerFitRaf = null;
-    let timerStartedAtMs = 0;
-    let timerRemainingAtStartMs = 0;
     let loadedTimerState = null;
     let timerStateReady = false;
     let suppressPersistence = false;
@@ -3636,26 +3637,58 @@
       return Math.min(TIMER_MAX_MS, Math.max(0, Math.round(Number(value) || 0)));
     }
 
-    function getTimerRemainingMs() {
+    function getTimerRemainingMs(now = Date.now()) {
+      if (timerRunning && timerEndsAtMs > 0) {
+        return clampTimerMs(timerEndsAtMs - now);
+      }
       return clampTimerMs(timerValueMs);
     }
 
-    function getTimerStateSnapshot() {
-      const remainingMs = getTimerRemainingMs();
-      return {
-        remainingMs,
+    function getTimerStateSnapshot(now = Date.now()) {
+      return normalizeAuthoritativeTimerState({
+        remainingMs: getTimerRemainingMs(now),
         isRunning: timerRunning,
-        startedAtMs: timerRunning ? (timerStartedAtMs || Date.now()) : 0,
-        remainingAtStartMs: timerRunning
-          ? (timerRemainingAtStartMs || remainingMs)
-          : remainingMs,
-        rememberedMs: clampTimerMs(timerResetTargetMs)
-      };
+        endsAtMs: timerRunning ? timerEndsAtMs : 0,
+        rememberedMs: timerResetTargetMs
+      }, now);
+    }
+
+    function applyAuthoritativeTimerState(state, now = Date.now()) {
+      const normalized = normalizeAuthoritativeTimerState(state, now);
+      if (timerRaf) {
+        cancelAnimationFrame(timerRaf);
+        timerRaf = null;
+      }
+      timerValueMs = normalized.remainingMs;
+      timerResetTargetMs = normalized.rememberedMs;
+      timerRunning = normalized.isRunning;
+      timerEndsAtMs = normalized.endsAtMs;
+      timerStateReady = true;
+      timerSyncFieldsFromMs();
+      timerUpdatePlayIcon();
+      timerSetFieldsReadonly(timerRunning);
+      if (canRunAdminLeaderActions()) timerPersistResetTarget();
+      if (timerRunning) timerRaf = requestAnimationFrame(timerFrame);
+      return normalized;
+    }
+
+    function createTimerStateChange(overrides = {}, now = Date.now()) {
+      const current = getTimerStateSnapshot(now);
+      return normalizeAuthoritativeTimerState({
+        ...current,
+        ...overrides
+      }, now);
     }
 
     function saveTimerState() {
-      if (!timerStateReady || suppressPersistence) return;
+      if (!timerStateReady || suppressPersistence || !canRunAdminLeaderActions()) return;
+      sharedControlRevision += 1;
       saveData();
+    }
+
+    function requestTimerStateChange(state) {
+      if (!timerStateReady || suppressPersistence) return false;
+      return submitSharedControlChange('timerState', state);
     }
 
     function timerLoadStored() {
@@ -3722,42 +3755,26 @@
     }
 
     function timerCommitFields() {
-      timerValueMs = timerParseFieldsToMs();
-      if (timerRunning) {
-        timerStartedAtMs = Date.now();
-        timerRemainingAtStartMs = timerValueMs;
-      } else {
-        timerStartedAtMs = 0;
-        timerRemainingAtStartMs = timerValueMs;
-      }
-      timerSyncFieldsFromMs();
-      scheduleFitTimer();
-      saveTimerState();
+      const now = Date.now();
+      const remainingMs = timerParseFieldsToMs();
+      requestTimerStateChange(createTimerStateChange({
+        remainingMs,
+        isRunning: timerRunning && remainingMs > 0,
+        endsAtMs: timerRunning && remainingMs > 0 ? now + remainingMs : 0,
+        rememberedMs: timerRunning ? timerResetTargetMs : remainingMs
+      }, now));
     }
 
     function timerAdjust(deltaMs) {
-      timerValueMs = clampTimerMs(timerValueMs + deltaMs);
-      if (timerRunning) {
-        timerStartedAtMs = Date.now();
-        timerRemainingAtStartMs = timerValueMs;
-        timerLastFrameTs = 0;
-        if (timerValueMs <= 0) {
-          timerRunning = false;
-          timerLastFrameTs = 0;
-          timerStartedAtMs = 0;
-          timerRemainingAtStartMs = 0;
-          if (timerRaf) cancelAnimationFrame(timerRaf);
-          timerRaf = null;
-        }
-      } else {
-        timerStartedAtMs = 0;
-        timerRemainingAtStartMs = timerValueMs;
-      }
-      timerUpdatePlayIcon();
-      timerSetFieldsReadonly(timerRunning);
-      timerSyncFieldsFromMs();
-      scheduleFitTimer();
-      saveTimerState();
+      const now = Date.now();
+      const remainingMs = clampTimerMs(getTimerRemainingMs(now) + deltaMs);
+      const isRunning = timerRunning && remainingMs > 0;
+      requestTimerStateChange(createTimerStateChange({
+        remainingMs,
+        isRunning,
+        endsAtMs: isRunning ? now + remainingMs : 0,
+        rememberedMs: timerRunning ? timerResetTargetMs : remainingMs
+      }, now));
     }
 
     function fitTimerDigitsFont() {
@@ -3796,18 +3813,13 @@
       }
     }
 
-    function timerFrame(ts) {
+    function timerFrame() {
       if (!timerRunning) return;
-      if (timerLastFrameTs === 0) timerLastFrameTs = ts;
-      const dt = ts - timerLastFrameTs;
-      timerLastFrameTs = ts;
-      timerValueMs = Math.max(0, Math.round(timerValueMs - dt));
+      timerValueMs = getTimerRemainingMs();
       if (timerValueMs <= 0) {
         timerValueMs = 0;
         timerRunning = false;
-        timerLastFrameTs = 0;
-        timerStartedAtMs = 0;
-        timerRemainingAtStartMs = 0;
+        timerEndsAtMs = 0;
         timerUpdatePlayIcon();
         timerSetFieldsReadonly(false);
         if (timerRaf) cancelAnimationFrame(timerRaf);
@@ -3819,76 +3831,44 @@
     }
 
     function timerToggleRun() {
+      const now = Date.now();
+      const remainingMs = getTimerRemainingMs(now);
       if (timerRunning) {
-        timerRunning = false;
-        timerLastFrameTs = 0;
-        timerStartedAtMs = 0;
-        timerRemainingAtStartMs = timerValueMs;
-        timerUpdatePlayIcon();
-        timerSetFieldsReadonly(false);
-        if (timerRaf) cancelAnimationFrame(timerRaf);
-        timerRaf = null;
-        timerSyncFieldsFromMs();
-        scheduleFitTimer();
-        saveTimerState();
+        requestTimerStateChange(createTimerStateChange({
+          remainingMs,
+          isRunning: false,
+          endsAtMs: 0
+        }, now));
         return;
       }
-      if (timerValueMs <= 0) return;
-      timerRunning = true;
-      timerLastFrameTs = 0;
-      timerStartedAtMs = Date.now();
-      timerRemainingAtStartMs = timerValueMs;
-      timerUpdatePlayIcon();
-      timerSetFieldsReadonly(true);
-      timerRaf = requestAnimationFrame(timerFrame);
-      saveTimerState();
+      if (remainingMs <= 0) return;
+      requestTimerStateChange(createTimerStateChange({
+        remainingMs,
+        isRunning: true,
+        endsAtMs: now + remainingMs
+      }, now));
+    }
+
+    function timerReset() {
+      requestTimerStateChange(createTimerStateChange({
+        remainingMs: timerResetTargetMs,
+        isRunning: false,
+        endsAtMs: 0
+      }));
     }
 
     function restoreTimerState() {
-      const state = loadedTimerState;
-      if (timerRaf) {
-        cancelAnimationFrame(timerRaf);
-        timerRaf = null;
-      }
-      if (!state || typeof state !== 'object') {
-        timerRemainingAtStartMs = timerValueMs;
-        timerStateReady = true;
-        timerSyncFieldsFromMs();
-        return;
-      }
-
-      const rememberedMs = Number(state.rememberedMs);
-      if (Number.isFinite(rememberedMs)) {
-        timerResetTargetMs = clampTimerMs(rememberedMs);
-      }
-
-      let remainingMs = clampTimerMs(state.remainingMs);
-      const shouldResume = state.isRunning === true;
-
-      if (shouldResume) {
-        const startedAtMs = Number(state.startedAtMs) || 0;
-        const remainingAtStartMs = clampTimerMs(state.remainingAtStartMs || remainingMs);
-        if (startedAtMs > 0 && remainingAtStartMs > 0) {
-          remainingMs = Math.max(0, remainingAtStartMs - Math.max(0, Date.now() - startedAtMs));
-        }
-      }
-
-      timerValueMs = remainingMs;
-      timerRunning = shouldResume && remainingMs > 0;
-      timerLastFrameTs = 0;
-      timerStartedAtMs = timerRunning ? Date.now() : 0;
-      timerRemainingAtStartMs = remainingMs;
-      timerStateReady = true;
+      const state = loadedTimerState && typeof loadedTimerState === 'object'
+        ? loadedTimerState
+        : {
+            remainingMs: timerValueMs,
+            isRunning: false,
+            endsAtMs: 0,
+            rememberedMs: timerResetTargetMs
+          };
       loadedTimerState = null;
-
-      timerSyncFieldsFromMs();
-      timerUpdatePlayIcon();
-      timerSetFieldsReadonly(timerRunning);
-      timerPersistResetTarget();
-
-      if (timerRunning) {
-        timerRaf = requestAnimationFrame(timerFrame);
-      }
+      applyAuthoritativeTimerState(state);
+      scheduleFitTimer();
     }
 
     function timerBindHoldRepeat(btn, callback) {
@@ -3925,6 +3905,7 @@
       timerSetFieldsReadonly(timerRunning);
 
       document.getElementById('timer-play').addEventListener('click', timerToggleRun);
+      document.getElementById('timer-reset').addEventListener('click', timerReset);
 
       document.querySelectorAll('[data-timer-delta]').forEach((button) => {
         const delta = Number(button.dataset.timerDelta) || 0;
@@ -4025,6 +4006,12 @@
     let isApplyingRemoteState = false;
     let stateUpdateSequence = 0;
     let lastAppliedStateUpdateId = '';
+    const SHARED_CONTROL_REQUEST_TYPE = 'SHARED_CONTROL_REQUEST';
+    const MAX_CENTER_IMAGE_DATA_URL_LENGTH = 3 * 1024 * 1024;
+    let sharedControlRevision = 0;
+    let sharedControlRequestSequence = 0;
+    let lastConfirmedSharedControlRequestId = '';
+    const handledSharedControlRequestIds = new Set();
     const ADMIN_TAB_ID_KEY = 'pointauc_admin_tab_id';
     const ADMIN_LEASE_KEY = 'pointauc_admin_leader_lease';
     const ADMIN_LEASE_DURATION_MS = 7000;
@@ -4100,16 +4087,13 @@
     const DONATEPAY_RECOVERY_RESULT_POLL_MS = 1000;
     const DONATEPAY_RECOVERY_BACKOFF_429_MS = 5 * 60 * 1000;
     const WIN_CHANCE_DECIMALS = 2;
-    const SPIN_SERIES_MODE_POINTAUC_NEW = 'pointauc_new_dropout';
-    const POINTAUC_VISUAL_MIN_AMOUNT = 1;
-    const POINTAUC_VISUAL_MIN_MODIFIER = 0.55;
-    const POINTAUC_VISUAL_MAX_MODIFIER = 1.0;
     const seenDonationKeys = new Set();
     let pendingSpinOperation = null;
     let lastSpinResult = null;
     let recentSpinResults = [];
     let authoritativeSpinRequestInFlight = false;
     let pendingWheelSpinRequest = null;
+    let pendingWheelSpinVisualState = null;
     let pendingWheelSpinTimeout = null;
     let activeWheelAnimationSpinId = '';
     let activeWheelAnimationFrame = null;
@@ -4266,8 +4250,177 @@
       return viewMode === 'admin' && leader === true;
     }
 
+    function normalizeSpinDurationSec(value) {
+      return Math.min(60, Math.max(1, Math.round(Number(value) || 10)));
+    }
+
+    function normalizeCenterImageSource(value) {
+      const source = String(value || '').trim();
+      if (!source) return '';
+      if (
+        source.length <= MAX_CENTER_IMAGE_DATA_URL_LENGTH
+        && /^data:image\/(?:png|jpe?g|webp|gif|avif);base64,[a-z0-9+/=]+$/i.test(source)
+      ) {
+        return source;
+      }
+      if (source.length > 4096) return '';
+      try {
+        const parsed = new URL(source);
+        return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
+      } catch (error) {
+        return '';
+      }
+    }
+
+    function normalizeAuthoritativeTimerState(state, now = Date.now()) {
+      const source = state && typeof state === 'object' ? state : {};
+      const currentTime = Math.max(0, Number(now) || 0);
+      const rememberedMs = clampTimerMs(source.rememberedMs);
+      let remainingMs = clampTimerMs(source.remainingMs);
+      let isRunning = source.isRunning === true;
+      let endsAtMs = 0;
+
+      if (isRunning) {
+        const suppliedEndsAtMs = Number(source.endsAtMs ?? source.endsAt);
+        if (Number.isFinite(suppliedEndsAtMs) && suppliedEndsAtMs > 0) {
+          endsAtMs = Math.min(suppliedEndsAtMs, currentTime + TIMER_MAX_MS);
+          remainingMs = clampTimerMs(endsAtMs - currentTime);
+        } else {
+          const legacyStartedAtMs = Math.max(0, Number(source.startedAtMs) || 0);
+          const legacyRemainingAtStartMs = clampTimerMs(source.remainingAtStartMs || remainingMs);
+          if (legacyStartedAtMs > 0 && legacyRemainingAtStartMs > 0) {
+            endsAtMs = Math.min(legacyStartedAtMs + legacyRemainingAtStartMs, currentTime + TIMER_MAX_MS);
+            remainingMs = clampTimerMs(endsAtMs - currentTime);
+          } else {
+            endsAtMs = currentTime + remainingMs;
+          }
+        }
+        if (remainingMs <= 0) {
+          isRunning = false;
+          endsAtMs = 0;
+        }
+      }
+
+      return {
+        remainingMs,
+        isRunning,
+        endsAtMs: isRunning ? endsAtMs : 0,
+        rememberedMs
+      };
+    }
+
+    function normalizeSharedControlChange(kind, value, now = Date.now()) {
+      if (kind === 'spinDurationSec') {
+        return { kind, value: normalizeSpinDurationSec(value) };
+      }
+      if (kind === 'centerImageUrl') {
+        const centerImageSource = normalizeCenterImageSource(value);
+        return centerImageSource ? { kind, value: centerImageSource } : null;
+      }
+      if (kind === 'timerState') {
+        return { kind, value: normalizeAuthoritativeTimerState(value, now) };
+      }
+      return null;
+    }
+
+    function normalizeSharedControlRequest(message, now = Date.now()) {
+      if (
+        message?.type !== SHARED_CONTROL_REQUEST_TYPE
+        || message.sourceViewMode !== 'wheel'
+      ) {
+        return null;
+      }
+      const requestId = String(message.requestId || '').slice(0, 200);
+      const change = normalizeSharedControlChange(message.kind, message.value, now);
+      return requestId && change ? { requestId, change } : null;
+    }
+
+    function canHandleSharedControlRequest(viewMode, leader, message) {
+      return canAdminTabRunLeaderAction(viewMode, leader)
+        && message?.sourceViewMode === 'wheel'
+        && message?.type === SHARED_CONTROL_REQUEST_TYPE;
+    }
+
+    function reduceSharedControlSnapshot(snapshot, change) {
+      const next = {
+        spinDurationSec: snapshot?.spinDurationSec,
+        centerImageUrl: snapshot?.centerImageUrl,
+        timerState: snapshot?.timerState
+      };
+      if (!change || !['spinDurationSec', 'centerImageUrl', 'timerState'].includes(change.kind)) {
+        return next;
+      }
+      next[change.kind] = change.value;
+      return next;
+    }
+
     function canRunAdminLeaderActions() {
       return canAdminTabRunLeaderAction(appViewMode, isAdminLeader);
+    }
+
+    function getSharedControlSnapshot(now = Date.now()) {
+      return {
+        spinDurationSec: normalizeSpinDurationSec(document.getElementById('spin-duration')?.value),
+        centerImageUrl: normalizeCenterImageSource(centerImageUrl) || defaultCenter,
+        timerState: getTimerStateSnapshot(now)
+      };
+    }
+
+    function applySharedControlChange(change, now = Date.now()) {
+      const normalized = normalizeSharedControlChange(change?.kind, change?.value, now);
+      if (!normalized) return null;
+      const next = reduceSharedControlSnapshot(getSharedControlSnapshot(now), normalized);
+      if (normalized.kind === 'spinDurationSec') {
+        const input = document.getElementById('spin-duration');
+        if (input) input.value = String(next.spinDurationSec);
+      } else if (normalized.kind === 'centerImageUrl') {
+        centerImageUrl = next.centerImageUrl;
+        refreshCenterCircleBackground();
+      } else if (normalized.kind === 'timerState') {
+        applyAuthoritativeTimerState(next.timerState, now);
+        scheduleFitTimer();
+      }
+      return normalized;
+    }
+
+    function confirmSharedControlChange(change, requestId = '') {
+      if (!canRunAdminLeaderActions()) return false;
+      const normalized = applySharedControlChange(change);
+      if (!normalized) return false;
+      sharedControlRevision += 1;
+      if (requestId) lastConfirmedSharedControlRequestId = String(requestId).slice(0, 200);
+      return saveData() !== false;
+    }
+
+    function submitSharedControlChange(kind, value) {
+      const normalized = normalizeSharedControlChange(kind, value);
+      if (!normalized) return false;
+      if (canRunAdminLeaderActions()) {
+        return confirmSharedControlChange(normalized);
+      }
+      if (appViewMode !== 'wheel') return false;
+      applySharedControlChange(normalized);
+      const requestId = `${adminTabInstanceId}:shared:${Date.now()}:${++sharedControlRequestSequence}`;
+      postAppChannelMessage(SHARED_CONTROL_REQUEST_TYPE, {
+        requestId,
+        sourceViewMode: 'wheel',
+        kind: normalized.kind,
+        value: normalized.value
+      });
+      return true;
+    }
+
+    function handleSharedControlRequest(message) {
+      if (!canHandleSharedControlRequest(appViewMode, isAdminLeader, message)) return false;
+      const request = normalizeSharedControlRequest(message);
+      if (!request || handledSharedControlRequestIds.has(request.requestId)) return false;
+      const saved = confirmSharedControlChange(request.change, request.requestId);
+      if (!saved) return false;
+      handledSharedControlRequestIds.add(request.requestId);
+      while (handledSharedControlRequestIds.size > 100) {
+        handledSharedControlRequestIds.delete(handledSharedControlRequestIds.values().next().value);
+      }
+      return true;
     }
 
     function normalizeBootstrapRole(role) {
@@ -4896,6 +5049,8 @@
               if (message.tabInstanceId !== adminTabInstanceId) applyExternalStateUpdate();
               updateAdminLeadershipUi();
             }
+          } else if (message.type === SHARED_CONTROL_REQUEST_TYPE) {
+            handleSharedControlRequest(message);
           } else if (message.type === 'SPIN_REQUEST') {
             handleRemoteSpinRequest(message).catch(() => {
               if (canRunAdminLeaderActions()) postSpinRequestRejection(message, 'request_failed');
@@ -4954,7 +5109,9 @@
       if (isApplyingRemoteState || !canRunAdminLeaderActions()) return;
       postAppChannelMessage('STATE_UPDATED', {
         auctionGeneration: currentAuctionGeneration,
-        stateUpdateId: String(stateUpdateId || '')
+        stateUpdateId: String(stateUpdateId || ''),
+        sharedControlRevision,
+        confirmedSharedControlRequestId: lastConfirmedSharedControlRequestId
       });
     }
 
@@ -4968,6 +5125,7 @@
         if (pendingWheelSpinTimeout) clearTimeout(pendingWheelSpinTimeout);
         pendingWheelSpinTimeout = null;
         pendingWheelSpinRequest = null;
+        pendingWheelSpinVisualState = null;
         cancelWheelSpinAnimation();
         if (shrinkAnimFrame) cancelAnimationFrame(shrinkAnimFrame);
         shrinkAnimFrame = null;
@@ -4975,7 +5133,8 @@
         pendingAuthoritativeSpinTimer = null;
         clearSpinResultOverlay({ redraw: false });
         shrinkingTarget = null;
-        shrinkingProgress = 0;
+        shrinkingSpinContext = null;
+        shrinkingTargetProbabilityState = null;
         isSpinning = false;
         isDelaying = false;
         document.body.classList.remove('is-spinning');
@@ -4983,6 +5142,16 @@
       isApplyingRemoteState = true;
       try {
         loadData();
+        const probabilityStateOverride = options.probabilityState;
+        const reusableProbabilityState = (
+          probabilityStateOverride?.dropoutChances instanceof Map
+          && probabilityStateOverride.signature === createReversePlStateSignature(entries)
+        )
+          ? installReversePlProbabilityState(probabilityStateOverride)
+          : null;
+        if (Number.isFinite(Number(options.wheelAngle))) {
+          currentAngle = normalizeWheelAngleRad(Number(options.wheelAngle));
+        }
         applyViewMode();
         renderList();
         renderIntegrationCards();
@@ -4990,7 +5159,7 @@
         refreshCenterCircleBackground();
         restoreTimerState();
         resizeWheel();
-        drawWheel();
+        drawWheel(reusableProbabilityState);
         scheduleFitTimer();
         updateAdminLeadershipUi();
       } finally {
@@ -5112,16 +5281,22 @@
     }
 
     // Cryptographically-strong randomness helpers (browser)
-    function cryptoRandomUint32() {
-      if (window.crypto && window.crypto.getRandomValues) {
-        return window.crypto.getRandomValues(new Uint32Array(1))[0];
+    function getWebCryptoRandomSource() {
+      if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+        return window.crypto;
       }
-      throw new Error('WebCrypto random is unavailable.');
+      throw new Error('Безопасный генератор WebCrypto недоступен. Прокрут отменён.');
     }
 
-    function cryptoRandomFloat() {
-      // Uniform in [0, 1)
-      return cryptoRandomUint32() / 2 ** 32;
+    function cryptoRandomUint32() {
+      return getWebCryptoRandomSource().getRandomValues(new Uint32Array(1))[0];
+    }
+
+    function cryptoRandomFloat53() {
+      const values = getWebCryptoRandomSource().getRandomValues(new Uint32Array(2));
+      const high = values[0] >>> 5;
+      const low = values[1] >>> 6;
+      return (high * 67108864 + low) / 9007199254740992;
     }
 
     function cryptoRandomInt(minInclusive, maxExclusive) {
@@ -5161,75 +5336,87 @@
     let pendingDeleteEntryId = null;
     let confirmModalOnConfirm = null;
     let confirmModalOnCancel = null;
-    let spinSeriesInitialWinChances = new Map();
-    let spinSeriesActive = false;
-    let spinSeriesDropoutQueue = [];
-    let spinSeriesFinalWinnerId = null;
-    let spinSeriesInitialEntryKey = '';
-    let spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
-    let spinSeriesInitialCount = 0;
+    let reversePlProbabilityCache = {
+      signature: '',
+      dropoutChances: new Map(),
+      currentWinChances: new Map(),
+      calculationMs: 0
+    };
 
     // Глобальные переменные для анимации сужения (удаления) сектора
     let shrinkingTarget = null;
-    let shrinkingProgress = 0;
+    let shrinkingSpinContext = null;
+    let shrinkingTargetProbabilityState = null;
     let shrinkAnimFrame = null;
     let strikeActivationTimeout = null;
     let spinResultClearTimeout = null;
 
-    function resetSpinSeriesSnapshot() {
-      spinSeriesInitialWinChances = new Map();
-      spinSeriesActive = false;
+    function invalidateReversePlProbabilityCache() {
+      reversePlProbabilityCache = {
+        signature: '',
+        dropoutChances: new Map(),
+        currentWinChances: new Map(),
+        calculationMs: 0
+      };
+      wheelGeometryCache = { key: '', data: null };
     }
 
-    function resetSpinState() {
-      resetSpinSeriesSnapshot();
-      spinSeriesDropoutQueue = [];
-      spinSeriesFinalWinnerId = null;
-      spinSeriesInitialEntryKey = '';
-      spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
-      spinSeriesInitialCount = 0;
-    }
-
-    function resetSpinSeriesForCompositionChange({ clearEliminated = true } = {}) {
+    function resetAuctionProgressForCompositionChange({ clearEliminated = true } = {}) {
       if (clearEliminated) {
         entries.forEach(entry => {
-          if (entry) entry.eliminated = false;
+          if (!entry) return;
+          entry.eliminated = false;
+          delete entry.assignedPlace;
         });
       }
-      resetSpinState();
+      invalidateReversePlProbabilityCache();
     }
 
-    function serializeChanceMap(chanceMap) {
-      return Array.from(chanceMap instanceof Map ? chanceMap.entries() : []);
+    function eliminateEntryAtCurrentPlace(victimRef) {
+      if (!victimRef || victimRef.eliminated) {
+        return { victim: victimRef || null, assignedPlace: Number(victimRef?.assignedPlace) || 0, winner: null };
+      }
+      const activeBefore = entries.filter(entry => entry && !entry.eliminated);
+      if (!activeBefore.includes(victimRef)) {
+        return { victim: null, assignedPlace: 0, winner: null };
+      }
+      const assignedPlace = activeBefore.length;
+      if (!Number.isInteger(victimRef.assignedPlace)) {
+        victimRef.assignedPlace = assignedPlace;
+      }
+      victimRef.eliminated = true;
+      const activeAfter = entries.filter(entry => entry && !entry.eliminated);
+      const winner = activeAfter.length === 1 ? activeAfter[0] : null;
+      if (winner && !Number.isInteger(winner.assignedPlace)) {
+        winner.assignedPlace = 1;
+      }
+      invalidateReversePlProbabilityCache();
+      return {
+        victim: victimRef,
+        assignedPlace: victimRef.assignedPlace,
+        winner
+      };
     }
 
-    function deserializeChanceMap(raw) {
-      const map = new Map();
-      if (!Array.isArray(raw)) return map;
-
-      raw.forEach(item => {
-        if (!Array.isArray(item) || item.length < 2) return;
-        const id = String(item[0]);
-        const chance = Number(item[1]);
-        if (id && Number.isFinite(chance)) {
-          map.set(id, Math.max(0, Math.min(1, chance)));
-        }
-      });
-
-      return map;
-    }
-
-    function ensureSpinSeriesSnapshot(activeEntries) {
-      const candidates = Array.isArray(activeEntries)
-        ? activeEntries.filter(entry => entry && !entry.eliminated)
-        : entries.filter(entry => entry && !entry.eliminated);
-      if (!candidates.length) return;
-
-      const shouldStartNewSeries = !spinSeriesActive || spinSeriesInitialWinChances.size === 0;
-      if (!shouldStartNewSeries) return;
-
-      spinSeriesInitialWinChances = calculateAmountWinChances(candidates);
-      spinSeriesActive = true;
+    function rememberCompletedSpinOutcome(spinContext, victim, winner) {
+      if (!spinContext?.spinRequestId) return null;
+      const result = {
+        spinRequestId: String(spinContext.spinRequestId),
+        spinId: String(spinContext.spinId || spinContext.spinRequestId),
+        victimId: victim ? String(victim.id) : '',
+        victimName: victim ? String(victim.name || '') : '',
+        assignedPlace: victim ? Number(victim.assignedPlace || 0) : 0,
+        winnerId: winner ? String(winner.id) : '',
+        winnerName: winner ? String(winner.name || '') : '',
+        winnerPlace: winner ? Number(winner.assignedPlace || 1) : 0,
+        final: !!winner,
+        finalAngle: normalizeWheelAngleRad(spinContext.finalAngle),
+        probabilityStateSignature: String(spinContext.probabilityStateSignature || ''),
+        generation: Math.max(0, Number(spinContext.generation || currentAuctionGeneration)),
+        finishedAt: new Date().toISOString()
+      };
+      rememberSpinResult(result);
+      return result;
     }
 
     function cancelScheduledSpinResultClear() {
@@ -5262,249 +5449,631 @@
       }, delayMs);
     }
 
+    function scheduleSpinResultStrikeActivation() {
+      if (strikeActivationTimeout) clearTimeout(strikeActivationTimeout);
+      strikeActivationTimeout = setTimeout(() => {
+        document.querySelectorAll('.strike-text-content').forEach(element => element.classList.add('strike-active'));
+        strikeActivationTimeout = null;
+      }, 50);
+    }
+
+    // Reverse Plackett–Luce numerical core. Keep this block free of DOM and mutable app state.
+    // The quadrature design was inspired by qQuadWeights in https://github.com/naugam/fixed_wheel;
+    // the application, state, and UI implementation here is project-specific.
+    const REVERSE_PL_MIN_QUADRATURE_INTERVALS = 1024;
+    const REVERSE_PL_MAX_QUADRATURE_INTERVALS = 4096;
+    const REVERSE_PL_MAX_LOG_STEP = 0.025;
+    const REVERSE_PL_LOWER_SCALE = 1e-8;
+    const REVERSE_PL_TAIL_EXPONENT = 48;
+    const TWO_PI = Math.PI * 2;
+
+    function normalizeReversePlRate(value) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+    }
+
     function getEntryAmount(entry) {
-      return Math.max(0, Number(entry && entry.price) || 0);
+      return normalizeReversePlRate(entry && entry.price);
     }
 
-    function getChanceAmount(entry) {
-      return getEntryAmount(entry);
+    function normalizeProbabilityValues(values) {
+      const normalized = Float64Array.from(values || [], value => (
+        Number.isFinite(value) && value > 0 ? value : 0
+      ));
+      if (normalized.length === 0) return normalized;
+      let total = 0;
+      for (const value of normalized) total += value;
+      if (!(total > 0) || !Number.isFinite(total)) {
+        throw new Error('Не удалось нормализовать вероятности Reverse Plackett–Luce.');
+      }
+      let normalizedTotal = 0;
+      let largestIndex = 0;
+      for (let index = 0; index < normalized.length; index += 1) {
+        normalized[index] /= total;
+        normalizedTotal += normalized[index];
+        if (normalized[index] > normalized[largestIndex]) largestIndex = index;
+      }
+      normalized[largestIndex] = Math.max(0, normalized[largestIndex] + (1 - normalizedTotal));
+      return normalized;
     }
 
-    function getWeightedCandidatesByAmount(sourceEntries) {
-      const candidates = (Array.isArray(sourceEntries) ? sourceEntries : [])
-        .filter(entry => entry);
+    function interpolateReversePlDropoutChances(
+      activeEntries,
+      oldDropoutChances,
+      targetDropoutChances,
+      easedProgress
+    ) {
+      const progress = Math.max(0, Math.min(1, Number(easedProgress) || 0));
+      const interpolated = new Map();
+      (Array.isArray(activeEntries) ? activeEntries : []).forEach(entry => {
+        if (!entry) return;
+        const oldValue = Number(oldDropoutChances instanceof Map ? oldDropoutChances.get(entry.id) : 0);
+        const targetValue = Number(targetDropoutChances instanceof Map ? targetDropoutChances.get(entry.id) : 0);
+        const oldWeight = Number.isFinite(oldValue) && oldValue >= 0 ? oldValue : 0;
+        const targetWeight = Number.isFinite(targetValue) && targetValue >= 0 ? targetValue : 0;
+        interpolated.set(entry.id, (1 - progress) * oldWeight + progress * targetWeight);
+      });
+      return interpolated;
+    }
 
-      const totalAmount = candidates.reduce((sum, entry) => sum + getChanceAmount(entry), 0);
+    function normalizeLogProbabilityValues(logValues) {
+      const finiteValues = Array.from(logValues || [], value => (
+        Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+      ));
+      if (finiteValues.length === 0) return new Float64Array();
+      const maxLog = Math.max(...finiteValues);
+      if (!Number.isFinite(maxLog)) {
+        throw new Error('Численное интегрирование Reverse Plackett–Luce не дало конечных весов.');
+      }
+      const values = new Float64Array(finiteValues.length);
+      for (let index = 0; index < finiteValues.length; index += 1) {
+        values[index] = Number.isFinite(finiteValues[index])
+          ? Math.exp(finiteValues[index] - maxLog)
+          : 0;
+      }
+      return normalizeProbabilityValues(values);
+    }
 
-      if (totalAmount > 0) {
-        return candidates;
+    function logOneMinusExpNegative(value) {
+      if (!(value > 0)) return Number.NEGATIVE_INFINITY;
+      if (!Number.isFinite(value)) return 0;
+      return value <= Math.LN2
+        ? Math.log(-Math.expm1(-value))
+        : Math.log1p(-Math.exp(-value));
+    }
+
+    function normalizeQuadraturePointCount(logSpan, requestedPoints) {
+      if (Number.isFinite(requestedPoints)) {
+        let points = Math.max(5, Math.floor(requestedPoints));
+        if (points % 2 === 0) points += 1;
+        return points;
+      }
+      let intervals = Math.max(
+        REVERSE_PL_MIN_QUADRATURE_INTERVALS,
+        Math.ceil(logSpan / REVERSE_PL_MAX_LOG_STEP)
+      );
+      intervals = Math.min(REVERSE_PL_MAX_QUADRATURE_INTERVALS, intervals);
+      if (intervals % 2 !== 0) intervals += 1;
+      return intervals + 1;
+    }
+
+    function createReversePlLogGrid(rates, tailRate, options = {}) {
+      const positiveRates = Array.from(rates || [], normalizeReversePlRate).filter(rate => rate > 0);
+      const positiveTailRate = normalizeReversePlRate(tailRate);
+      if (positiveRates.length === 0 || !(positiveTailRate > 0)) {
+        throw new Error('Для интегрирования Reverse Plackett–Luce нужны положительные веса.');
+      }
+      const maxRate = Math.max(positiveTailRate, ...positiveRates);
+      const tMin = REVERSE_PL_LOWER_SCALE / maxRate;
+      const tMax = REVERSE_PL_TAIL_EXPONENT / positiveTailRate;
+      if (!(tMin > 0) || !Number.isFinite(tMin) || !(tMax > tMin) || !Number.isFinite(tMax)) {
+        throw new Error('Не удалось подобрать конечный диапазон интегрирования Reverse Plackett–Luce.');
+      }
+      const logMin = Math.log(tMin);
+      const logMax = Math.log(tMax);
+      const pointCount = normalizeQuadraturePointCount(logMax - logMin, options.quadraturePoints);
+      return {
+        logMin,
+        logMax,
+        pointCount,
+        step: (logMax - logMin) / (pointCount - 1)
+      };
+    }
+
+    function createLogSumAccumulator(length) {
+      const maxLogs = new Float64Array(length);
+      maxLogs.fill(Number.NEGATIVE_INFINITY);
+      return {
+        maxLogs,
+        scaledSums: new Float64Array(length)
+      };
+    }
+
+    function addLogSummand(accumulator, index, logValue) {
+      if (!Number.isFinite(logValue)) return;
+      const currentMax = accumulator.maxLogs[index];
+      if (!Number.isFinite(currentMax)) {
+        accumulator.maxLogs[index] = logValue;
+        accumulator.scaledSums[index] = 1;
+        return;
+      }
+      if (logValue <= currentMax) {
+        accumulator.scaledSums[index] += Math.exp(logValue - currentMax);
+        return;
+      }
+      accumulator.scaledSums[index] = (
+        accumulator.scaledSums[index] * Math.exp(currentMax - logValue)
+      ) + 1;
+      accumulator.maxLogs[index] = logValue;
+    }
+
+    function finishLogSumAccumulator(accumulator, commonLogFactor = 0) {
+      const result = new Float64Array(accumulator.maxLogs.length);
+      for (let index = 0; index < result.length; index += 1) {
+        const maxLog = accumulator.maxLogs[index];
+        const scaledSum = accumulator.scaledSums[index];
+        result[index] = Number.isFinite(maxLog) && scaledSum > 0
+          ? maxLog + Math.log(scaledSum) + commonLogFactor
+          : Number.NEGATIVE_INFINITY;
+      }
+      return result;
+    }
+
+    function getLogProductWithoutIndex(factorLogs, finiteSum, infiniteCount, index) {
+      const ownFactor = factorLogs[index];
+      if (infiniteCount === 0) return finiteSum - ownFactor;
+      if (infiniteCount === 1 && ownFactor === Number.NEGATIVE_INFINITY) return finiteSum;
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    function getSimpsonLogWeight(index, pointCount) {
+      if (index === 0 || index === pointCount - 1) return 0;
+      return index % 2 === 1 ? Math.log(4) : Math.log(2);
+    }
+
+    function scaleReversePlRates(activeRates, eliminatedRateSum) {
+      const rates = Float64Array.from(activeRates || [], normalizeReversePlRate);
+      const eliminated = normalizeReversePlRate(eliminatedRateSum);
+      let scale = eliminated;
+      for (const rate of rates) scale = Math.max(scale, rate);
+      if (!(scale > 0)) return { rates, eliminated: 0 };
+      for (let index = 0; index < rates.length; index += 1) rates[index] /= scale;
+      return { rates, eliminated: eliminated / scale };
+    }
+
+    function calculateReversePlDropoutWeights(activeRates, eliminatedRateSum = 0, options = {}) {
+      const rawRates = Float64Array.from(activeRates || [], normalizeReversePlRate);
+      const count = rawRates.length;
+      if (count === 0) return rawRates;
+      if (count === 1) return Float64Array.of(1);
+
+      const zeroIndexes = [];
+      let positiveCount = 0;
+      for (let index = 0; index < count; index += 1) {
+        if (rawRates[index] > 0) positiveCount += 1;
+        else zeroIndexes.push(index);
+      }
+      if (zeroIndexes.length > 0) {
+        const exact = new Float64Array(count);
+        const chance = positiveCount > 0 ? 1 / zeroIndexes.length : 1 / count;
+        if (positiveCount > 0) {
+          zeroIndexes.forEach(index => { exact[index] = chance; });
+        } else {
+          exact.fill(chance);
+        }
+        return exact;
       }
 
-      return candidates.map(entry => ({ ...entry, __pointaucFallbackAmount: 1 }));
+      const scaled = scaleReversePlRates(rawRates, eliminatedRateSum);
+      const rates = scaled.rates;
+      const eliminated = scaled.eliminated;
+      let minimumRate = Number.POSITIVE_INFINITY;
+      for (const rate of rates) minimumRate = Math.min(minimumRate, rate);
+      const grid = createReversePlLogGrid(rates, eliminated + minimumRate, options);
+      const accumulator = createLogSumAccumulator(count);
+      const factorLogs = new Float64Array(count);
+
+      for (let point = 0; point < grid.pointCount; point += 1) {
+        const x = grid.logMin + point * grid.step;
+        const t = Math.exp(x);
+        let finiteFactorSum = 0;
+        let infiniteFactorCount = 0;
+        for (let index = 0; index < count; index += 1) {
+          const factorLog = logOneMinusExpNegative(rates[index] * t);
+          factorLogs[index] = factorLog;
+          if (Number.isFinite(factorLog)) finiteFactorSum += factorLog;
+          else infiniteFactorCount += 1;
+        }
+        const logWeight = getSimpsonLogWeight(point, grid.pointCount);
+        for (let index = 0; index < count; index += 1) {
+          const productLog = getLogProductWithoutIndex(
+            factorLogs,
+            finiteFactorSum,
+            infiniteFactorCount,
+            index
+          );
+          if (!Number.isFinite(productLog)) continue;
+          const logIntegrand = Math.log(rates[index])
+            - (rates[index] + eliminated) * t
+            + productLog
+            + x
+            + logWeight;
+          addLogSummand(accumulator, index, logIntegrand);
+        }
+      }
+
+      const logWeights = finishLogSumAccumulator(accumulator, Math.log(grid.step / 3));
+      return normalizeLogProbabilityValues(logWeights);
     }
 
-    function getCandidateWeightAmount(entry) {
-      if (!entry) return 0;
-      if (entry.__pointaucFallbackAmount) return entry.__pointaucFallbackAmount;
-      return getChanceAmount(entry);
+    function calculateReversePlCurrentWinWeights(activeRates, eliminatedRateSum, options = {}) {
+      const rawRates = Float64Array.from(activeRates || [], normalizeReversePlRate);
+      const count = rawRates.length;
+      if (count === 0) return rawRates;
+      if (count === 1) return Float64Array.of(1);
+
+      const positiveIndexes = [];
+      for (let index = 0; index < count; index += 1) {
+        if (rawRates[index] > 0) positiveIndexes.push(index);
+      }
+      if (positiveIndexes.length === 0) {
+        const uniform = new Float64Array(count);
+        uniform.fill(1 / count);
+        return uniform;
+      }
+      if (positiveIndexes.length < count) {
+        const exact = new Float64Array(count);
+        if (positiveIndexes.length === 1) {
+          exact[positiveIndexes[0]] = 1;
+          return exact;
+        }
+        const positiveWeights = calculateReversePlCurrentWinWeights(
+          positiveIndexes.map(index => rawRates[index]),
+          eliminatedRateSum,
+          options
+        );
+        positiveIndexes.forEach((rawIndex, positiveIndex) => {
+          exact[rawIndex] = positiveWeights[positiveIndex];
+        });
+        return exact;
+      }
+
+      const scaled = scaleReversePlRates(rawRates, eliminatedRateSum);
+      const rates = scaled.rates;
+      const eliminated = scaled.eliminated;
+      if (!(eliminated > 0)) {
+        return normalizeProbabilityValues(rates);
+      }
+
+      const grid = createReversePlLogGrid(rates, eliminated, options);
+      const denominatorAccumulator = createLogSumAccumulator(1);
+      const leaveOneOutAccumulator = createLogSumAccumulator(count);
+      const factorLogs = new Float64Array(count);
+      const logEliminated = Math.log(eliminated);
+
+      for (let point = 0; point < grid.pointCount; point += 1) {
+        const x = grid.logMin + point * grid.step;
+        const t = Math.exp(x);
+        let finiteFactorSum = 0;
+        let infiniteFactorCount = 0;
+        for (let index = 0; index < count; index += 1) {
+          const factorLog = logOneMinusExpNegative(rates[index] * t);
+          factorLogs[index] = factorLog;
+          if (Number.isFinite(factorLog)) finiteFactorSum += factorLog;
+          else infiniteFactorCount += 1;
+        }
+        const commonLog = logEliminated - eliminated * t + x
+          + getSimpsonLogWeight(point, grid.pointCount);
+        if (infiniteFactorCount === 0) {
+          addLogSummand(denominatorAccumulator, 0, commonLog + finiteFactorSum);
+        }
+        for (let index = 0; index < count; index += 1) {
+          const productLog = getLogProductWithoutIndex(
+            factorLogs,
+            finiteFactorSum,
+            infiniteFactorCount,
+            index
+          );
+          if (Number.isFinite(productLog)) {
+            addLogSummand(leaveOneOutAccumulator, index, commonLog + productLog);
+          }
+        }
+      }
+
+      const commonFactor = Math.log(grid.step / 3);
+      const logDenominator = finishLogSumAccumulator(
+        denominatorAccumulator,
+        commonFactor
+      )[0];
+      if (!Number.isFinite(logDenominator)) {
+        throw new Error('Не удалось вычислить условную вероятность победы Reverse Plackett–Luce.');
+      }
+      const logLeaveOneOut = finishLogSumAccumulator(leaveOneOutAccumulator, commonFactor);
+      let totalRate = eliminated;
+      for (const rate of rates) totalRate += rate;
+      const logNumerators = new Float64Array(count);
+      for (let index = 0; index < count; index += 1) {
+        logNumerators[index] = Math.log(rates[index] / totalRate)
+          + logLeaveOneOut[index]
+          - logDenominator;
+      }
+      return normalizeLogProbabilityValues(logNumerators);
     }
 
     function calculateAmountWinChances(sourceEntries) {
       const result = new Map();
-      const candidates = (Array.isArray(sourceEntries) ? sourceEntries : [])
-        .filter(entry => entry);
-
+      const candidates = (Array.isArray(sourceEntries) ? sourceEntries : []).filter(Boolean);
       if (candidates.length === 0) return result;
-
-      const totalAmount = candidates.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
-
-      if (totalAmount > 0) {
-        candidates.forEach(entry => {
-          result.set(entry.id, getEntryAmount(entry) / totalAmount);
-        });
+      const rates = candidates.map(getEntryAmount);
+      const positiveRates = rates.filter(rate => rate > 0);
+      if (positiveRates.length === 0) {
+        const equalChance = 1 / candidates.length;
+        candidates.forEach(entry => result.set(entry.id, equalChance));
         return result;
       }
-
-      const equalChance = 1 / candidates.length;
-      candidates.forEach(entry => {
-        result.set(entry.id, equalChance);
+      const maxRate = Math.max(...positiveRates);
+      const scaledTotal = rates.reduce((sum, rate) => sum + rate / maxRate, 0);
+      candidates.forEach((entry, index) => {
+        result.set(entry.id, rates[index] > 0 ? (rates[index] / maxRate) / scaledTotal : 0);
       });
-
       return result;
     }
 
-    function getSpinSeriesEntryKey(sourceEntries) {
-      return (Array.isArray(sourceEntries) ? sourceEntries : [])
-        .filter(entry => entry)
-        .map(entry => `${String(entry.id)}:${getEntryAmount(entry)}`)
-        .sort()
-        .join('|');
-    }
-
-    function getPointaucVisualModifier(activeEntries) {
-      const activeCount = Math.max(
-        1,
-        Array.isArray(activeEntries)
-          ? activeEntries.filter(entry => entry && !entry.eliminated).length
-          : 0
-      );
-      const initialCount = Math.max(activeCount, Number(spinSeriesInitialCount) || activeCount);
-      const ratio = Math.max(0, Math.min(1, activeCount / initialCount));
-
-      return POINTAUC_VISUAL_MIN_MODIFIER
-        + ratio * (POINTAUC_VISUAL_MAX_MODIFIER - POINTAUC_VISUAL_MIN_MODIFIER);
-    }
-
-    function getPointaucNewVisualWeight(entry, activeEntries) {
-      if (!entry) return 0;
-
-      const amount = Math.max(POINTAUC_VISUAL_MIN_AMOUNT, getEntryAmount(entry));
-      const modifier = getPointaucVisualModifier(activeEntries);
-      const weight = 1 / Math.pow(amount, modifier);
-
-      return Number.isFinite(weight) && weight > 0 ? weight : 0;
-    }
-
-    function getCurrentWheelWeight(entry, activeEntries = null) {
-      return getPointaucNewVisualWeight(
-        entry,
-        Array.isArray(activeEntries) ? activeEntries : entries.filter(item => item && !item.eliminated)
-      );
-    }
-
-    function pickWeightedEntryByAmount(candidates) {
-      const list = (Array.isArray(candidates) ? candidates : []).filter(Boolean);
-      if (list.length === 0) return null;
-
-      const total = list.reduce((sum, entry) => sum + Math.max(0, getCandidateWeightAmount(entry)), 0);
-
-      if (total <= 0) {
-        const index = cryptoRandomInt(0, list.length);
-        return list[index] || null;
-      }
-
-      const randomValue = cryptoRandomFloat() * total;
-      let acc = 0;
-
-      for (const entry of list) {
-        acc += Math.max(0, getCandidateWeightAmount(entry));
-        if (randomValue < acc) return entry;
-      }
-
-      return list[list.length - 1] || null;
-    }
-
-    function buildSpinSeriesDropoutQueue(activeEntries) {
-      const source = (Array.isArray(activeEntries) ? activeEntries : [])
+    function calculateReversePlDropoutChances(activeEntries, eliminatedEntries, options = {}) {
+      const active = (Array.isArray(activeEntries) ? activeEntries : [])
         .filter(entry => entry && !entry.eliminated);
+      const eliminated = (Array.isArray(eliminatedEntries) ? eliminatedEntries : [])
+        .filter(Boolean);
+      const result = new Map();
+      if (active.length === 0) return result;
+      const rates = active.map(getEntryAmount);
+      const eliminatedRateSum = eliminated.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
+      const weights = calculateReversePlDropoutWeights(rates, eliminatedRateSum, options);
+      active.forEach((entry, index) => result.set(entry.id, weights[index]));
+      return result;
+    }
 
-      if (source.length === 0) {
-        return { queue: [], finalWinnerId: null, initialEntryKey: '', initialCount: 0 };
+    function calculateReversePlCurrentWinChances(activeEntries, eliminatedEntries, options = {}) {
+      const active = (Array.isArray(activeEntries) ? activeEntries : [])
+        .filter(entry => entry && !entry.eliminated);
+      const eliminated = (Array.isArray(eliminatedEntries) ? eliminatedEntries : [])
+        .filter(Boolean);
+      const result = new Map();
+      eliminated.forEach(entry => result.set(entry.id, 0));
+      if (active.length === 0) return result;
+
+      const rates = active.map(getEntryAmount);
+      const positiveIndexes = [];
+      for (let index = 0; index < rates.length; index += 1) {
+        if (rates[index] > 0) positiveIndexes.push(index);
+      }
+      if (positiveIndexes.length === 0) {
+        const equalChance = 1 / active.length;
+        active.forEach(entry => result.set(entry.id, equalChance));
+        return result;
+      }
+      active.forEach(entry => result.set(entry.id, 0));
+      if (positiveIndexes.length === 1) {
+        result.set(active[positiveIndexes[0]].id, 1);
+        return result;
       }
 
-      const initialEntryKey = getSpinSeriesEntryKey(source);
-      const initialCount = source.length;
-      const remaining = getWeightedCandidatesByAmount(source).map(entry => ({ ...entry }));
-      const dropoutQueue = [];
+      const positiveRates = positiveIndexes.map(index => rates[index]);
+      const eliminatedRateSum = eliminated.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
+      const weights = calculateReversePlCurrentWinWeights(
+        positiveRates,
+        eliminatedRateSum,
+        options
+      );
+      positiveIndexes.forEach((activeIndex, weightIndex) => {
+        result.set(active[activeIndex].id, weights[weightIndex]);
+      });
+      return result;
+    }
 
-      const finalWinner = pickWeightedEntryByAmount(remaining);
-      if (!finalWinner) {
-        return { queue: [], finalWinnerId: null, initialEntryKey, initialCount };
+    function normalizeWheelAngleRad(angle) {
+      const normalized = Number(angle) % TWO_PI;
+      if (!Number.isFinite(normalized)) return 0;
+      return normalized < 0 ? normalized + TWO_PI : normalized;
+    }
+
+    function buildWheelSpinPlan(initialAngle, durationMs, randomUnit, fullTurns = 10) {
+      const safeInitialAngle = Number.isFinite(Number(initialAngle)) ? Number(initialAngle) : 0;
+      const safeRandomUnit = Number(randomUnit);
+      if (!(safeRandomUnit >= 0 && safeRandomUnit < 1)) {
+        throw new Error('Случайное значение для колеса должно находиться в диапазоне [0, 1).');
       }
-
-      dropoutQueue.push(String(finalWinner.id));
-
-      const finalWinnerIndex = remaining.findIndex(entry => String(entry.id) === String(finalWinner.id));
-      if (finalWinnerIndex >= 0) {
-        remaining.splice(finalWinnerIndex, 1);
-      }
-
-      while (remaining.length > 0) {
-        const picked = pickWeightedEntryByAmount(remaining);
-        if (!picked) break;
-
-        dropoutQueue.push(String(picked.id));
-
-        const index = remaining.findIndex(entry => String(entry.id) === String(picked.id));
-        if (index >= 0) {
-          remaining.splice(index, 1);
-        } else {
-          break;
-        }
-      }
-
-      dropoutQueue.reverse();
-
+      const randomOffset = safeRandomUnit * TWO_PI;
+      const visualTurns = Math.max(0, Math.floor(Number(fullTurns) || 0));
+      const targetAngle = safeInitialAngle + visualTurns * TWO_PI + randomOffset;
       return {
-        queue: dropoutQueue,
-        finalWinnerId: String(finalWinner.id),
-        initialEntryKey,
-        initialCount
+        initialAngle: safeInitialAngle,
+        targetAngle,
+        finalAngle: normalizeWheelAngleRad(targetAngle),
+        durationMs: Math.max(1, Number(durationMs) || 1),
+        randomOffset,
+        fullTurns: visualTurns
       };
     }
 
-    function validateSpinSeriesQueue(activeEntries) {
-      const activeIds = new Set((Array.isArray(activeEntries) ? activeEntries : [])
-        .filter(entry => entry && !entry.eliminated)
-        .map(entry => String(entry.id)));
-
-      if (!Array.isArray(spinSeriesDropoutQueue) || spinSeriesDropoutQueue.length !== activeIds.size) {
-        return false;
+    function getWheelSegmentByPointerOffset(pointerOffset, weightedEntries) {
+      const segments = (Array.isArray(weightedEntries) ? weightedEntries : [])
+        .filter(item => item && item.entry && Number.isFinite(item.weight) && item.weight >= 0);
+      if (segments.length === 0) return null;
+      const totalWeight = segments.reduce((sum, item) => sum + item.weight, 0);
+      if (!(totalWeight > 0)) return null;
+      const normalizedPointerOffset = normalizeWheelAngleRad(pointerOffset);
+      let accumulated = 0;
+      let lastPositiveEntry = null;
+      for (const item of segments) {
+        if (!(item.weight > 0)) continue;
+        lastPositiveEntry = item.entry;
+        accumulated += (item.weight / totalWeight) * TWO_PI;
+        if (normalizedPointerOffset < accumulated) return item.entry;
       }
-
-      const seen = new Set();
-
-      for (const id of spinSeriesDropoutQueue) {
-        const normalizedId = String(id);
-        if (!activeIds.has(normalizedId)) return false;
-        if (seen.has(normalizedId)) return false;
-        seen.add(normalizedId);
-      }
-
-      if (spinSeriesFinalWinnerId && !activeIds.has(String(spinSeriesFinalWinnerId))) {
-        return false;
-      }
-
-      const expectedKey = getSpinSeriesEntryKey(entries.filter(entry => entry));
-      if (spinSeriesInitialEntryKey && spinSeriesInitialEntryKey !== expectedKey) {
-        return false;
-      }
-
-      return true;
+      return lastPositiveEntry;
     }
 
-    function ensureSpinSeriesDropoutQueue(activeEntries) {
-      const active = (Array.isArray(activeEntries) ? activeEntries : [])
-        .filter(entry => entry && !entry.eliminated);
+    function getWheelSegmentAtAngle(angle, weightedEntries) {
+      const pointerOffset = (TWO_PI - normalizeWheelAngleRad(angle)) % TWO_PI;
+      return getWheelSegmentByPointerOffset(pointerOffset, weightedEntries);
+    }
+    // End Reverse Plackett–Luce numerical core.
 
-      if (active.length === 0) {
-        spinSeriesDropoutQueue = [];
-        spinSeriesFinalWinnerId = null;
-        spinSeriesInitialEntryKey = '';
-        spinSeriesInitialCount = 0;
-        spinSeriesActive = false;
+    function createReversePlStateSignature(sourceEntries) {
+      const active = [];
+      const eliminated = [];
+      (Array.isArray(sourceEntries) ? sourceEntries : []).forEach(entry => {
+        if (!entry) return;
+        const pair = [String(entry.id), getEntryAmount(entry)];
+        (entry.eliminated ? eliminated : active).push(pair);
+      });
+      const comparePairs = (left, right) => {
+        if (left[0] < right[0]) return -1;
+        if (left[0] > right[0]) return 1;
+        return left[1] - right[1];
+      };
+      active.sort(comparePairs);
+      eliminated.sort(comparePairs);
+      return JSON.stringify({ active, eliminated });
+    }
+
+    function calculateReversePlProbabilityState(sourceEntries) {
+      const signature = createReversePlStateSignature(sourceEntries);
+      const activeEntries = sourceEntries.filter(entry => entry && !entry.eliminated);
+      const eliminatedEntries = sourceEntries.filter(entry => entry && entry.eliminated);
+      const now = () => (
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : Date.now()
+      );
+      const startedAt = now();
+      const dropoutChances = calculateReversePlDropoutChances(activeEntries, eliminatedEntries);
+      const currentWinChances = calculateReversePlCurrentWinChances(activeEntries, eliminatedEntries);
+      return {
+        signature,
+        dropoutChances,
+        currentWinChances,
+        calculationMs: now() - startedAt
+      };
+    }
+
+    function installReversePlProbabilityState(probabilityState) {
+      reversePlProbabilityCache = probabilityState;
+      wheelGeometryCache = { key: '', data: null };
+      return reversePlProbabilityCache;
+    }
+
+    function ensureReversePlProbabilityState(sourceEntries = entries) {
+      const signature = createReversePlStateSignature(sourceEntries);
+      if (reversePlProbabilityCache.signature === signature) {
+        return reversePlProbabilityCache;
+      }
+      return installReversePlProbabilityState(calculateReversePlProbabilityState(sourceEntries));
+    }
+
+    function calculateReversePlTargetProbabilityState(sourceEntries, victimRef) {
+      let victimFound = false;
+      const targetEntries = (Array.isArray(sourceEntries) ? sourceEntries : []).map(entry => {
+        if (!entry || entry.id !== victimRef?.id || entry.eliminated) return entry;
+        victimFound = true;
+        return { ...entry, eliminated: true };
+      });
+      if (!victimFound) {
+        throw new Error('Выбывающий сектор отсутствует в текущем состоянии колеса.');
+      }
+      return calculateReversePlProbabilityState(targetEntries);
+    }
+
+    function buildReversePlDisplayProbabilityState(
+      activeEntries,
+      oldProbabilityState,
+      targetProbabilityState,
+      easedProgress
+    ) {
+      const progress = Math.max(0, Math.min(1, Number(easedProgress) || 0));
+      return {
+        signature: targetProbabilityState.signature,
+        dropoutChances: interpolateReversePlDropoutChances(
+          activeEntries,
+          oldProbabilityState.dropoutChances,
+          targetProbabilityState.dropoutChances,
+          progress
+        ),
+        currentWinChances: targetProbabilityState.currentWinChances,
+        calculationMs: oldProbabilityState.calculationMs + targetProbabilityState.calculationMs
+      };
+    }
+
+    function easeInOutQuad(progress) {
+      return progress < 0.5
+        ? 2 * progress * progress
+        : -1 + (4 - 2 * progress) * progress;
+    }
+
+    function animateReversePlSectorRemoval({
+      activeEntries,
+      oldProbabilityState,
+      targetProbabilityState,
+      durationMs = 1000,
+      shouldContinue = () => true,
+      onFrame = () => {},
+      onCancel = () => {},
+      onComplete = () => {}
+    }) {
+      const duration = Math.max(1, Number(durationMs) || 1000);
+      const startedAt = performance.now();
+      if (!shouldContinue()) {
+        onCancel();
         return null;
       }
+      onFrame(buildReversePlDisplayProbabilityState(
+        activeEntries,
+        oldProbabilityState,
+        targetProbabilityState,
+        0
+      ), 0);
 
-      if (validateSpinSeriesQueue(active)) {
-        spinSeriesActive = true;
-        if (spinSeriesInitialWinChances.size === 0) {
-          ensureSpinSeriesSnapshot(active);
+      function animateFrame(timestamp) {
+        shrinkAnimFrame = null;
+        if (!shouldContinue()) {
+          onCancel();
+          return;
         }
-        return spinSeriesDropoutQueue[0] || null;
+        const progress = Math.min(Math.max((timestamp - startedAt) / duration, 0), 1);
+        const displayProbabilityState = buildReversePlDisplayProbabilityState(
+          activeEntries,
+          oldProbabilityState,
+          targetProbabilityState,
+          easeInOutQuad(progress)
+        );
+        onFrame(displayProbabilityState, progress);
+        if (progress < 1) {
+          shrinkAnimFrame = requestAnimationFrame(animateFrame);
+        } else {
+          onComplete(displayProbabilityState);
+        }
       }
 
-      const built = buildSpinSeriesDropoutQueue(active);
-      spinSeriesDropoutQueue = built.queue;
-      spinSeriesFinalWinnerId = built.finalWinnerId;
-      spinSeriesInitialEntryKey = built.initialEntryKey;
-      spinSeriesInitialCount = built.initialCount;
-      spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
-      spinSeriesInitialWinChances = calculateAmountWinChances(active);
-      spinSeriesActive = true;
-
-      return spinSeriesDropoutQueue[0] || null;
+      shrinkAnimFrame = requestAnimationFrame(animateFrame);
+      return shrinkAnimFrame;
     }
 
-    function shiftSpinSeriesQueueAfterVictim(victimRef) {
-      if (!victimRef) return;
-      if (String(spinSeriesDropoutQueue[0]) === String(victimRef.id)) {
-        spinSeriesDropoutQueue.shift();
-        return;
-      }
-      resetSpinState();
+    function getCurrentWheelWeight(entry, dropoutChances) {
+      const weight = Number(dropoutChances instanceof Map ? dropoutChances.get(entry?.id) : 0);
+      return Number.isFinite(weight) && weight >= 0 ? weight : 0;
     }
 
     function calculateAuctionInitialWinChances(allEntries) {
       return calculateAmountWinChances((Array.isArray(allEntries) ? allEntries : []).filter(Boolean));
     }
 
-    function calculateCurrentWheelWinChances(activeEntries) {
-      return calculateAmountWinChances((Array.isArray(activeEntries) ? activeEntries : []).filter(entry => entry && !entry.eliminated));
+    function getAuctionWinChanceTooltip() {
+      return 'Изначальная безусловная вероятность лота занять первое место до начала выбываний.';
     }
 
-    function getWinChanceTooltip() {
-      return 'В Аукционе показан изначальный шанс победы по сумме лота. В Колесе показан текущий шанс победы среди оставшихся. Размер сектора на колесе показывает риск вылета на текущем прокруте.';
+    function getWheelWinChanceTooltip() {
+      return 'Текущая условная вероятность победы с учётом уже выбывших мест. Размер сектора показывает вероятность выбыть на следующем прокруте.';
     }
 
     function formatAuctionWinChancePercent(entry, winChances) {
@@ -5520,18 +6089,12 @@
       return (chance * 100).toFixed(WIN_CHANCE_DECIMALS);
     }
 
-    function formatInitialSeriesWinChancePercent(winner, fallbackActiveEntries) {
+    function formatInitialAuctionWinChancePercent(winner) {
       if (!winner) return '0.00';
-
-      const snapshotChance = Number(spinSeriesInitialWinChances.get(winner.id));
-      if (Number.isFinite(snapshotChance)) {
-        return (Math.max(0, Math.min(1, snapshotChance)) * 100).toFixed(2);
-      }
-
-      const fallbackChances = calculateCurrentWheelWinChances(fallbackActiveEntries);
-      const fallbackChance = Number(fallbackChances.get(winner.id));
-      return Number.isFinite(fallbackChance)
-        ? (Math.max(0, Math.min(1, fallbackChance)) * 100).toFixed(2)
+      const initialChances = calculateAuctionInitialWinChances(entries);
+      const chance = Number(initialChances.get(winner.id));
+      return Number.isFinite(chance)
+        ? (Math.max(0, Math.min(1, chance)) * 100).toFixed(2)
         : '0.00';
     }
 
@@ -5576,7 +6139,7 @@
       if (activeDonationAssignmentId && !entries.some(entry => !entry.eliminated)) {
         activeDonationAssignmentId = null;
       }
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       saveData();
       renderList();
       drawWheel();
@@ -5708,7 +6271,7 @@
     document.getElementById('btn-reset-all').onclick = () => {
       if (!canMutateAuctionState()) return;
       if (entries.length === 0) return;
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       cancelScheduledSpinResultClear();
       saveData();
       renderList();
@@ -5742,27 +6305,38 @@
       // Если анимация ещё идет, моментально её прерываем и убираем сегмент
       if (isDelaying && shrinkingTarget) {
           if (!canRunAdminLeaderActions()) {
+              if (appViewMode === 'wheel') return;
               cancelAnimationFrame(shrinkAnimFrame);
               shrinkAnimFrame = null;
               shrinkingTarget = null;
-              shrinkingProgress = 0;
+              shrinkingSpinContext = null;
+              shrinkingTargetProbabilityState = null;
               isDelaying = false;
               isSpinning = false;
+              document.body.classList.remove('is-spinning');
               updateAdminLeadershipUi();
               return;
           }
           cancelAnimationFrame(shrinkAnimFrame);
           shrinkAnimFrame = null;
-          shrinkingTarget.eliminated = true;
-          shiftSpinSeriesQueueAfterVictim(shrinkingTarget);
+          const interruptedVictim = shrinkingTarget;
+          const interruptedContext = shrinkingSpinContext;
+          const interruptedProbabilityState = shrinkingTargetProbabilityState;
+          const elimination = eliminateEntryAtCurrentPlace(interruptedVictim);
+          if (interruptedProbabilityState) {
+            installReversePlProbabilityState(interruptedProbabilityState);
+          }
+          rememberCompletedSpinOutcome(interruptedContext, interruptedVictim, elimination.winner);
           const remainingAfterInterrupt = entries.filter(e => !e.eliminated);
           shrinkingTarget = null;
-          shrinkingProgress = 0;
+          shrinkingSpinContext = null;
+          shrinkingTargetProbabilityState = null;
           isDelaying = false;
           isSpinning = false;
+          document.body.classList.remove('is-spinning');
           saveData();
           renderList();
-          drawWheel();
+          drawWheel(interruptedProbabilityState);
           updateAdminLeadershipUi();
           if (remainingAfterInterrupt.length > 1) {
             scheduleClearSpinResult(3000);
@@ -5772,35 +6346,6 @@
 
       // Плашку результата кликом по странице не скрываем — снимается при новом «Крутить» и др. сценариях в коде
     }, true);
-
-    function restoreSpinSeriesState(rawSpinSeries) {
-      if (!rawSpinSeries || typeof rawSpinSeries !== 'object') {
-        resetSpinState();
-        return;
-      }
-
-      spinSeriesMode = rawSpinSeries.mode === SPIN_SERIES_MODE_POINTAUC_NEW
-        ? rawSpinSeries.mode
-        : SPIN_SERIES_MODE_POINTAUC_NEW;
-      spinSeriesDropoutQueue = Array.isArray(rawSpinSeries.dropoutQueue)
-        ? rawSpinSeries.dropoutQueue.map(id => String(id)).filter(Boolean)
-        : [];
-      spinSeriesFinalWinnerId = rawSpinSeries.finalWinnerId
-        ? String(rawSpinSeries.finalWinnerId)
-        : null;
-      spinSeriesInitialEntryKey = String(rawSpinSeries.initialEntryKey || '');
-      spinSeriesInitialCount = Math.max(0, Number(rawSpinSeries.initialCount) || 0);
-      spinSeriesActive = !!rawSpinSeries.active;
-      spinSeriesInitialWinChances = deserializeChanceMap(rawSpinSeries.initialWinChances);
-    }
-
-    function resetInvalidLoadedSpinSeriesIfNeeded() {
-      const activeEntries = entries.filter(entry => entry && !entry.eliminated);
-      if (spinSeriesDropoutQueue.length === 0 && !spinSeriesActive) return;
-      if (!validateSpinSeriesQueue(activeEntries)) {
-        resetSpinState();
-      }
-    }
 
     function migrateLegacyAiEntryName(entry) {
       if (!entry || entry.createdBy !== 'llm') return;
@@ -5850,6 +6395,8 @@
         if (saved) {
           const parsed = JSON.parse(saved);
           lastAppliedStateUpdateId = String(parsed.stateUpdateId || '');
+          sharedControlRevision = Math.max(0, Number(parsed.sharedControlRevision || 0));
+          lastConfirmedSharedControlRequestId = String(parsed.lastConfirmedSharedControlRequestId || '').slice(0, 200);
           sharedStateResetEpoch = String(parsed.resetEpoch || '');
           if (!currentServerResetEpoch && sharedStateResetEpoch) currentServerResetEpoch = sharedStateResetEpoch;
           sharedStateAuctionGeneration = Math.max(0, Number(parsed.auctionGeneration || 0));
@@ -5870,7 +6417,14 @@
               entry.id = `${Date.now()}-${idx}-${cryptoRandomUint32().toString(16)}`;
             }
             entry.name = limitStoredText(entry.name, MAX_LOT_NAME_LENGTH);
-            entry.price = Math.max(0, Number(entry.price) || 0);
+            entry.price = getEntryAmount(entry);
+            entry.eliminated = !!entry.eliminated;
+            const assignedPlace = Number(entry.assignedPlace);
+            if (Number.isInteger(assignedPlace) && assignedPlace >= 1 && assignedPlace <= entries.length) {
+              entry.assignedPlace = assignedPlace;
+            } else {
+              delete entry.assignedPlace;
+            }
             delete entry.aliases;
             entry.source = limitStoredText(entry.source, 40);
             entry.externalId = limitStoredText(entry.externalId, 200);
@@ -5879,10 +6433,17 @@
             entry.imageUrl = limitStoredText(entry.imageUrl, 1000);
             migrateLegacyAiEntryName(entry);
           });
-          restoreSpinSeriesState(parsed.spinSeries);
-          pendingSpinOperation = parsed.pendingSpinOperation && typeof parsed.pendingSpinOperation === 'object'
-            ? { ...parsed.pendingSpinOperation }
-            : null;
+          const loadedActiveEntries = entries.filter(entry => entry && !entry.eliminated);
+          if (loadedActiveEntries.length === 1) {
+            loadedActiveEntries[0].assignedPlace = 1;
+          } else {
+            loadedActiveEntries.forEach(entry => {
+              if (entry.assignedPlace === 1) delete entry.assignedPlace;
+            });
+          }
+          // Legacy spinSeries/dropoutQueue/finalWinnerId fields are deliberately ignored.
+          invalidateReversePlProbabilityCache();
+          pendingSpinOperation = normalizePendingReversePlSpinOperation(parsed.pendingSpinOperation);
           lastSpinResult = parsed.lastSpinResult && typeof parsed.lastSpinResult === 'object'
             ? { ...parsed.lastSpinResult }
             : null;
@@ -5905,7 +6466,6 @@
           if (pendingSpinOperation?.spinRequestId) {
             handledSpinRequests.set(String(pendingSpinOperation.spinRequestId), { status: 'accepted', descriptor: pendingSpinOperation });
           }
-          resetInvalidLoadedSpinSeriesIfNeeded();
 
           donationsPending = Array.isArray(parsed.donationsPending)
             ? parsed.donationsPending
@@ -5958,11 +6518,7 @@
             ? !!parsed.hideAddedOrder
             : true;
           hideAuctionTimer = !!parsed.hideAuctionTimer;
-          centerImageUrl = parsed.centerImageUrl || defaultCenter;
-          
-          if(centerImageUrl.startsWith('blob:')) {
-            centerImageUrl = defaultCenter;
-          }
+          centerImageUrl = normalizeCenterImageSource(parsed.centerImageUrl) || defaultCenter;
 
           if (parsed.wheelSize) {
              document.getElementById('wheel-size-slider').value = parsed.wheelSize;
@@ -5970,8 +6526,7 @@
           if (parsed.spinDurationSec != null) {
             const sd = document.getElementById('spin-duration');
             if (sd) {
-              const d = Math.min(60, Math.max(1, Math.round(Number(parsed.spinDurationSec)) || 10));
-              sd.value = String(d);
+              sd.value = String(normalizeSpinDurationSec(parsed.spinDurationSec));
             }
           }
           if (parsed.wheelLabelFont != null && document.getElementById('wheel-font-slider')) {
@@ -5987,7 +6542,7 @@
           }
         } else {
           entries = [];
-          resetSpinState();
+          invalidateReversePlProbabilityCache();
           donationsPending = [];
           donationsAdded = [];
           pendingSpinOperation = null;
@@ -6003,6 +6558,8 @@
           persistedActiveMainTab = 'auction';
           activeDonationsTab = 'pending';
           loadedTimerState = null;
+          sharedControlRevision = 0;
+          lastConfirmedSharedControlRequestId = '';
         }
       } catch(e) { console.error("Ошибка загрузки", e); }
 
@@ -6080,17 +6637,19 @@
     function saveData() {
       if (suppressPersistence || !canRunAdminLeaderActions()) return;
       const spinEl = document.getElementById('spin-duration');
-      const spinDurationSec = Math.min(60, Math.max(1, parseInt(spinEl && spinEl.value, 10) || 10));
+      const spinDurationSec = normalizeSpinDurationSec(spinEl && spinEl.value);
       const stateUpdateId = `${adminTabInstanceId}:${Date.now()}:${++stateUpdateSequence}`;
       const data = {
         stateUpdateId,
+        sharedControlRevision,
+        lastConfirmedSharedControlRequestId,
         entries,
         resetEpoch: currentServerResetEpoch || sharedStateResetEpoch,
         auctionGeneration: currentAuctionGeneration,
         hideEliminated,
         hideAddedOrder,
         hideAuctionTimer,
-        centerImageUrl: centerImageUrl.startsWith('blob:') ? defaultCenter : centerImageUrl,
+        centerImageUrl: normalizeCenterImageSource(centerImageUrl) || defaultCenter,
         wheelSize: parseInt(document.getElementById('wheel-size-slider').value),
         wheelLabelFont: getWheelLabelFontPx(),
         spinDurationSec,
@@ -6108,15 +6667,6 @@
         activeMainTab: appViewMode === 'admin' ? activeMainTab : persistedActiveMainTab,
         activeDonationsTab,
         timerState: getTimerStateSnapshot(),
-        spinSeries: {
-          mode: spinSeriesMode,
-          dropoutQueue: Array.isArray(spinSeriesDropoutQueue) ? spinSeriesDropoutQueue.map(id => String(id)) : [],
-          finalWinnerId: spinSeriesFinalWinnerId,
-          initialEntryKey: spinSeriesInitialEntryKey,
-          initialCount: spinSeriesInitialCount,
-          active: spinSeriesActive,
-          initialWinChances: serializeChanceMap(spinSeriesInitialWinChances)
-        },
         pendingSpinOperation,
         lastSpinResult,
         recentSpinResults: normalizeRecentSpinResults(
@@ -6200,7 +6750,7 @@
       activeDonationAssignmentId = null;
       pendingDeleteEntryId = null;
       llmJobsRevision = Math.max(0, Number(revision || 0));
-      resetSpinState();
+      invalidateReversePlProbabilityCache();
       pendingSpinOperation = null;
       lastSpinResult = null;
       recentSpinResults = [];
@@ -6208,6 +6758,7 @@
       if (pendingWheelSpinTimeout) clearTimeout(pendingWheelSpinTimeout);
       pendingWheelSpinTimeout = null;
       pendingWheelSpinRequest = null;
+      pendingWheelSpinVisualState = null;
       cancelWheelSpinAnimation();
       if (shrinkAnimFrame) cancelAnimationFrame(shrinkAnimFrame);
       shrinkAnimFrame = null;
@@ -6218,7 +6769,8 @@
       pendingAuthoritativeSpinTimer = null;
       currentAngle = 0;
       shrinkingTarget = null;
-      shrinkingProgress = 0;
+      shrinkingSpinContext = null;
+      shrinkingTargetProbabilityState = null;
       isSpinning = false;
       isDelaying = false;
       const search = document.getElementById('search-filter');
@@ -6308,9 +6860,7 @@
       serverCollectorStatus = null;
 
       timerRunning = false;
-      timerLastFrameTs = 0;
-      timerStartedAtMs = 0;
-      timerRemainingAtStartMs = 0;
+      timerEndsAtMs = 0;
       timerValueMs = 0;
       timerResetTargetMs = 0;
       timerStateReady = false;
@@ -6331,14 +6881,20 @@
       lastSpinResult = null;
       recentSpinResults = [];
       handledSpinRequests.clear();
+      handledSharedControlRequestIds.clear();
+      sharedControlRevision = 0;
+      lastConfirmedSharedControlRequestId = '';
       authoritativeSpinRequestInFlight = false;
+      pendingWheelSpinRequest = null;
+      pendingWheelSpinVisualState = null;
       cancelWheelSpinAnimation();
       if (shrinkAnimFrame) cancelAnimationFrame(shrinkAnimFrame);
       shrinkAnimFrame = null;
       if (strikeActivationTimeout) clearTimeout(strikeActivationTimeout);
       strikeActivationTimeout = null;
       shrinkingTarget = null;
-      shrinkingProgress = 0;
+      shrinkingSpinContext = null;
+      shrinkingTargetProbabilityState = null;
       isSpinning = false;
       isDelaying = false;
       activeAuctionResyncOperationId = '';
@@ -6358,7 +6914,7 @@
       rightColWidth = 380;
       auctionLeftWidth = 0;
       listItemHeight = 55;
-      resetSpinState();
+      invalidateReversePlProbabilityCache();
       seenDonationKeys.clear();
       donationAlertsBaselineReady = false;
       donationAlertsMaxSeenId = 0;
@@ -6566,7 +7122,7 @@
       const numericAmount = Number(amount);
       if (!entry || !Number.isFinite(numericAmount)) return false;
       entry.price += numericAmount;
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       if (!deferRefresh) {
         saveData();
         renderList();
@@ -7696,7 +8252,7 @@
         createdAt: new Date().toISOString()
       };
       entries.push(entry);
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       if (!deferRefresh) {
         saveData();
         renderList();
@@ -7766,13 +8322,13 @@
         entries.push(createdEntry);
         assignmentEntry = createdEntry;
         originalEntryPrice = 0;
-        resetSpinSeriesForCompositionChange();
+        resetAuctionProgressForCompositionChange();
         if (donation.llm) donation.llm.status = 'applied';
         const applied = assignDonationToEntry(donationId, createdEntry.id);
         if (applied) return true;
 
         entries = entries.filter(entry => entry.id !== createdEntry.id);
-        resetSpinSeriesForCompositionChange();
+        resetAuctionProgressForCompositionChange();
         if (donation.llm) donation.llm.status = 'done';
         saveData();
         renderList();
@@ -7785,7 +8341,7 @@
         }
         if (createdEntry) {
           entries = entries.filter(entry => entry.id !== createdEntry.id);
-          resetSpinSeriesForCompositionChange();
+          resetAuctionProgressForCompositionChange();
         }
         let donation = getPendingDonationById(donationId);
         const addedIndex = donationsAdded.findIndex(item => item.id === donationId);
@@ -10943,13 +11499,6 @@
       "01EZPGBXMR0001DCZS00AD662R", "01EZPHJ86R000C438200A44F1S", "01F031CCA80001TJB3006SVBHS", "01F125GGEG0009V7MP006J8KNZ", "01F42G1J400005W0EZC5BGMVRX", "01F5PFXXER000BAN36SW3N6P42", "01F6J3MNC8000CE64F7FH1YF7V", "01F6MQ33FG000FFJ97ZB8MWV52", "01F6ME7ADR0000WDA7ERT9H30R", "01F6N0CC5R0003R9X8PYE7ZJVK", "01F6NACCD80006SZ7ZW5FMWKWK", "01F6NMW2K80007X1R6PNS19MNJ", "01F6VKNENG000ECZXVKQBWS8DT", "01FAT81EG8000C0Z8TR69TJ930", "01FB55W7X0000EAYZC08B47GPW", "01F9C42KS80009N7XVDB6JDCAH", "01FH8JC3J800072TF42DHX4CF3", "01F7Q4GJYG0002BJ8PJ1T6SGX0", "01F6N6WQ5G00052X5637DQBJH4", "01F6P1E7QR0002RDNAW6FFQ1E0", "01EZPMV1Q800077NX500A43YF7", "01G87CZFM0000E3SNYRX5950FC", "01G7YR9X5G0003Z50SB3FM5WR4", "01G08M28KR000BNDCWZMDRQ24X", "01GEAMCZ00000D2JB9BX6A64AE", "01GEN8KD6R00091TVR6M4DY6A1", "01G8CMD8V0000DHSGW4YR57HF8", "01GH1MNRN00008XMM9ZCG7Y8F1", "01GCM7WXJ0000D8ZK13J8KVAV6", "01G70VHSB800068806HB3KDSG6", "01FE4E825R0003QYBS2MTTHVXX", "01G3WEGZN0000ET2J0MQP5YJ0G", "01GBFAYKGR000FWWN7MDZZ8XQN", "01GMAH9MB000066S7TTNVB1TGD", "01GHMH2C28000BCSECMMH7M0TD", "01GBPSCGR00007Q17796BDN5AJ"
     ];
 
-    function normalizeWheelAngleRad(a) {
-      let x = Number(a) % (Math.PI * 2);
-      if (!Number.isFinite(x)) return 0;
-      if (x < 0) x += Math.PI * 2;
-      return x;
-    }
-
     let currentAngle = 0;
     let isSpinning = false;
 
@@ -11001,22 +11550,21 @@
 
     (function wireSpinDurationNudges() {
       const inp = document.getElementById('spin-duration');
-      const clampDur = () => {
-        const v = Math.min(60, Math.max(1, parseInt(inp.value, 10) || 10));
-        inp.value = String(v);
-        saveData();
+      const commitDuration = () => {
+        if (String(inp.value || '').trim() === '') return false;
+        return submitSharedControlChange('spinDurationSec', inp.value);
       };
-      inp.addEventListener('change', clampDur);
-      inp.addEventListener('input', () => { saveData(); });
+      inp.addEventListener('change', commitDuration);
+      inp.addEventListener('input', commitDuration);
       document.getElementById('spin-duration-minus').addEventListener('click', () => {
-        const v = Math.min(60, Math.max(1, parseInt(inp.value, 10) || 10));
+        const v = normalizeSpinDurationSec(inp.value);
         inp.value = String(Math.max(1, v - 1));
-        saveData();
+        commitDuration();
       });
       document.getElementById('spin-duration-plus').addEventListener('click', () => {
-        const v = Math.min(60, Math.max(1, parseInt(inp.value, 10) || 10));
+        const v = normalizeSpinDurationSec(inp.value);
         inp.value = String(Math.min(60, v + 1));
-        saveData();
+        commitDuration();
       });
     })();
 
@@ -11106,10 +11654,8 @@
       if (!list || !summary || !totalLabel) return;
 
       const activeEntries = entries.filter(entry => entry && !entry.eliminated);
-      const totalAmount = entries.reduce((sum, entry) => {
-        return sum + Math.max(0, Number(entry?.price) || 0);
-      }, 0);
-      const chanceTooltip = getWinChanceTooltip();
+      const totalAmount = entries.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
+      const chanceTooltip = getWheelWinChanceTooltip();
       summary.textContent = `${activeEntries.length} активных из ${entries.length}`;
       totalLabel.textContent = `${totalAmount.toLocaleString('ru-RU')} ₽`;
       list.replaceChildren();
@@ -11121,7 +11667,12 @@
         list.appendChild(empty);
         return;
       }
-      const winChances = calculateCurrentWheelWinChances(activeEntries);
+      let winChances = new Map();
+      try {
+        winChances = ensureReversePlProbabilityState(entries).currentWinChances;
+      } catch (error) {
+        console.error('Не удалось рассчитать текущие шансы победы', error);
+      }
       const rows = entries
         .map((entry, index) => ({ entry, index }))
         .sort((a, b) => {
@@ -11140,7 +11691,14 @@
 
         const number = document.createElement('span');
         number.className = 'wheel-readonly-number';
-        number.textContent = String(displayIndex + 1);
+        const assignedPlace = Number(entry.assignedPlace);
+        if (Number.isInteger(assignedPlace) && assignedPlace >= 1) {
+          number.textContent = `#${assignedPlace}`;
+          number.title = `Назначенное место: ${assignedPlace}`;
+        } else {
+          number.textContent = String(displayIndex + 1);
+          number.title = 'Позиция в текущем списке';
+        }
 
         const name = document.createElement('span');
         name.className = 'wheel-readonly-name';
@@ -11357,7 +11915,7 @@
       
       const auctionEntries = entries.filter(entry => entry);
       const winChances = calculateAuctionInitialWinChances(auctionEntries);
-      const chanceTooltip = getWinChanceTooltip();
+      const chanceTooltip = getAuctionWinChanceTooltip();
       const filterText = document.getElementById('search-filter').value.toLowerCase().trim();
       const isAssigningDonation = Boolean(activeDonationAssignmentId);
 
@@ -11506,7 +12064,7 @@
     window.updatePrice = function(index, val) {
       if (!canMutateAuctionState()) return;
       entries[index].price = Math.max(0, parseFloat(val) || 0);
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       saveData(); renderList(); drawWheel();
     };
 
@@ -11521,7 +12079,7 @@
       if (!Number.isFinite(amount) || amount <= 0) return;
       const sign = Number(direction) < 0 ? -1 : 1;
       entries[index].price = Math.max(0, (Number(entries[index].price) || 0) + sign * amount);
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       saveData(); renderList(); drawWheel();
     };
 
@@ -11551,7 +12109,7 @@
         
         document.getElementById('new-name').value = '';
         document.getElementById('new-price').value = '0';
-        resetSpinSeriesForCompositionChange();
+        resetAuctionProgressForCompositionChange();
         saveData(); renderList(); drawWheel();
       }
     };
@@ -11561,26 +12119,21 @@
 
 
     // Вспомогательная функция для определения лота под стрелкой в процессе вращения
-    function getCurrentSegment(angle) {
-        const activeEntries = entries.filter(e => !e.eliminated);
-        if(activeEntries.length === 0) return null;
-        
-        let totalW = activeEntries.reduce((s, e) => s + getCurrentWheelWeight(e, activeEntries), 0);
-        
-        let normalizedAngle = angle % (Math.PI * 2);
-        if (normalizedAngle < 0) normalizedAngle += Math.PI * 2;
-        
-        let pointerOffset = (Math.PI * 2 - normalizedAngle) % (Math.PI * 2);
-        
-        let accum = 0;
-        for(let entry of activeEntries) {
-            const sliceAngle = (getCurrentWheelWeight(entry, activeEntries) / totalW) * Math.PI * 2;
-            accum += sliceAngle;
-            if (pointerOffset <= accum) {
-                return entry;
-            }
-        }
-        return activeEntries[activeEntries.length - 1];
+    function getCurrentSegment(angle, sourceActiveEntries = null, dropoutChances = null) {
+      const activeEntries = Array.isArray(sourceActiveEntries)
+        ? sourceActiveEntries.filter(entry => entry && !entry.eliminated)
+        : entries.filter(entry => entry && !entry.eliminated);
+      if (activeEntries.length === 0) return null;
+      const chances = dropoutChances instanceof Map
+        ? dropoutChances
+        : ensureReversePlProbabilityState(entries).dropoutChances;
+      return getWheelSegmentAtAngle(
+        angle,
+        activeEntries.map(entry => ({
+          entry,
+          weight: getCurrentWheelWeight(entry, chances)
+        }))
+      );
     }
 
     /** Текст вдоль биссектрисы: усечение с «…», пока строка не влезает в maxSpan (пиксели по оси x после поворота). */
@@ -11684,10 +12237,10 @@
       return null;
     }
 
-    function getWheelGeometryCacheKey(activeEntries, wheelLabelFontPx) {
+    function getWheelGeometryCacheKey(activeEntries, wheelLabelFontPx, probabilitySignature) {
       return JSON.stringify({
         font: wheelLabelFontPx,
-        initialCount: Number(spinSeriesInitialCount) || 0,
+        probabilitySignature,
         entries: activeEntries.map(entry => [
           String(entry.id),
           String(entry.name || ''),
@@ -11697,14 +12250,17 @@
       });
     }
 
-    function buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx) {
-      const wheelData = activeEntries.map(entry => {
-        let weight = getCurrentWheelWeight(entry, activeEntries);
-        if (shrinkingTarget && entry.id === shrinkingTarget.id) {
-          weight *= (1 - shrinkingProgress);
-        }
-        return { entry, weight };
-      });
+    function buildWheelGeometryData(
+      activeEntries,
+      radius,
+      innerHoleRadiusLogical,
+      wheelLabelFontPx,
+      dropoutChances
+    ) {
+      const wheelData = activeEntries.map(entry => ({
+        entry,
+        weight: getCurrentWheelWeight(entry, dropoutChances)
+      }));
       const totalWeight = wheelData.reduce((sum, item) => sum + item.weight, 0);
       if (totalWeight <= 0) return null;
 
@@ -11727,13 +12283,22 @@
       return wheelData;
     }
 
-    function drawWheel() {
+    function drawWheel(probabilityStateOverride = null) {
       const LOGICAL = WHEEL_DRAW_LOGICAL_PX;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const activeEntries = entries.filter(e => !e.eliminated);
       if (activeEntries.length === 0) return;
+      let probabilityState = probabilityStateOverride;
+      if (!probabilityState || !(probabilityState.dropoutChances instanceof Map)) {
+        try {
+          probabilityState = ensureReversePlProbabilityState(entries);
+        } catch (error) {
+          console.error('Не удалось построить сектора Reverse Plackett–Luce', error);
+          return;
+        }
+      }
 
       const scale = (wheelDisplayCssPx * wheelDpr) / LOGICAL;
       if (scale <= 0) return;
@@ -11748,13 +12313,29 @@
 
       let wheelData = null;
       if (shrinkingTarget) {
-        wheelData = buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx);
+        wheelData = buildWheelGeometryData(
+          activeEntries,
+          radius,
+          innerHoleRadiusLogical,
+          wheelLabelFontPx,
+          probabilityState.dropoutChances
+        );
       } else {
-        const cacheKey = getWheelGeometryCacheKey(activeEntries, wheelLabelFontPx);
+        const cacheKey = getWheelGeometryCacheKey(
+          activeEntries,
+          wheelLabelFontPx,
+          probabilityState.signature
+        );
         if (wheelGeometryCache.key !== cacheKey || !wheelGeometryCache.data) {
           wheelGeometryCache = {
             key: cacheKey,
-            data: buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx)
+            data: buildWheelGeometryData(
+              activeEntries,
+              radius,
+              innerHoleRadiusLogical,
+              wheelLabelFontPx,
+              probabilityState.dropoutChances
+            )
           };
         }
         wheelData = wheelGeometryCache.data;
@@ -11892,45 +12473,57 @@
       };
     }
 
+    function normalizePendingReversePlSpinOperation(value) {
+      if (!value || typeof value !== 'object') return null;
+      const spinRequestId = String(value.spinRequestId || '');
+      const probabilityStateSignature = String(value.probabilityStateSignature || '');
+      const targetAngle = Number(value.targetAngle);
+      const finalAngle = Number(value.finalAngle);
+      if (
+        !spinRequestId
+        || !probabilityStateSignature
+        || !Number.isFinite(targetAngle)
+        || !Number.isFinite(finalAngle)
+        || String(value.victimId || '')
+        || String(value.winnerId || '')
+      ) {
+        return null;
+      }
+      return {
+        ...value,
+        spinId: String(value.spinId || spinRequestId),
+        spinRequestId,
+        probabilityStateSignature,
+        initialAngle: Number.isFinite(Number(value.initialAngle)) ? Number(value.initialAngle) : 0,
+        targetAngle,
+        finalAngle: normalizeWheelAngleRad(finalAngle),
+        durationMs: Math.min(60000, Math.max(1000, Number(value.durationMs) || 1000)),
+        generation: Math.max(0, Number(value.generation || 0)),
+        startedAt: Number(value.startedAt || 0),
+        finishAt: Number(value.finishAt || 0)
+      };
+    }
+
     function buildAuthoritativeSpinDescriptor(request) {
       const activeEntries = entries.filter(entry => entry && !entry.eliminated);
       if (!activeEntries.length) return null;
-      ensureSpinSeriesSnapshot(activeEntries);
+      const probabilityState = ensureReversePlProbabilityState(entries);
       const durationMs = Math.min(60000, Math.max(1000, (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000));
-      const initialAngle = currentAngle;
-      let victim = null;
-      let targetAngle = currentAngle + (Math.PI * 2 * 10) + cryptoRandomFloat() * Math.PI * 2;
-      if (activeEntries.length > 1) {
-        let victimId = ensureSpinSeriesDropoutQueue(activeEntries);
-        victim = activeEntries.find(entry => String(entry.id) === String(victimId));
-        if (!victim) return null;
-        const totalWeight = activeEntries.reduce((sum, entry) => sum + getCurrentWheelWeight(entry, activeEntries), 0);
-        let victimStartAngle = 0;
-        for (const entry of activeEntries) {
-          if (String(entry.id) === String(victim.id)) break;
-          victimStartAngle += (getCurrentWheelWeight(entry, activeEntries) / totalWeight) * Math.PI * 2;
-        }
-        const victimSliceSize = (getCurrentWheelWeight(victim, activeEntries) / totalWeight) * Math.PI * 2;
-        const targetOnWheel = victimStartAngle + cryptoRandomFloat() * victimSliceSize;
-        const baseTarget = (Math.PI * 2) - targetOnWheel;
-        let rotationNeeded = baseTarget - (currentAngle % (Math.PI * 2));
-        if (rotationNeeded < 0) rotationNeeded += Math.PI * 2;
-        targetAngle = currentAngle + rotationNeeded + Math.PI * 2 * 10;
-      }
+      const plan = buildWheelSpinPlan(currentAngle, durationMs, cryptoRandomFloat53(), 10);
+      const startedAt = Date.now();
       return {
         spinId: request.spinRequestId,
         spinRequestId: request.spinRequestId,
         requesterTabId: request.requesterTabId,
         collectionAction: normalizeSpinCollectionAction(request.collectionAction),
-        victimId: victim ? String(victim.id) : '',
-        winnerId: activeEntries.length === 1 ? String(activeEntries[0].id) : '',
-        initialAngle,
-        targetAngle,
-        finalAngle: normalizeWheelAngleRad(targetAngle),
-        durationMs,
+        probabilityStateSignature: probabilityState.signature,
+        initialAngle: plan.initialAngle,
+        targetAngle: plan.targetAngle,
+        finalAngle: plan.finalAngle,
+        durationMs: plan.durationMs,
         generation: currentAuctionGeneration,
-        startedAt: Date.now(),
-        finishAt: Date.now() + durationMs
+        startedAt,
+        finishAt: startedAt + plan.durationMs
       };
     }
 
@@ -11949,25 +12542,41 @@
       if (Number(descriptor.generation || 0) !== currentAuctionGeneration) return false;
       const operationClaim = createAdminOperationClaim(String(spinRequestId), currentAuctionGeneration);
       if (!operationClaim || !isAdminOperationStillAuthoritative(operationClaim)) return false;
-      const victim = descriptor.victimId
-        ? entries.find(entry => String(entry.id) === String(descriptor.victimId))
-        : null;
-      if (victim && !victim.eliminated) {
-        victim.eliminated = true;
-        shiftSpinSeriesQueueAfterVictim(victim);
+      const probabilityState = ensureReversePlProbabilityState(entries);
+      if (probabilityState.signature !== String(descriptor.probabilityStateSignature || '')) {
+        pendingSpinOperation = null;
+        saveData();
+        return false;
       }
       currentAngle = normalizeWheelAngleRad(Number(descriptor.finalAngle || descriptor.targetAngle || currentAngle));
+      const activeBefore = entries.filter(entry => entry && !entry.eliminated);
+      const victim = activeBefore.length > 1
+        ? getCurrentSegment(currentAngle, activeBefore, probabilityState.dropoutChances)
+        : null;
+      if (activeBefore.length > 1 && !victim) return false;
+      const elimination = victim
+        ? eliminateEntryAtCurrentPlace(victim)
+        : { assignedPlace: 0, winner: activeBefore.length === 1 ? activeBefore[0] : null };
+      if (elimination.winner && !Number.isInteger(elimination.winner.assignedPlace)) {
+        elimination.winner.assignedPlace = 1;
+      }
       const activeAfter = entries.filter(entry => entry && !entry.eliminated);
       const winner = activeAfter.length === 1 ? activeAfter[0] : null;
+      if (winner && !Number.isInteger(winner.assignedPlace)) winner.assignedPlace = 1;
+      const initialWinChances = winner ? calculateAuctionInitialWinChances(entries) : new Map();
       const result = {
         spinRequestId: descriptor.spinRequestId,
         spinId: descriptor.spinId,
         victimId: victim ? String(victim.id) : '',
         victimName: victim ? String(victim.name || '') : '',
-        winnerId: winner ? String(winner.id) : String(descriptor.winnerId || ''),
+        assignedPlace: victim ? Number(victim.assignedPlace || 0) : 0,
+        winnerId: winner ? String(winner.id) : '',
         winnerName: winner ? String(winner.name || '') : '',
+        winnerPlace: winner ? Number(winner.assignedPlace || 1) : 0,
+        winnerInitialChance: winner ? Number(initialWinChances.get(winner.id) || 0) : 0,
         final: !!winner,
         finalAngle: currentAngle,
+        probabilityStateSignature: String(descriptor.probabilityStateSignature || ''),
         generation: currentAuctionGeneration,
         finishedAt: new Date().toISOString()
       };
@@ -11985,6 +12594,14 @@
     function resumePendingAuthoritativeSpin() {
       if (!canRunAdminLeaderActions() || !pendingSpinOperation) return false;
       if (Number(pendingSpinOperation.generation || 0) !== currentAuctionGeneration) {
+        pendingSpinOperation = null;
+        saveData();
+        return false;
+      }
+      if (
+        String(pendingSpinOperation.probabilityStateSignature || '')
+        !== createReversePlStateSignature(entries)
+      ) {
         pendingSpinOperation = null;
         saveData();
         return false;
@@ -12113,7 +12730,18 @@
         handledSpinRequests.delete(requestId);
         return false;
       }
-      const descriptor = buildAuthoritativeSpinDescriptor(message);
+      let descriptor = null;
+      try {
+        descriptor = buildAuthoritativeSpinDescriptor(message);
+      } catch (error) {
+        console.error('Не удалось подготовить прокрут Reverse Plackett–Luce', error);
+        return postSpinRequestRejection(
+          message,
+          /WebCrypto|генератор/i.test(String(error?.message || ''))
+            ? 'random_unavailable'
+            : 'probability_calculation_failed'
+        );
+      }
       if (!descriptor) {
         handledSpinRequests.delete(requestId);
         return postSpinRequestRejection(message, 'no_active_entries');
@@ -12132,16 +12760,98 @@
       return !!next && String(activeSpinId || '') !== next;
     }
 
+    function createWheelSpinAcceptedVisualState(descriptor, sourceEntries, probabilityState) {
+      const spinRequestId = String(descriptor?.spinRequestId || '');
+      if (
+        !spinRequestId
+        || !Array.isArray(sourceEntries)
+        || !(probabilityState?.dropoutChances instanceof Map)
+        || probabilityState.signature !== String(descriptor?.probabilityStateSignature || '')
+      ) {
+        return null;
+      }
+      const entriesSnapshot = sourceEntries.map(entry => (entry ? { ...entry } : entry));
+      const activeEntries = entriesSnapshot.filter(entry => entry && !entry.eliminated);
+      if (activeEntries.length < 2) return null;
+      return {
+        spinRequestId,
+        operationId: String(descriptor?.spinId || spinRequestId),
+        entriesSnapshot,
+        activeEntries,
+        oldProbabilityState: {
+          ...probabilityState,
+          dropoutChances: new Map(probabilityState.dropoutChances),
+          currentWinChances: probabilityState.currentWinChances instanceof Map
+            ? new Map(probabilityState.currentWinChances)
+            : new Map()
+        },
+        finalAngle: normalizeWheelAngleRad(descriptor?.finalAngle),
+        resultApplied: false
+      };
+    }
+
+    function prepareWheelSpinRemovalState(visualState, result) {
+      const spinRequestId = String(result?.spinRequestId || '');
+      if (
+        !visualState
+        || visualState.resultApplied
+        || visualState.spinRequestId !== spinRequestId
+      ) {
+        return null;
+      }
+      const victimId = String(result?.victimId || '');
+      const victim = visualState.activeEntries.find(entry => String(entry?.id || '') === victimId);
+      if (!victim) return null;
+      return {
+        ...visualState,
+        victim,
+        targetProbabilityState: calculateReversePlTargetProbabilityState(
+          visualState.entriesSnapshot,
+          victim
+        ),
+        finalAngle: Number.isFinite(Number(result?.finalAngle))
+          ? normalizeWheelAngleRad(Number(result.finalAngle))
+          : visualState.finalAngle,
+        isFinal: visualState.activeEntries.length <= 2
+      };
+    }
+
+    function isDuplicateWheelSpinResultInFlight(
+      visualState,
+      result,
+      delaying,
+      spinContext
+    ) {
+      const spinRequestId = String(result?.spinRequestId || '');
+      return !!spinRequestId
+        && visualState?.spinRequestId === spinRequestId
+        && visualState.resultApplied === true
+        && delaying === true
+        && String(spinContext?.spinRequestId || '') === spinRequestId;
+    }
+
+    function canRequestWheelSpin(viewMode, pendingRequest, spinning, delaying) {
+      return viewMode === 'wheel' && !pendingRequest && !spinning && !delaying;
+    }
+
     function cancelWheelSpinAnimation({ clearSpinId = true } = {}) {
       if (activeWheelAnimationFrame !== null) cancelAnimationFrame(activeWheelAnimationFrame);
       activeWheelAnimationFrame = null;
       if (clearSpinId) activeWheelAnimationSpinId = '';
     }
 
-    function animateWheelSpinDescriptor(descriptor) {
-      if (appViewMode !== 'wheel' || !descriptor) return false;
+    function animateWheelSpinDescriptor(descriptor, probabilityState) {
+      if (
+        appViewMode !== 'wheel'
+        || !descriptor
+        || !(probabilityState?.dropoutChances instanceof Map)
+        || probabilityState.signature !== String(descriptor.probabilityStateSignature || '')
+      ) {
+        return false;
+      }
       const requestId = String(descriptor.spinRequestId || '');
       if (!shouldStartWheelSpinAnimation(activeWheelAnimationSpinId, requestId)) return false;
+      const activeEntries = entries.filter(entry => entry && !entry.eliminated);
       cancelWheelSpinAnimation();
       activeWheelAnimationSpinId = requestId;
       isSpinning = true;
@@ -12160,9 +12870,13 @@
         }
         const progress = Math.min((timestamp - started) / duration, 1);
         currentAngle = initial + (target - initial) * (1 - Math.pow(1 - progress, 4));
-        const segment = getCurrentSegment(currentAngle);
+        const segment = getCurrentSegment(
+          currentAngle,
+          activeEntries,
+          probabilityState.dropoutChances
+        );
         if (segment) document.getElementById('top-winner-text').textContent = segment.name;
-        drawWheel();
+        drawWheel(probabilityState);
         if (progress < 1) activeWheelAnimationFrame = requestAnimationFrame(animate);
       };
       activeWheelAnimationFrame = requestAnimationFrame(animate);
@@ -12178,21 +12892,115 @@
       }
     }
 
+    function renderWheelSpinResultOverlay(result, isFinal) {
+      const overlay = document.getElementById('center-text-overlay');
+      const topText = document.getElementById('top-winner-text');
+      if (isFinal && result?.winnerName) {
+        const initialChance = Number(result.winnerInitialChance);
+        topText.textContent = '';
+        renderFinalWinnerOverlay(overlay, {
+          winnerName: result.winnerName,
+          victimName: result.victimName,
+          winChance: Number.isFinite(initialChance)
+            ? (Math.max(0, Math.min(1, initialChance)) * 100).toFixed(WIN_CHANCE_DECIMALS)
+            : '0.00',
+          includeVictim: true
+        });
+      } else if (result?.victimName) {
+        renderStrikeOverlay(overlay, result.victimName);
+      }
+      document.body.classList.add('show-result');
+      scheduleSpinResultStrikeActivation();
+    }
+
     function applyWheelSpinResult(result) {
       if (!result) return false;
+      if (isDuplicateWheelSpinResultInFlight(
+        pendingWheelSpinVisualState,
+        result,
+        isDelaying,
+        shrinkingSpinContext
+      )) {
+        return true;
+      }
+      let removalState;
+      try {
+        removalState = prepareWheelSpinRemovalState(pendingWheelSpinVisualState, result);
+      } catch (error) {
+        console.error('Не удалось подготовить удаление сектора в окне колеса', error);
+        removalState = null;
+      }
       if (pendingWheelSpinTimeout) clearTimeout(pendingWheelSpinTimeout);
       pendingWheelSpinTimeout = null;
       pendingWheelSpinRequest = null;
       cancelWheelSpinAnimation();
-      isSpinning = false;
-      document.body.classList.remove('is-spinning');
-      applyExternalStateUpdate();
-      if (result.final && result.winnerName) {
-        renderFinalWinnerOverlay(document.getElementById('center-text-overlay'), { winnerName: result.winnerName, singleWinner: true });
-      } else if (result.victimName) {
-        renderStrikeOverlay(document.getElementById('center-text-overlay'), result.victimName);
+      if (!removalState) {
+        pendingWheelSpinVisualState = null;
+        shrinkingTarget = null;
+        shrinkingSpinContext = null;
+        shrinkingTargetProbabilityState = null;
+        if (shrinkAnimFrame) cancelAnimationFrame(shrinkAnimFrame);
+        shrinkAnimFrame = null;
+        isSpinning = false;
+        isDelaying = false;
+        document.body.classList.remove('is-spinning');
+        applyExternalStateUpdate({ wheelAngle: result.finalAngle });
+        renderWheelSpinResultOverlay(result, result.final === true);
+        return true;
       }
-      document.body.classList.add('show-result');
+
+      pendingWheelSpinVisualState.resultApplied = true;
+      currentAngle = removalState.finalAngle;
+      isSpinning = true;
+      isDelaying = true;
+      shrinkingTarget = removalState.victim;
+      shrinkingSpinContext = {
+        spinId: removalState.operationId,
+        spinRequestId: removalState.spinRequestId
+      };
+      shrinkingTargetProbabilityState = removalState.targetProbabilityState;
+      document.body.classList.add('is-spinning');
+      drawWheel(removalState.oldProbabilityState);
+      renderWheelSpinResultOverlay(result, removalState.isFinal);
+
+      animateReversePlSectorRemoval({
+        activeEntries: removalState.activeEntries,
+        oldProbabilityState: removalState.oldProbabilityState,
+        targetProbabilityState: removalState.targetProbabilityState,
+        durationMs: 1000,
+        shouldContinue: () => (
+          appViewMode === 'wheel'
+          && isDelaying
+          && pendingWheelSpinVisualState?.spinRequestId === removalState.spinRequestId
+        ),
+        onFrame: displayProbabilityState => drawWheel(displayProbabilityState),
+        onCancel: () => {
+          shrinkingTarget = null;
+          shrinkingSpinContext = null;
+          shrinkingTargetProbabilityState = null;
+          shrinkAnimFrame = null;
+          pendingWheelSpinVisualState = null;
+          isDelaying = false;
+          isSpinning = false;
+          document.body.classList.remove('is-spinning');
+        },
+        onComplete: () => {
+          const targetProbabilityState = removalState.targetProbabilityState;
+          pendingWheelSpinVisualState = null;
+          shrinkingTarget = null;
+          shrinkingSpinContext = null;
+          shrinkingTargetProbabilityState = null;
+          shrinkAnimFrame = null;
+          isDelaying = false;
+          isSpinning = false;
+          document.body.classList.remove('is-spinning');
+          applyExternalStateUpdate({
+            probabilityState: targetProbabilityState,
+            wheelAngle: removalState.finalAngle
+          });
+          if (!removalState.isFinal) scheduleClearSpinResult(3000);
+        }
+      });
       return true;
     }
 
@@ -12227,7 +13035,9 @@
 
       pendingWheelSpinRequest = null;
       pendingWheelSpinTimeout = null;
+      pendingWheelSpinVisualState = null;
       cancelWheelSpinAnimation();
+      document.getElementById('top-winner-text').textContent = '';
       alert('Результат вращения не получен. Проверьте активную вкладку управления.');
       return false;
     }
@@ -12240,18 +13050,47 @@
         pendingWheelSpinRequest.accepted = true;
         const remainingMs = Math.max(0, Number(message.descriptor?.finishAt || 0) - Date.now());
         scheduleWheelSpinRequestTimeout(remainingMs + ADMIN_LEASE_DURATION_MS + 2000);
-        animateWheelSpinDescriptor(message.descriptor);
+        let probabilityState;
+        try {
+          probabilityState = ensureReversePlProbabilityState(entries);
+          if (
+            String(message.descriptor?.probabilityStateSignature || '')
+            !== probabilityState.signature
+          ) {
+            throw new Error('Состояние лотов изменилось до начала прокрута.');
+          }
+          if (pendingWheelSpinVisualState?.spinRequestId !== requestId) {
+            pendingWheelSpinVisualState = createWheelSpinAcceptedVisualState(
+              message.descriptor,
+              entries,
+              probabilityState
+            );
+          }
+          if (!pendingWheelSpinVisualState) {
+            throw new Error('Не удалось сохранить исходное состояние секторов.');
+          }
+          drawWheel(probabilityState);
+        } catch (error) {
+          console.error('Не удалось подготовить геометрию колеса', error);
+          document.getElementById('top-winner-text').textContent = '';
+          alert(error?.message || 'Не удалось подготовить сектора колеса.');
+          return true;
+        }
+        animateWheelSpinDescriptor(message.descriptor, probabilityState);
         return true;
       }
       if (pendingWheelSpinTimeout) clearTimeout(pendingWheelSpinTimeout);
       pendingWheelSpinTimeout = null;
-      pendingWheelSpinRequest = null;
-      cancelWheelSpinAnimation();
-      isSpinning = false;
-      document.body.classList.remove('is-spinning');
       if (message.type === 'SPIN_RESULT') {
+        pendingWheelSpinRequest = null;
         setTimeout(() => applyWheelSpinResult(message), 0);
       } else {
+        pendingWheelSpinRequest = null;
+        pendingWheelSpinVisualState = null;
+        cancelWheelSpinAnimation();
+        isSpinning = false;
+        document.body.classList.remove('is-spinning');
+        document.getElementById('top-winner-text').textContent = '';
         if (message.reason === 'collection_active') {
           openSpinDonationsModal();
           return true;
@@ -12262,20 +13101,32 @@
             ? 'Колесо уже крутится.'
             : (message.reason === 'collection_pause_failed'
               ? 'Не удалось остановить приём донатов.'
-              : 'Активная вкладка управления не найдена'));
+              : (message.reason === 'random_unavailable'
+                ? 'Безопасный генератор WebCrypto недоступен. Прокрут отменён.'
+                : (message.reason === 'probability_calculation_failed'
+                  ? 'Не удалось рассчитать вероятности Reverse Plackett–Luce.'
+                  : 'Активная вкладка управления не найдена'))));
         alert(rejectionText);
       }
       return true;
     }
 
     function requestSpinFromWheel(collectionAction = 'require_stopped') {
-      if (appViewMode !== 'wheel' || pendingWheelSpinRequest || isSpinning) return false;
-      const request = createWheelSpinRequest(
-        adminTabId,
-        sharedStateAuctionGeneration || currentAuctionGeneration,
-        Date.now(),
-        collectionAction
-      );
+      if (!canRequestWheelSpin(appViewMode, pendingWheelSpinRequest, isSpinning, isDelaying)) return false;
+      let request;
+      try {
+        request = createWheelSpinRequest(
+          adminTabId,
+          sharedStateAuctionGeneration || currentAuctionGeneration,
+          Date.now(),
+          collectionAction
+        );
+      } catch (error) {
+        alert(error?.message || 'Безопасный генератор WebCrypto недоступен. Прокрут отменён.');
+        return false;
+      }
+      document.getElementById('top-winner-text').textContent = 'Расчёт вероятностей…';
+      pendingWheelSpinVisualState = null;
       pendingWheelSpinRequest = request;
       postAppChannelMessage('SPIN_REQUEST', request);
       scheduleWheelSpinRequestTimeout(4000);
@@ -12286,123 +13137,60 @@
       if (!canRunAdminLeaderActions()) return;
       if (isSpinning || isDelaying || pendingSpinOperation) return;
       clearSpinResultOverlay({ redraw: false });
-      
+
       const activeEntries = entries.filter(e => !e.eliminated);
       if (activeEntries.length === 0) {
-          alert("Список пуст!");
-          return;
+        alert('Список пуст!');
+        return;
       }
-      ensureSpinSeriesSnapshot(activeEntries);
-
-      document.getElementById('top-winner-text').textContent = '';
-      document.getElementById('center-text-overlay').replaceChildren();
-
-      if (activeEntries.length === 1) {
-          document.getElementById('search-filter').value = '';
-          renderList();
-          
-          isSpinning = true;
-          document.body.classList.add('is-spinning');
-          document.body.classList.remove('show-result');
-          updateAdminLeadershipUi();
-          
-          const extraSpins = Math.PI * 2 * 10;
-          const targetAngle = currentAngle + cryptoRandomFloat() * Math.PI * 2 + extraSpins;
-          const initialAngle = currentAngle;
-          const duration = (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000;
-          const start = performance.now();
-
-          function easeOutQuart(x) { return 1 - Math.pow(1 - x, 4); }
-
-          function animateSingle(timestamp) {
-              if (!isSpinning) return;
-              if (!canRunAdminLeaderActions()) {
-                  isSpinning = false;
-                  document.body.classList.remove('is-spinning');
-                  updateAdminLeadershipUi();
-                  return;
-              }
-              const progress = Math.min((timestamp - start) / duration, 1);
-              currentAngle = initialAngle + (targetAngle - initialAngle) * easeOutQuart(progress);
-              
-              let currentSeg = getCurrentSegment(currentAngle);
-              if (currentSeg) document.getElementById('top-winner-text').textContent = currentSeg.name;
-
-              drawWheel();
-              
-              if (progress < 1) {
-                  requestAnimationFrame(animateSingle);
-              } else {
-                  currentAngle = currentAngle % (Math.PI * 2);
-                  drawWheel(); 
-                  
-                  const winner = activeEntries[0];
-                  const winChance = formatInitialSeriesWinChancePercent(winner, activeEntries);
-                  
-                  document.getElementById('top-winner-text').textContent = ''; // Скрываем верхний
-                  renderFinalWinnerOverlay(document.getElementById('center-text-overlay'), {
-                    winnerName: winner ? winner.name : '',
-                    winChance,
-                    singleWinner: true
-                  });
-                  document.body.classList.add('show-result');
-                  isSpinning = false;
-                  saveData();
-                  updateAdminLeadershipUi();
-              }
-          }
-          requestAnimationFrame(animateSingle);
-          return;
-      }
-
-      document.getElementById('search-filter').value = '';
-      renderList();
 
       isSpinning = true;
       document.body.classList.add('is-spinning');
       document.body.classList.remove('show-result');
       updateAdminLeadershipUi();
-      
-      let victimId = ensureSpinSeriesDropoutQueue(activeEntries);
-      let victim = activeEntries.find(entry => String(entry.id) === String(victimId));
-      if (!victim) {
-        resetSpinState();
-        victimId = ensureSpinSeriesDropoutQueue(activeEntries);
-        victim = activeEntries.find(entry => String(entry.id) === String(victimId));
-      }
-      if (!victim) {
+      const topWinnerText = document.getElementById('top-winner-text');
+      topWinnerText.textContent = 'Расчёт вероятностей…';
+      document.getElementById('center-text-overlay').replaceChildren();
+      await new Promise(resolve => requestAnimationFrame(() => resolve()));
+      if (!canRunAdminLeaderActions()) {
         isSpinning = false;
         document.body.classList.remove('is-spinning');
+        topWinnerText.textContent = '';
         updateAdminLeadershipUi();
         return;
       }
-      saveData();
 
-      const totalWheelWeight = activeEntries.reduce((s, e) => {
-        return s + getCurrentWheelWeight(e, activeEntries);
-      }, 0);
-      let victimStartAngle = 0;
-      
-      for (let i = 0; i < activeEntries.length; i++) {
-          if (activeEntries[i].id === victim.id) break;
-          victimStartAngle += (getCurrentWheelWeight(activeEntries[i], activeEntries) / totalWheelWeight) * Math.PI * 2;
+      let probabilityState;
+      let plan;
+      let spinContext;
+      try {
+        probabilityState = ensureReversePlProbabilityState(entries);
+        drawWheel(probabilityState);
+        const durationMs = Math.min(
+          60000,
+          Math.max(1000, (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000)
+        );
+        plan = buildWheelSpinPlan(currentAngle, durationMs, cryptoRandomFloat53(), 10);
+        const spinRequestId = `spin-${Date.now()}-${cryptoRandomUint32().toString(16)}`;
+        spinContext = {
+          spinRequestId,
+          spinId: spinRequestId,
+          finalAngle: plan.finalAngle,
+          probabilityStateSignature: probabilityState.signature,
+          generation: currentAuctionGeneration
+        };
+      } catch (error) {
+        console.error('Не удалось подготовить прокрут Reverse Plackett–Luce', error);
+        topWinnerText.textContent = '';
+        isSpinning = false;
+        document.body.classList.remove('is-spinning');
+        updateAdminLeadershipUi();
+        alert(error?.message || 'Не удалось рассчитать вероятности для прокрута.');
+        return;
       }
-      const victimSliceSize = (getCurrentWheelWeight(victim, activeEntries) / totalWheelWeight) * Math.PI * 2;
-      
-      const pointInsideVictim = cryptoRandomFloat(); 
-      const targetAngleOnWheel = victimStartAngle + (pointInsideVictim * victimSliceSize);
 
-      const baseTarget = (Math.PI * 2) - targetAngleOnWheel;
-      const currentMod = currentAngle % (Math.PI * 2);
-      
-      let rotationNeeded = baseTarget - currentMod;
-      if (rotationNeeded < 0) rotationNeeded += Math.PI * 2;
-      
-      const extraSpins = Math.PI * 2 * 10; 
-      const targetAngle = currentAngle + rotationNeeded + extraSpins;
-      const initialAngle = currentAngle;
-
-      const duration = (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000;
+      document.getElementById('search-filter').value = '';
+      renderList();
       const start = performance.now();
 
       function easeOutQuart(x) { return 1 - Math.pow(1 - x, 4); }
@@ -12415,20 +13203,58 @@
           updateAdminLeadershipUi();
           return;
         }
-        const progress = Math.min((timestamp - start) / duration, 1);
-        currentAngle = initialAngle + (targetAngle - initialAngle) * easeOutQuart(progress);
-        
-        // Отображение текущего имени наверху (обновляется во время вращения)
-        let currentSeg = getCurrentSegment(currentAngle);
-        if (currentSeg) document.getElementById('top-winner-text').textContent = currentSeg.name;
+        const progress = Math.min((timestamp - start) / plan.durationMs, 1);
+        currentAngle = plan.initialAngle
+          + (plan.targetAngle - plan.initialAngle) * easeOutQuart(progress);
+        const currentSegment = getCurrentSegment(
+          currentAngle,
+          activeEntries,
+          probabilityState.dropoutChances
+        );
+        if (currentSegment) topWinnerText.textContent = currentSegment.name;
 
-        drawWheel();
+        drawWheel(probabilityState);
 
         if (progress < 1) {
           requestAnimationFrame(animate);
-        } else {
-          finishFakeSpin(victim);
+          return;
         }
+
+        currentAngle = plan.finalAngle;
+        drawWheel(probabilityState);
+        const finalActiveEntries = entries.filter(entry => entry && !entry.eliminated);
+        if (finalActiveEntries.length === 1) {
+          const winner = finalActiveEntries[0];
+          if (!Number.isInteger(winner.assignedPlace)) winner.assignedPlace = 1;
+          rememberCompletedSpinOutcome(spinContext, null, winner);
+          topWinnerText.textContent = '';
+          renderFinalWinnerOverlay(document.getElementById('center-text-overlay'), {
+            winnerName: winner.name,
+            winChance: formatInitialAuctionWinChancePercent(winner),
+            singleWinner: true
+          });
+          document.body.classList.add('show-result');
+          document.body.classList.remove('is-spinning');
+          isSpinning = false;
+          saveData();
+          updateAdminLeadershipUi();
+          return;
+        }
+
+        const victim = getCurrentSegment(
+          plan.finalAngle,
+          finalActiveEntries,
+          probabilityState.dropoutChances
+        );
+        if (!victim) {
+          topWinnerText.textContent = '';
+          document.body.classList.remove('is-spinning');
+          isSpinning = false;
+          updateAdminLeadershipUi();
+          alert('Не удалось определить сектор под стрелкой. Прокрут отменён.');
+          return;
+        }
+        finishSpinWithPointerVictim(victim, spinContext, probabilityState);
       }
       requestAnimationFrame(animate);
     }
@@ -12475,16 +13301,26 @@
       if (event.target === event.currentTarget) closeSpinDonationsModal();
     });
 
-    function finishFakeSpin(victimRef) {
-      currentAngle = currentAngle % (Math.PI * 2);
+    function finishSpinWithPointerVictim(victimRef, spinContext, probabilityState) {
+      currentAngle = normalizeWheelAngleRad(currentAngle);
       saveData();
-      const globalVictimIdx = entries.indexOf(victimRef);
       const activeEntries = entries.filter(e => !e.eliminated);
       
       // Является ли этот прокрут финальным (если останется 1 сегмент после удаления)
       const isFinal = activeEntries.length <= 2; 
+      let targetProbabilityState = null;
+      try {
+        targetProbabilityState = calculateReversePlTargetProbabilityState(entries, victimRef);
+      } catch (error) {
+        console.error('Не удалось подготовить целевую геометрию Reverse Plackett–Luce', error);
+        isSpinning = false;
+        document.body.classList.remove('is-spinning');
+        updateAdminLeadershipUi();
+        alert('Не удалось рассчитать вероятности для прокрута.');
+        return;
+      }
 
-      drawWheel();
+      drawWheel(probabilityState);
       
       const overlay = document.getElementById('center-text-overlay');
       const topText = document.getElementById('top-winner-text');
@@ -12496,7 +13332,7 @@
       // ЕСЛИ ЭТО ПОСЛЕДНЕЕ УДАЛЕНИЕ (ФИНАЛ)
       if (isFinal) {
           const winner = activeEntries.find(e => e.id !== victimRef.id);
-          const winChance = formatInitialSeriesWinChancePercent(winner, activeEntries);
+          const winChance = formatInitialAuctionWinChancePercent(winner);
           
           topText.textContent = ''; // Убираем верхний, всё будет посередине
           renderFinalWinnerOverlay(overlay, {
@@ -12511,64 +13347,50 @@
           renderStrikeOverlay(overlay, victimRef ? victimRef.name : '');
       }
 
-      // Триггер анимации линий зачеркивания (по одной на каждую строку при переносе)
-      if (strikeActivationTimeout) clearTimeout(strikeActivationTimeout);
-      strikeActivationTimeout = setTimeout(() => {
-        document.querySelectorAll('.strike-text-content').forEach(el => el.classList.add('strike-active'));
-        strikeActivationTimeout = null;
-      }, 50);
+      scheduleSpinResultStrikeActivation();
 
       // Анимация плавного исчезновения сегмента на протяжении 1 секунды
       shrinkingTarget = victimRef;
-      shrinkingProgress = 0;
+      shrinkingSpinContext = spinContext;
+      shrinkingTargetProbabilityState = targetProbabilityState;
       
-      const shrinkDuration = 1000;
-      const shrinkStart = performance.now();
-      
-      function easeInOutQuad(t) { return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; }
-
-      function animateShrink(timestamp) {
-          // Если клик прервал анимацию, эта функция просто перестанет выполняться
-          if (!isDelaying) return;
-          if (!canRunAdminLeaderActions()) {
-              shrinkingTarget = null;
-              shrinkingProgress = 0;
-              shrinkAnimFrame = null;
-              isDelaying = false;
-              isSpinning = false;
-              document.body.classList.remove('is-spinning');
-              updateAdminLeadershipUi();
-              return;
-          }
-
-          const progress = Math.min((timestamp - shrinkStart) / shrinkDuration, 1);
-          shrinkingProgress = easeInOutQuad(progress); 
-          
-          drawWheel();
-          
-          if (progress < 1) {
-              shrinkAnimFrame = requestAnimationFrame(animateShrink);
-          } else {
-              // Естественное окончание 1 сек без прерывания
-              shrinkingTarget = null;
-              shrinkingProgress = 0;
-              shrinkAnimFrame = null;
-              victimRef.eliminated = true;
-              shiftSpinSeriesQueueAfterVictim(victimRef);
-              isDelaying = false;
-              isSpinning = false; 
-              
-              saveData();
-              renderList();
-              drawWheel(); 
-              updateAdminLeadershipUi();
-              if (!isFinal) {
-                scheduleClearSpinResult(3000);
-              }
-          }
-      }
-      // Сохраняем ID анимации, чтобы можно было прервать
-      shrinkAnimFrame = requestAnimationFrame(animateShrink);
+      animateReversePlSectorRemoval({
+        activeEntries,
+        oldProbabilityState: probabilityState,
+        targetProbabilityState,
+        durationMs: 1000,
+        shouldContinue: () => isDelaying && canRunAdminLeaderActions(),
+        onFrame: displayProbabilityState => drawWheel(displayProbabilityState),
+        onCancel: () => {
+          shrinkingTarget = null;
+          shrinkingSpinContext = null;
+          shrinkingTargetProbabilityState = null;
+          shrinkAnimFrame = null;
+          isDelaying = false;
+          isSpinning = false;
+          document.body.classList.remove('is-spinning');
+          updateAdminLeadershipUi();
+        },
+        onComplete: () => {
+          const completedSpinContext = shrinkingSpinContext;
+          const elimination = eliminateEntryAtCurrentPlace(victimRef);
+          installReversePlProbabilityState(targetProbabilityState);
+          rememberCompletedSpinOutcome(completedSpinContext, victimRef, elimination.winner);
+          shrinkingTarget = null;
+          shrinkingSpinContext = null;
+          shrinkingTargetProbabilityState = null;
+          shrinkAnimFrame = null;
+          isDelaying = false;
+          isSpinning = false;
+          document.body.classList.remove('is-spinning');
+          saveData();
+          updateAdminLeadershipUi();
+          setTimeout(() => {
+            renderList();
+            if (!isFinal) scheduleClearSpinResult(3000);
+          }, 0);
+        }
+      });
     }
 
     function refreshCenterCircleBackground() {
@@ -12576,9 +13398,34 @@
     }
 
     function applyCenterImage(url) {
-      centerImageUrl = url;
-      refreshCenterCircleBackground();
-      saveData();
+      return submitSharedControlChange('centerImageUrl', url);
+    }
+
+    function readCenterImageFile(file) {
+      return new Promise((resolve, reject) => {
+        if (!file) {
+          resolve('');
+          return;
+        }
+        const reader = new FileReader();
+        reader.addEventListener('load', () => {
+          const dataUrl = normalizeCenterImageSource(reader.result);
+          if (dataUrl) resolve(dataUrl);
+          else reject(new Error('Unsupported center image.'));
+        }, { once: true });
+        reader.addEventListener('error', () => reject(reader.error || new Error('Center image read failed.')), { once: true });
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function applyCenterImageFile(file) {
+      try {
+        const dataUrl = await readCenterImageFile(file);
+        return dataUrl ? applyCenterImage(dataUrl) : false;
+      } catch (error) {
+        console.error('Не удалось загрузить изображение в центр колеса', error);
+        return false;
+      }
     }
 
     function setCenterPreviewFromThumb(url) {
@@ -12627,11 +13474,10 @@
       document.getElementById('center-file-upload').click();
     });
 
-    document.getElementById('file-upload').onchange = (e) => {
+    document.getElementById('file-upload').onchange = async (e) => {
       const file = e.target.files[0];
-      if (file) {
-        applyCenterImage(URL.createObjectURL(file));
-      }
+      if (file) await applyCenterImageFile(file);
+      e.target.value = '';
     };
     const centerCircleEl = document.getElementById('center-circle');
     const centerSelectorPopup = document.getElementById('center-image-selector-popup');
@@ -12665,12 +13511,13 @@
       if (e.target.closest('img')) hideCenterPopupImmediate();
     });
 
-    document.getElementById('center-file-upload').onchange = (e) => {
+    document.getElementById('center-file-upload').onchange = async (e) => {
       const file = e.target.files[0];
       if (file) {
-        applyCenterImage(URL.createObjectURL(file));
+        await applyCenterImageFile(file);
         hideCenterPopupImmediate();
       }
+      e.target.value = '';
     };
 
     centerCircleEl.addEventListener('click', (e) => {
