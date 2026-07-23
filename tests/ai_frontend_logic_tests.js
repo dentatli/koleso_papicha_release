@@ -791,7 +791,12 @@ assert(externalHelpers.doesEntryMatchAiFingerprint(externalEntry, externalFinger
 const leaderStart = source.indexOf('    function normalizeAdminLeaseValue');
 const leaderEnd = source.indexOf('    function setupStateSync', leaderStart);
 if (leaderStart < 0 || leaderEnd < 0) throw new Error('Admin leader helper block not found');
-const leaderHelpers = new Function(`${source.slice(leaderStart, leaderEnd)}
+const leaderHelpers = new Function(
+  'clampTimerMs',
+  'TIMER_MAX_MS',
+  'MAX_CENTER_IMAGE_DATA_URL_LENGTH',
+  'SHARED_CONTROL_REQUEST_TYPE',
+  `${source.slice(leaderStart, leaderEnd)}
   return {
     normalizeAdminLeaseValue,
     isAdminLeaseActive,
@@ -809,9 +814,21 @@ const leaderHelpers = new Function(`${source.slice(leaderStart, leaderEnd)}
     reduceAuctionResyncState,
     isAdminOperationClaimAuthoritative,
     canOAuthCallbackPersistSharedState,
-    shouldReverifyAdminLeaseAfterPageShow
+    shouldReverifyAdminLeaseAfterPageShow,
+    normalizeSpinDurationSec,
+    normalizeCenterImageSource,
+    normalizeAuthoritativeTimerState,
+    normalizeSharedControlChange,
+    normalizeSharedControlRequest,
+    canHandleSharedControlRequest,
+    reduceSharedControlSnapshot
   };
-`)();
+`)(
+  value => Math.min(59 * 3600000 + 59 * 60000 + 59 * 1000, Math.max(0, Math.round(Number(value) || 0))),
+  59 * 3600000 + 59 * 60000 + 59 * 1000,
+  3 * 1024 * 1024,
+  'SHARED_CONTROL_REQUEST'
+);
 const now = Date.now();
 const leaseA = leaderHelpers.normalizeAdminLeaseValue({ ownerTabId: 'A', claimId: 'claim-a', heartbeatAt: now, expiresAt: now + 7000, auctionGeneration: 2 });
 assert(!leaderHelpers.canAdminTabAcquireLease(leaseA, 'B', now), 'Second tab acquired an active lease');
@@ -828,6 +845,197 @@ assert(!leaderHelpers.doesAdminLeaseBelongToTab(duplicatedTabLease, 'A', 'claim-
 assert(leaderHelpers.canAdminTabRunLeaderAction('admin', true), 'Admin leader action was rejected');
 assert(!leaderHelpers.canAdminTabRunLeaderAction('admin', false), 'Follower was allowed to run a leader-only action');
 assert(!leaderHelpers.canAdminTabRunLeaderAction('wheel', true), 'Wheel view was allowed to run admin work');
+
+const sharedNow = 1_000_000;
+const sharedTimerInitial = leaderHelpers.normalizeAuthoritativeTimerState({
+  remainingMs: 120000,
+  isRunning: false,
+  endsAtMs: 0,
+  rememberedMs: 120000
+}, sharedNow);
+const sharedInitial = {
+  spinDurationSec: 10,
+  centerImageUrl: 'https://example.com/old.webp',
+  timerState: sharedTimerInitial
+};
+const wheelDurationRequest = {
+  type: 'SHARED_CONTROL_REQUEST',
+  sourceViewMode: 'wheel',
+  requestId: 'wheel-duration-1',
+  kind: 'spinDurationSec',
+  value: 17,
+  entries: [{ id: 'forbidden' }],
+  donationsPending: [{ id: 'forbidden' }],
+  lastSpinResult: { winnerId: 'forbidden' }
+};
+assert(
+  leaderHelpers.canHandleSharedControlRequest('admin', true, wheelDurationRequest),
+  'Admin leader rejected an allowed wheel shared-control request'
+);
+assert(
+  !leaderHelpers.canHandleSharedControlRequest('admin', false, wheelDurationRequest)
+    && !leaderHelpers.canHandleSharedControlRequest('wheel', true, wheelDurationRequest),
+  'Shared-control request bypassed the admin leader boundary'
+);
+const normalizedWheelDurationRequest = leaderHelpers.normalizeSharedControlRequest(wheelDurationRequest, sharedNow);
+const adminAfterWheelDuration = leaderHelpers.reduceSharedControlSnapshot(
+  sharedInitial,
+  normalizedWheelDurationRequest.change
+);
+assert(adminAfterWheelDuration.spinDurationSec === 17, 'Wheel duration was not applied to admin state');
+const wheelReloadedDuration = JSON.parse(JSON.stringify(adminAfterWheelDuration));
+assert(wheelReloadedDuration.spinDurationSec === 17, 'Wheel duration was not preserved across reload');
+assert(
+  !Object.prototype.hasOwnProperty.call(normalizedWheelDurationRequest, 'entries')
+    && !Object.prototype.hasOwnProperty.call(normalizedWheelDurationRequest, 'donationsPending')
+    && !Object.prototype.hasOwnProperty.call(normalizedWheelDurationRequest, 'lastSpinResult'),
+  'Shared-control request retained forbidden auction fields'
+);
+assert(
+  leaderHelpers.normalizeSharedControlRequest({
+    ...wheelDurationRequest,
+    requestId: 'forbidden-lots',
+    kind: 'entries',
+    value: [{ id: 'lot' }]
+  }, sharedNow) === null,
+  'Wheel shared-control protocol accepted a lot mutation'
+);
+const adminDurationChange = leaderHelpers.normalizeSharedControlChange('spinDurationSec', 24, sharedNow);
+const wheelAfterAdminDuration = leaderHelpers.reduceSharedControlSnapshot(
+  adminAfterWheelDuration,
+  adminDurationChange
+);
+assert(wheelAfterAdminDuration.spinDurationSec === 24, 'Admin duration was not applied to wheel state');
+
+const timerStartRequest = leaderHelpers.normalizeSharedControlRequest({
+  type: 'SHARED_CONTROL_REQUEST',
+  sourceViewMode: 'wheel',
+  requestId: 'timer-start',
+  kind: 'timerState',
+  value: {
+    ...sharedTimerInitial,
+    isRunning: true,
+    endsAtMs: sharedNow + 120000
+  }
+}, sharedNow);
+const adminTimerRunning = leaderHelpers.reduceSharedControlSnapshot(sharedInitial, timerStartRequest.change);
+const reloadedRunningTimer = leaderHelpers.normalizeAuthoritativeTimerState(
+  adminTimerRunning.timerState,
+  sharedNow + 30000
+);
+assert(
+  reloadedRunningTimer.isRunning && reloadedRunningTimer.remainingMs === 90000,
+  'Running timer did not restore from the shared absolute endsAtMs'
+);
+const timerPauseRequest = leaderHelpers.normalizeSharedControlRequest({
+  type: 'SHARED_CONTROL_REQUEST',
+  sourceViewMode: 'wheel',
+  requestId: 'timer-pause',
+  kind: 'timerState',
+  value: {
+    ...reloadedRunningTimer,
+    isRunning: false,
+    endsAtMs: 0
+  }
+}, sharedNow + 30000);
+const adminTimerPaused = leaderHelpers.reduceSharedControlSnapshot(adminTimerRunning, timerPauseRequest.change);
+assert(
+  !adminTimerPaused.timerState.isRunning
+    && adminTimerPaused.timerState.remainingMs === 90000
+    && adminTimerPaused.timerState.endsAtMs === 0,
+  'Timer pause was not synchronized'
+);
+const timerContinueRequest = leaderHelpers.normalizeSharedControlRequest({
+  type: 'SHARED_CONTROL_REQUEST',
+  sourceViewMode: 'wheel',
+  requestId: 'timer-continue',
+  kind: 'timerState',
+  value: {
+    ...adminTimerPaused.timerState,
+    isRunning: true,
+    endsAtMs: sharedNow + 130000
+  }
+}, sharedNow + 40000);
+const adminTimerContinued = leaderHelpers.reduceSharedControlSnapshot(adminTimerPaused, timerContinueRequest.change);
+const reloadedContinuedTimer = leaderHelpers.normalizeAuthoritativeTimerState(
+  adminTimerContinued.timerState,
+  sharedNow + 70000
+);
+assert(
+  reloadedContinuedTimer.isRunning && reloadedContinuedTimer.remainingMs === 60000,
+  'Continued timer diverged after reload'
+);
+const timerResetRequest = leaderHelpers.normalizeSharedControlRequest({
+  type: 'SHARED_CONTROL_REQUEST',
+  sourceViewMode: 'wheel',
+  requestId: 'timer-reset',
+  kind: 'timerState',
+  value: {
+    remainingMs: reloadedContinuedTimer.rememberedMs,
+    rememberedMs: reloadedContinuedTimer.rememberedMs,
+    isRunning: false,
+    endsAtMs: 0
+  }
+}, sharedNow + 70000);
+const adminTimerReset = leaderHelpers.reduceSharedControlSnapshot(adminTimerContinued, timerResetRequest.change);
+assert(
+  !adminTimerReset.timerState.isRunning
+    && adminTimerReset.timerState.remainingMs === 120000,
+  'Timer reset was not synchronized to the configured time'
+);
+
+const standardCenterImage = leaderHelpers.normalizeSharedControlRequest({
+  type: 'SHARED_CONTROL_REQUEST',
+  sourceViewMode: 'wheel',
+  requestId: 'center-standard',
+  kind: 'centerImageUrl',
+  value: 'https://cdn.example.com/center.webp'
+}, sharedNow);
+const adminAfterStandardImage = leaderHelpers.reduceSharedControlSnapshot(sharedInitial, standardCenterImage.change);
+assert(
+  adminAfterStandardImage.centerImageUrl === 'https://cdn.example.com/center.webp',
+  'Wheel standard center image was not applied to admin state'
+);
+const uploadedCenterDataUrl = 'data:image/png;base64,iVBORw0KGgo=';
+const uploadedCenterImage = leaderHelpers.normalizeSharedControlRequest({
+  type: 'SHARED_CONTROL_REQUEST',
+  sourceViewMode: 'wheel',
+  requestId: 'center-upload',
+  kind: 'centerImageUrl',
+  value: uploadedCenterDataUrl
+}, sharedNow);
+const persistedUploadedImage = JSON.parse(JSON.stringify(
+  leaderHelpers.reduceSharedControlSnapshot(adminAfterStandardImage, uploadedCenterImage.change)
+));
+assert(
+  persistedUploadedImage.centerImageUrl === uploadedCenterDataUrl,
+  'Uploaded center image was not preserved as a reload-safe Data URL'
+);
+assert(
+  leaderHelpers.normalizeCenterImageSource('blob:http://127.0.0.1/stale') === '',
+  'Tab-local blob center image URL was accepted for shared state'
+);
+
+const confirmedWheelState = leaderHelpers.reduceSharedControlSnapshot(sharedInitial, normalizedWheelDurationRequest.change);
+const afterLaterTimerConfirmation = leaderHelpers.reduceSharedControlSnapshot(confirmedWheelState, timerPauseRequest.change);
+assert(
+  afterLaterTimerConfirmation.spinDurationSec === 17,
+  'A later admin save restored stale shared controls over a confirmed wheel change'
+);
+const sharedControlHandlerSource = source.slice(
+  source.indexOf('    function confirmSharedControlChange'),
+  source.indexOf('    function normalizeBootstrapRole')
+);
+assert(
+  sharedControlHandlerSource.indexOf('applySharedControlChange(change)')
+    < sharedControlHandlerSource.indexOf('return saveData() !== false;'),
+  'Admin leader saves shared-control requests before applying them to authoritative state'
+);
+assert(
+  source.includes('reader.readAsDataURL(file);') && !source.includes('URL.createObjectURL(file)'),
+  'Uploaded center image is not converted to persistent shared data'
+);
+
 assert(leaderHelpers.isAuctionMutationBlocked({ isSpinning: true }), 'Local admin spin did not block auction mutation');
 assert(leaderHelpers.isAuctionMutationBlocked({ isDelaying: true }), 'Local shrink animation did not block auction mutation');
 assert(leaderHelpers.isAuctionMutationBlocked({ pendingSpinOperation: { spinRequestId: 'remote-spin' } }), 'Pending authoritative spin did not block auction mutation');
