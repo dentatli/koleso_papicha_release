@@ -305,7 +305,7 @@ function createManualActionHarness({ initialEntries = [], assignSucceeds = true 
      function releaseAiDonationAction(id) { aiDonationActionLocks.delete(id); }
      function cryptoRandomUint32() { return 1; }
      function pickWheelColor() { return '#ffffff'; }
-     function resetSpinSeriesForCompositionChange() {}
+     function resetAuctionProgressForCompositionChange() {}
      function saveData() {}
      function renderList() {}
      function drawWheel() {}
@@ -1035,8 +1035,18 @@ assert(wheelButtonBlock.includes('const paused = await setDonationCollectionPaus
 const localSpinStart = source.indexOf('    async function startSpinNow');
 const localSpinEnd = source.indexOf('    function closeSpinDonationsModal', localSpinStart);
 const localSpinBlock = source.slice(localSpinStart, localSpinEnd);
-assert(localSpinBlock.includes('isSpinning = true;\n          document.body.classList.add(\'is-spinning\');\n          document.body.classList.remove(\'show-result\');\n          updateAdminLeadershipUi();'), 'Single-entry local spin does not lock admin controls');
-assert(localSpinBlock.includes('isSpinning = false;\n                  saveData();\n                  updateAdminLeadershipUi();'), 'Single-entry local spin does not unlock admin controls');
+assert(
+  localSpinBlock.includes('isSpinning = true;')
+    && localSpinBlock.includes("document.body.classList.add('is-spinning');")
+    && localSpinBlock.includes("document.body.classList.remove('show-result');"),
+  'Local spin does not lock admin controls'
+);
+assert(
+  localSpinBlock.includes('isSpinning = false;')
+    && localSpinBlock.includes("document.body.classList.remove('is-spinning');")
+    && localSpinBlock.includes('saveData();'),
+  'Local spin does not unlock admin controls'
+);
 const remoteSpinStart = source.indexOf('    async function handleRemoteSpinRequest');
 const remoteSpinEnd = source.indexOf('    function shouldStartWheelSpinAnimation', remoteSpinStart);
 const remoteSpinBlock = source.slice(remoteSpinStart, remoteSpinEnd);

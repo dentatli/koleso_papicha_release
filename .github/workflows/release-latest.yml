@@ -39,6 +39,11 @@ jobs:
             throw "Random logic tests failed."
           }
 
+          node tests/reverse_pl_statistical_test.js --quick
+          if ($LASTEXITCODE -ne 0) {
+            throw "Reverse Plackett-Luce statistical test failed."
+          }
+
       - name: Run PowerShell logic tests
         shell: powershell
         run: |

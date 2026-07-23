@@ -3451,7 +3451,7 @@
           </div>
           <div class="wheel-readonly-metrics">
             <strong id="wheel-readonly-total">0 ₽</strong>
-            <span class="wheel-readonly-percent-label" title="Текущий шанс победы среди оставшихся. Размер сектора — визуальный риск выбывания Pointauc New.">Шанс победы</span>
+            <span class="wheel-readonly-percent-label" title="Текущая условная вероятность победы с учётом уже выбывших мест. Размер сектора — вероятность выбыть на следующем прокруте.">Шанс победы</span>
           </div>
         </div>
         <div class="wheel-readonly-list" id="wheel-readonly-list"></div>
@@ -4100,10 +4100,6 @@
     const DONATEPAY_RECOVERY_RESULT_POLL_MS = 1000;
     const DONATEPAY_RECOVERY_BACKOFF_429_MS = 5 * 60 * 1000;
     const WIN_CHANCE_DECIMALS = 2;
-    const SPIN_SERIES_MODE_POINTAUC_NEW = 'pointauc_new_dropout';
-    const POINTAUC_VISUAL_MIN_AMOUNT = 1;
-    const POINTAUC_VISUAL_MIN_MODIFIER = 0.55;
-    const POINTAUC_VISUAL_MAX_MODIFIER = 1.0;
     const seenDonationKeys = new Set();
     let pendingSpinOperation = null;
     let lastSpinResult = null;
@@ -4975,6 +4971,7 @@
         pendingAuthoritativeSpinTimer = null;
         clearSpinResultOverlay({ redraw: false });
         shrinkingTarget = null;
+        shrinkingSpinContext = null;
         shrinkingProgress = 0;
         isSpinning = false;
         isDelaying = false;
@@ -5112,16 +5109,22 @@
     }
 
     // Cryptographically-strong randomness helpers (browser)
-    function cryptoRandomUint32() {
-      if (window.crypto && window.crypto.getRandomValues) {
-        return window.crypto.getRandomValues(new Uint32Array(1))[0];
+    function getWebCryptoRandomSource() {
+      if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+        return window.crypto;
       }
-      throw new Error('WebCrypto random is unavailable.');
+      throw new Error('Безопасный генератор WebCrypto недоступен. Прокрут отменён.');
     }
 
-    function cryptoRandomFloat() {
-      // Uniform in [0, 1)
-      return cryptoRandomUint32() / 2 ** 32;
+    function cryptoRandomUint32() {
+      return getWebCryptoRandomSource().getRandomValues(new Uint32Array(1))[0];
+    }
+
+    function cryptoRandomFloat53() {
+      const values = getWebCryptoRandomSource().getRandomValues(new Uint32Array(2));
+      const high = values[0] >>> 5;
+      const low = values[1] >>> 6;
+      return (high * 67108864 + low) / 9007199254740992;
     }
 
     function cryptoRandomInt(minInclusive, maxExclusive) {
@@ -5161,75 +5164,87 @@
     let pendingDeleteEntryId = null;
     let confirmModalOnConfirm = null;
     let confirmModalOnCancel = null;
-    let spinSeriesInitialWinChances = new Map();
-    let spinSeriesActive = false;
-    let spinSeriesDropoutQueue = [];
-    let spinSeriesFinalWinnerId = null;
-    let spinSeriesInitialEntryKey = '';
-    let spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
-    let spinSeriesInitialCount = 0;
+    let reversePlProbabilityCache = {
+      signature: '',
+      dropoutChances: new Map(),
+      currentWinChances: new Map(),
+      calculationMs: 0
+    };
 
     // Глобальные переменные для анимации сужения (удаления) сектора
     let shrinkingTarget = null;
+    let shrinkingSpinContext = null;
     let shrinkingProgress = 0;
     let shrinkAnimFrame = null;
     let strikeActivationTimeout = null;
     let spinResultClearTimeout = null;
 
-    function resetSpinSeriesSnapshot() {
-      spinSeriesInitialWinChances = new Map();
-      spinSeriesActive = false;
+    function invalidateReversePlProbabilityCache() {
+      reversePlProbabilityCache = {
+        signature: '',
+        dropoutChances: new Map(),
+        currentWinChances: new Map(),
+        calculationMs: 0
+      };
+      wheelGeometryCache = { key: '', data: null };
     }
 
-    function resetSpinState() {
-      resetSpinSeriesSnapshot();
-      spinSeriesDropoutQueue = [];
-      spinSeriesFinalWinnerId = null;
-      spinSeriesInitialEntryKey = '';
-      spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
-      spinSeriesInitialCount = 0;
-    }
-
-    function resetSpinSeriesForCompositionChange({ clearEliminated = true } = {}) {
+    function resetAuctionProgressForCompositionChange({ clearEliminated = true } = {}) {
       if (clearEliminated) {
         entries.forEach(entry => {
-          if (entry) entry.eliminated = false;
+          if (!entry) return;
+          entry.eliminated = false;
+          delete entry.assignedPlace;
         });
       }
-      resetSpinState();
+      invalidateReversePlProbabilityCache();
     }
 
-    function serializeChanceMap(chanceMap) {
-      return Array.from(chanceMap instanceof Map ? chanceMap.entries() : []);
+    function eliminateEntryAtCurrentPlace(victimRef) {
+      if (!victimRef || victimRef.eliminated) {
+        return { victim: victimRef || null, assignedPlace: Number(victimRef?.assignedPlace) || 0, winner: null };
+      }
+      const activeBefore = entries.filter(entry => entry && !entry.eliminated);
+      if (!activeBefore.includes(victimRef)) {
+        return { victim: null, assignedPlace: 0, winner: null };
+      }
+      const assignedPlace = activeBefore.length;
+      if (!Number.isInteger(victimRef.assignedPlace)) {
+        victimRef.assignedPlace = assignedPlace;
+      }
+      victimRef.eliminated = true;
+      const activeAfter = entries.filter(entry => entry && !entry.eliminated);
+      const winner = activeAfter.length === 1 ? activeAfter[0] : null;
+      if (winner && !Number.isInteger(winner.assignedPlace)) {
+        winner.assignedPlace = 1;
+      }
+      invalidateReversePlProbabilityCache();
+      return {
+        victim: victimRef,
+        assignedPlace: victimRef.assignedPlace,
+        winner
+      };
     }
 
-    function deserializeChanceMap(raw) {
-      const map = new Map();
-      if (!Array.isArray(raw)) return map;
-
-      raw.forEach(item => {
-        if (!Array.isArray(item) || item.length < 2) return;
-        const id = String(item[0]);
-        const chance = Number(item[1]);
-        if (id && Number.isFinite(chance)) {
-          map.set(id, Math.max(0, Math.min(1, chance)));
-        }
-      });
-
-      return map;
-    }
-
-    function ensureSpinSeriesSnapshot(activeEntries) {
-      const candidates = Array.isArray(activeEntries)
-        ? activeEntries.filter(entry => entry && !entry.eliminated)
-        : entries.filter(entry => entry && !entry.eliminated);
-      if (!candidates.length) return;
-
-      const shouldStartNewSeries = !spinSeriesActive || spinSeriesInitialWinChances.size === 0;
-      if (!shouldStartNewSeries) return;
-
-      spinSeriesInitialWinChances = calculateAmountWinChances(candidates);
-      spinSeriesActive = true;
+    function rememberCompletedSpinOutcome(spinContext, victim, winner) {
+      if (!spinContext?.spinRequestId) return null;
+      const result = {
+        spinRequestId: String(spinContext.spinRequestId),
+        spinId: String(spinContext.spinId || spinContext.spinRequestId),
+        victimId: victim ? String(victim.id) : '',
+        victimName: victim ? String(victim.name || '') : '',
+        assignedPlace: victim ? Number(victim.assignedPlace || 0) : 0,
+        winnerId: winner ? String(winner.id) : '',
+        winnerName: winner ? String(winner.name || '') : '',
+        winnerPlace: winner ? Number(winner.assignedPlace || 1) : 0,
+        final: !!winner,
+        finalAngle: normalizeWheelAngleRad(spinContext.finalAngle),
+        probabilityStateSignature: String(spinContext.probabilityStateSignature || ''),
+        generation: Math.max(0, Number(spinContext.generation || currentAuctionGeneration)),
+        finishedAt: new Date().toISOString()
+      };
+      rememberSpinResult(result);
+      return result;
     }
 
     function cancelScheduledSpinResultClear() {
@@ -5262,249 +5277,508 @@
       }, delayMs);
     }
 
+    // Reverse Plackett–Luce numerical core. Keep this block free of DOM and mutable app state.
+    // The quadrature design was inspired by qQuadWeights in https://github.com/naugam/fixed_wheel;
+    // the application, state, and UI implementation here is project-specific.
+    const REVERSE_PL_MIN_QUADRATURE_INTERVALS = 1024;
+    const REVERSE_PL_MAX_QUADRATURE_INTERVALS = 4096;
+    const REVERSE_PL_MAX_LOG_STEP = 0.025;
+    const REVERSE_PL_LOWER_SCALE = 1e-8;
+    const REVERSE_PL_TAIL_EXPONENT = 48;
+    const TWO_PI = Math.PI * 2;
+
+    function normalizeReversePlRate(value) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+    }
+
     function getEntryAmount(entry) {
-      return Math.max(0, Number(entry && entry.price) || 0);
+      return normalizeReversePlRate(entry && entry.price);
     }
 
-    function getChanceAmount(entry) {
-      return getEntryAmount(entry);
+    function normalizeProbabilityValues(values) {
+      const normalized = Float64Array.from(values || [], value => (
+        Number.isFinite(value) && value > 0 ? value : 0
+      ));
+      if (normalized.length === 0) return normalized;
+      let total = 0;
+      for (const value of normalized) total += value;
+      if (!(total > 0) || !Number.isFinite(total)) {
+        throw new Error('Не удалось нормализовать вероятности Reverse Plackett–Luce.');
+      }
+      let normalizedTotal = 0;
+      let largestIndex = 0;
+      for (let index = 0; index < normalized.length; index += 1) {
+        normalized[index] /= total;
+        normalizedTotal += normalized[index];
+        if (normalized[index] > normalized[largestIndex]) largestIndex = index;
+      }
+      normalized[largestIndex] = Math.max(0, normalized[largestIndex] + (1 - normalizedTotal));
+      return normalized;
     }
 
-    function getWeightedCandidatesByAmount(sourceEntries) {
-      const candidates = (Array.isArray(sourceEntries) ? sourceEntries : [])
-        .filter(entry => entry);
+    function normalizeLogProbabilityValues(logValues) {
+      const finiteValues = Array.from(logValues || [], value => (
+        Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+      ));
+      if (finiteValues.length === 0) return new Float64Array();
+      const maxLog = Math.max(...finiteValues);
+      if (!Number.isFinite(maxLog)) {
+        throw new Error('Численное интегрирование Reverse Plackett–Luce не дало конечных весов.');
+      }
+      const values = new Float64Array(finiteValues.length);
+      for (let index = 0; index < finiteValues.length; index += 1) {
+        values[index] = Number.isFinite(finiteValues[index])
+          ? Math.exp(finiteValues[index] - maxLog)
+          : 0;
+      }
+      return normalizeProbabilityValues(values);
+    }
 
-      const totalAmount = candidates.reduce((sum, entry) => sum + getChanceAmount(entry), 0);
+    function logOneMinusExpNegative(value) {
+      if (!(value > 0)) return Number.NEGATIVE_INFINITY;
+      if (!Number.isFinite(value)) return 0;
+      return value <= Math.LN2
+        ? Math.log(-Math.expm1(-value))
+        : Math.log1p(-Math.exp(-value));
+    }
 
-      if (totalAmount > 0) {
-        return candidates;
+    function normalizeQuadraturePointCount(logSpan, requestedPoints) {
+      if (Number.isFinite(requestedPoints)) {
+        let points = Math.max(5, Math.floor(requestedPoints));
+        if (points % 2 === 0) points += 1;
+        return points;
+      }
+      let intervals = Math.max(
+        REVERSE_PL_MIN_QUADRATURE_INTERVALS,
+        Math.ceil(logSpan / REVERSE_PL_MAX_LOG_STEP)
+      );
+      intervals = Math.min(REVERSE_PL_MAX_QUADRATURE_INTERVALS, intervals);
+      if (intervals % 2 !== 0) intervals += 1;
+      return intervals + 1;
+    }
+
+    function createReversePlLogGrid(rates, tailRate, options = {}) {
+      const positiveRates = Array.from(rates || [], normalizeReversePlRate).filter(rate => rate > 0);
+      const positiveTailRate = normalizeReversePlRate(tailRate);
+      if (positiveRates.length === 0 || !(positiveTailRate > 0)) {
+        throw new Error('Для интегрирования Reverse Plackett–Luce нужны положительные веса.');
+      }
+      const maxRate = Math.max(positiveTailRate, ...positiveRates);
+      const tMin = REVERSE_PL_LOWER_SCALE / maxRate;
+      const tMax = REVERSE_PL_TAIL_EXPONENT / positiveTailRate;
+      if (!(tMin > 0) || !Number.isFinite(tMin) || !(tMax > tMin) || !Number.isFinite(tMax)) {
+        throw new Error('Не удалось подобрать конечный диапазон интегрирования Reverse Plackett–Luce.');
+      }
+      const logMin = Math.log(tMin);
+      const logMax = Math.log(tMax);
+      const pointCount = normalizeQuadraturePointCount(logMax - logMin, options.quadraturePoints);
+      return {
+        logMin,
+        logMax,
+        pointCount,
+        step: (logMax - logMin) / (pointCount - 1)
+      };
+    }
+
+    function createLogSumAccumulator(length) {
+      const maxLogs = new Float64Array(length);
+      maxLogs.fill(Number.NEGATIVE_INFINITY);
+      return {
+        maxLogs,
+        scaledSums: new Float64Array(length)
+      };
+    }
+
+    function addLogSummand(accumulator, index, logValue) {
+      if (!Number.isFinite(logValue)) return;
+      const currentMax = accumulator.maxLogs[index];
+      if (!Number.isFinite(currentMax)) {
+        accumulator.maxLogs[index] = logValue;
+        accumulator.scaledSums[index] = 1;
+        return;
+      }
+      if (logValue <= currentMax) {
+        accumulator.scaledSums[index] += Math.exp(logValue - currentMax);
+        return;
+      }
+      accumulator.scaledSums[index] = (
+        accumulator.scaledSums[index] * Math.exp(currentMax - logValue)
+      ) + 1;
+      accumulator.maxLogs[index] = logValue;
+    }
+
+    function finishLogSumAccumulator(accumulator, commonLogFactor = 0) {
+      const result = new Float64Array(accumulator.maxLogs.length);
+      for (let index = 0; index < result.length; index += 1) {
+        const maxLog = accumulator.maxLogs[index];
+        const scaledSum = accumulator.scaledSums[index];
+        result[index] = Number.isFinite(maxLog) && scaledSum > 0
+          ? maxLog + Math.log(scaledSum) + commonLogFactor
+          : Number.NEGATIVE_INFINITY;
+      }
+      return result;
+    }
+
+    function getLogProductWithoutIndex(factorLogs, finiteSum, infiniteCount, index) {
+      const ownFactor = factorLogs[index];
+      if (infiniteCount === 0) return finiteSum - ownFactor;
+      if (infiniteCount === 1 && ownFactor === Number.NEGATIVE_INFINITY) return finiteSum;
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    function getSimpsonLogWeight(index, pointCount) {
+      if (index === 0 || index === pointCount - 1) return 0;
+      return index % 2 === 1 ? Math.log(4) : Math.log(2);
+    }
+
+    function scaleReversePlRates(activeRates, eliminatedRateSum) {
+      const rates = Float64Array.from(activeRates || [], normalizeReversePlRate);
+      const eliminated = normalizeReversePlRate(eliminatedRateSum);
+      let scale = eliminated;
+      for (const rate of rates) scale = Math.max(scale, rate);
+      if (!(scale > 0)) return { rates, eliminated: 0 };
+      for (let index = 0; index < rates.length; index += 1) rates[index] /= scale;
+      return { rates, eliminated: eliminated / scale };
+    }
+
+    function calculateReversePlDropoutWeights(activeRates, eliminatedRateSum = 0, options = {}) {
+      const rawRates = Float64Array.from(activeRates || [], normalizeReversePlRate);
+      const count = rawRates.length;
+      if (count === 0) return rawRates;
+      if (count === 1) return Float64Array.of(1);
+
+      const zeroIndexes = [];
+      let positiveCount = 0;
+      for (let index = 0; index < count; index += 1) {
+        if (rawRates[index] > 0) positiveCount += 1;
+        else zeroIndexes.push(index);
+      }
+      if (zeroIndexes.length > 0) {
+        const exact = new Float64Array(count);
+        const chance = positiveCount > 0 ? 1 / zeroIndexes.length : 1 / count;
+        if (positiveCount > 0) {
+          zeroIndexes.forEach(index => { exact[index] = chance; });
+        } else {
+          exact.fill(chance);
+        }
+        return exact;
       }
 
-      return candidates.map(entry => ({ ...entry, __pointaucFallbackAmount: 1 }));
+      const scaled = scaleReversePlRates(rawRates, eliminatedRateSum);
+      const rates = scaled.rates;
+      const eliminated = scaled.eliminated;
+      let minimumRate = Number.POSITIVE_INFINITY;
+      for (const rate of rates) minimumRate = Math.min(minimumRate, rate);
+      const grid = createReversePlLogGrid(rates, eliminated + minimumRate, options);
+      const accumulator = createLogSumAccumulator(count);
+      const factorLogs = new Float64Array(count);
+
+      for (let point = 0; point < grid.pointCount; point += 1) {
+        const x = grid.logMin + point * grid.step;
+        const t = Math.exp(x);
+        let finiteFactorSum = 0;
+        let infiniteFactorCount = 0;
+        for (let index = 0; index < count; index += 1) {
+          const factorLog = logOneMinusExpNegative(rates[index] * t);
+          factorLogs[index] = factorLog;
+          if (Number.isFinite(factorLog)) finiteFactorSum += factorLog;
+          else infiniteFactorCount += 1;
+        }
+        const logWeight = getSimpsonLogWeight(point, grid.pointCount);
+        for (let index = 0; index < count; index += 1) {
+          const productLog = getLogProductWithoutIndex(
+            factorLogs,
+            finiteFactorSum,
+            infiniteFactorCount,
+            index
+          );
+          if (!Number.isFinite(productLog)) continue;
+          const logIntegrand = Math.log(rates[index])
+            - (rates[index] + eliminated) * t
+            + productLog
+            + x
+            + logWeight;
+          addLogSummand(accumulator, index, logIntegrand);
+        }
+      }
+
+      const logWeights = finishLogSumAccumulator(accumulator, Math.log(grid.step / 3));
+      return normalizeLogProbabilityValues(logWeights);
     }
 
-    function getCandidateWeightAmount(entry) {
-      if (!entry) return 0;
-      if (entry.__pointaucFallbackAmount) return entry.__pointaucFallbackAmount;
-      return getChanceAmount(entry);
+    function calculateReversePlCurrentWinWeights(activeRates, eliminatedRateSum, options = {}) {
+      const rawRates = Float64Array.from(activeRates || [], normalizeReversePlRate);
+      const count = rawRates.length;
+      if (count === 0) return rawRates;
+      if (count === 1) return Float64Array.of(1);
+
+      const positiveIndexes = [];
+      for (let index = 0; index < count; index += 1) {
+        if (rawRates[index] > 0) positiveIndexes.push(index);
+      }
+      if (positiveIndexes.length === 0) {
+        const uniform = new Float64Array(count);
+        uniform.fill(1 / count);
+        return uniform;
+      }
+      if (positiveIndexes.length < count) {
+        const exact = new Float64Array(count);
+        if (positiveIndexes.length === 1) {
+          exact[positiveIndexes[0]] = 1;
+          return exact;
+        }
+        const positiveWeights = calculateReversePlCurrentWinWeights(
+          positiveIndexes.map(index => rawRates[index]),
+          eliminatedRateSum,
+          options
+        );
+        positiveIndexes.forEach((rawIndex, positiveIndex) => {
+          exact[rawIndex] = positiveWeights[positiveIndex];
+        });
+        return exact;
+      }
+
+      const scaled = scaleReversePlRates(rawRates, eliminatedRateSum);
+      const rates = scaled.rates;
+      const eliminated = scaled.eliminated;
+      if (!(eliminated > 0)) {
+        return normalizeProbabilityValues(rates);
+      }
+
+      const grid = createReversePlLogGrid(rates, eliminated, options);
+      const denominatorAccumulator = createLogSumAccumulator(1);
+      const leaveOneOutAccumulator = createLogSumAccumulator(count);
+      const factorLogs = new Float64Array(count);
+      const logEliminated = Math.log(eliminated);
+
+      for (let point = 0; point < grid.pointCount; point += 1) {
+        const x = grid.logMin + point * grid.step;
+        const t = Math.exp(x);
+        let finiteFactorSum = 0;
+        let infiniteFactorCount = 0;
+        for (let index = 0; index < count; index += 1) {
+          const factorLog = logOneMinusExpNegative(rates[index] * t);
+          factorLogs[index] = factorLog;
+          if (Number.isFinite(factorLog)) finiteFactorSum += factorLog;
+          else infiniteFactorCount += 1;
+        }
+        const commonLog = logEliminated - eliminated * t + x
+          + getSimpsonLogWeight(point, grid.pointCount);
+        if (infiniteFactorCount === 0) {
+          addLogSummand(denominatorAccumulator, 0, commonLog + finiteFactorSum);
+        }
+        for (let index = 0; index < count; index += 1) {
+          const productLog = getLogProductWithoutIndex(
+            factorLogs,
+            finiteFactorSum,
+            infiniteFactorCount,
+            index
+          );
+          if (Number.isFinite(productLog)) {
+            addLogSummand(leaveOneOutAccumulator, index, commonLog + productLog);
+          }
+        }
+      }
+
+      const commonFactor = Math.log(grid.step / 3);
+      const logDenominator = finishLogSumAccumulator(
+        denominatorAccumulator,
+        commonFactor
+      )[0];
+      if (!Number.isFinite(logDenominator)) {
+        throw new Error('Не удалось вычислить условную вероятность победы Reverse Plackett–Luce.');
+      }
+      const logLeaveOneOut = finishLogSumAccumulator(leaveOneOutAccumulator, commonFactor);
+      let totalRate = eliminated;
+      for (const rate of rates) totalRate += rate;
+      const logNumerators = new Float64Array(count);
+      for (let index = 0; index < count; index += 1) {
+        logNumerators[index] = Math.log(rates[index] / totalRate)
+          + logLeaveOneOut[index]
+          - logDenominator;
+      }
+      return normalizeLogProbabilityValues(logNumerators);
     }
 
     function calculateAmountWinChances(sourceEntries) {
       const result = new Map();
-      const candidates = (Array.isArray(sourceEntries) ? sourceEntries : [])
-        .filter(entry => entry);
-
+      const candidates = (Array.isArray(sourceEntries) ? sourceEntries : []).filter(Boolean);
       if (candidates.length === 0) return result;
-
-      const totalAmount = candidates.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
-
-      if (totalAmount > 0) {
-        candidates.forEach(entry => {
-          result.set(entry.id, getEntryAmount(entry) / totalAmount);
-        });
+      const rates = candidates.map(getEntryAmount);
+      const positiveRates = rates.filter(rate => rate > 0);
+      if (positiveRates.length === 0) {
+        const equalChance = 1 / candidates.length;
+        candidates.forEach(entry => result.set(entry.id, equalChance));
         return result;
       }
-
-      const equalChance = 1 / candidates.length;
-      candidates.forEach(entry => {
-        result.set(entry.id, equalChance);
+      const maxRate = Math.max(...positiveRates);
+      const scaledTotal = rates.reduce((sum, rate) => sum + rate / maxRate, 0);
+      candidates.forEach((entry, index) => {
+        result.set(entry.id, rates[index] > 0 ? (rates[index] / maxRate) / scaledTotal : 0);
       });
-
       return result;
     }
 
-    function getSpinSeriesEntryKey(sourceEntries) {
-      return (Array.isArray(sourceEntries) ? sourceEntries : [])
-        .filter(entry => entry)
-        .map(entry => `${String(entry.id)}:${getEntryAmount(entry)}`)
-        .sort()
-        .join('|');
-    }
-
-    function getPointaucVisualModifier(activeEntries) {
-      const activeCount = Math.max(
-        1,
-        Array.isArray(activeEntries)
-          ? activeEntries.filter(entry => entry && !entry.eliminated).length
-          : 0
-      );
-      const initialCount = Math.max(activeCount, Number(spinSeriesInitialCount) || activeCount);
-      const ratio = Math.max(0, Math.min(1, activeCount / initialCount));
-
-      return POINTAUC_VISUAL_MIN_MODIFIER
-        + ratio * (POINTAUC_VISUAL_MAX_MODIFIER - POINTAUC_VISUAL_MIN_MODIFIER);
-    }
-
-    function getPointaucNewVisualWeight(entry, activeEntries) {
-      if (!entry) return 0;
-
-      const amount = Math.max(POINTAUC_VISUAL_MIN_AMOUNT, getEntryAmount(entry));
-      const modifier = getPointaucVisualModifier(activeEntries);
-      const weight = 1 / Math.pow(amount, modifier);
-
-      return Number.isFinite(weight) && weight > 0 ? weight : 0;
-    }
-
-    function getCurrentWheelWeight(entry, activeEntries = null) {
-      return getPointaucNewVisualWeight(
-        entry,
-        Array.isArray(activeEntries) ? activeEntries : entries.filter(item => item && !item.eliminated)
-      );
-    }
-
-    function pickWeightedEntryByAmount(candidates) {
-      const list = (Array.isArray(candidates) ? candidates : []).filter(Boolean);
-      if (list.length === 0) return null;
-
-      const total = list.reduce((sum, entry) => sum + Math.max(0, getCandidateWeightAmount(entry)), 0);
-
-      if (total <= 0) {
-        const index = cryptoRandomInt(0, list.length);
-        return list[index] || null;
-      }
-
-      const randomValue = cryptoRandomFloat() * total;
-      let acc = 0;
-
-      for (const entry of list) {
-        acc += Math.max(0, getCandidateWeightAmount(entry));
-        if (randomValue < acc) return entry;
-      }
-
-      return list[list.length - 1] || null;
-    }
-
-    function buildSpinSeriesDropoutQueue(activeEntries) {
-      const source = (Array.isArray(activeEntries) ? activeEntries : [])
+    function calculateReversePlDropoutChances(activeEntries, eliminatedEntries, options = {}) {
+      const active = (Array.isArray(activeEntries) ? activeEntries : [])
         .filter(entry => entry && !entry.eliminated);
+      const eliminated = (Array.isArray(eliminatedEntries) ? eliminatedEntries : [])
+        .filter(Boolean);
+      const result = new Map();
+      if (active.length === 0) return result;
+      const rates = active.map(getEntryAmount);
+      const eliminatedRateSum = eliminated.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
+      const weights = calculateReversePlDropoutWeights(rates, eliminatedRateSum, options);
+      active.forEach((entry, index) => result.set(entry.id, weights[index]));
+      return result;
+    }
 
-      if (source.length === 0) {
-        return { queue: [], finalWinnerId: null, initialEntryKey: '', initialCount: 0 };
+    function calculateReversePlCurrentWinChances(activeEntries, eliminatedEntries, options = {}) {
+      const active = (Array.isArray(activeEntries) ? activeEntries : [])
+        .filter(entry => entry && !entry.eliminated);
+      const eliminated = (Array.isArray(eliminatedEntries) ? eliminatedEntries : [])
+        .filter(Boolean);
+      const result = new Map();
+      eliminated.forEach(entry => result.set(entry.id, 0));
+      if (active.length === 0) return result;
+
+      const rates = active.map(getEntryAmount);
+      const positiveIndexes = [];
+      for (let index = 0; index < rates.length; index += 1) {
+        if (rates[index] > 0) positiveIndexes.push(index);
+      }
+      if (positiveIndexes.length === 0) {
+        const equalChance = 1 / active.length;
+        active.forEach(entry => result.set(entry.id, equalChance));
+        return result;
+      }
+      active.forEach(entry => result.set(entry.id, 0));
+      if (positiveIndexes.length === 1) {
+        result.set(active[positiveIndexes[0]].id, 1);
+        return result;
       }
 
-      const initialEntryKey = getSpinSeriesEntryKey(source);
-      const initialCount = source.length;
-      const remaining = getWeightedCandidatesByAmount(source).map(entry => ({ ...entry }));
-      const dropoutQueue = [];
+      const positiveRates = positiveIndexes.map(index => rates[index]);
+      const eliminatedRateSum = eliminated.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
+      const weights = calculateReversePlCurrentWinWeights(
+        positiveRates,
+        eliminatedRateSum,
+        options
+      );
+      positiveIndexes.forEach((activeIndex, weightIndex) => {
+        result.set(active[activeIndex].id, weights[weightIndex]);
+      });
+      return result;
+    }
 
-      const finalWinner = pickWeightedEntryByAmount(remaining);
-      if (!finalWinner) {
-        return { queue: [], finalWinnerId: null, initialEntryKey, initialCount };
+    function normalizeWheelAngleRad(angle) {
+      const normalized = Number(angle) % TWO_PI;
+      if (!Number.isFinite(normalized)) return 0;
+      return normalized < 0 ? normalized + TWO_PI : normalized;
+    }
+
+    function buildWheelSpinPlan(initialAngle, durationMs, randomUnit, fullTurns = 10) {
+      const safeInitialAngle = Number.isFinite(Number(initialAngle)) ? Number(initialAngle) : 0;
+      const safeRandomUnit = Number(randomUnit);
+      if (!(safeRandomUnit >= 0 && safeRandomUnit < 1)) {
+        throw new Error('Случайное значение для колеса должно находиться в диапазоне [0, 1).');
       }
-
-      dropoutQueue.push(String(finalWinner.id));
-
-      const finalWinnerIndex = remaining.findIndex(entry => String(entry.id) === String(finalWinner.id));
-      if (finalWinnerIndex >= 0) {
-        remaining.splice(finalWinnerIndex, 1);
-      }
-
-      while (remaining.length > 0) {
-        const picked = pickWeightedEntryByAmount(remaining);
-        if (!picked) break;
-
-        dropoutQueue.push(String(picked.id));
-
-        const index = remaining.findIndex(entry => String(entry.id) === String(picked.id));
-        if (index >= 0) {
-          remaining.splice(index, 1);
-        } else {
-          break;
-        }
-      }
-
-      dropoutQueue.reverse();
-
+      const randomOffset = safeRandomUnit * TWO_PI;
+      const visualTurns = Math.max(0, Math.floor(Number(fullTurns) || 0));
+      const targetAngle = safeInitialAngle + visualTurns * TWO_PI + randomOffset;
       return {
-        queue: dropoutQueue,
-        finalWinnerId: String(finalWinner.id),
-        initialEntryKey,
-        initialCount
+        initialAngle: safeInitialAngle,
+        targetAngle,
+        finalAngle: normalizeWheelAngleRad(targetAngle),
+        durationMs: Math.max(1, Number(durationMs) || 1),
+        randomOffset,
+        fullTurns: visualTurns
       };
     }
 
-    function validateSpinSeriesQueue(activeEntries) {
-      const activeIds = new Set((Array.isArray(activeEntries) ? activeEntries : [])
-        .filter(entry => entry && !entry.eliminated)
-        .map(entry => String(entry.id)));
-
-      if (!Array.isArray(spinSeriesDropoutQueue) || spinSeriesDropoutQueue.length !== activeIds.size) {
-        return false;
+    function getWheelSegmentByPointerOffset(pointerOffset, weightedEntries) {
+      const segments = (Array.isArray(weightedEntries) ? weightedEntries : [])
+        .filter(item => item && item.entry && Number.isFinite(item.weight) && item.weight >= 0);
+      if (segments.length === 0) return null;
+      const totalWeight = segments.reduce((sum, item) => sum + item.weight, 0);
+      if (!(totalWeight > 0)) return null;
+      const normalizedPointerOffset = normalizeWheelAngleRad(pointerOffset);
+      let accumulated = 0;
+      let lastPositiveEntry = null;
+      for (const item of segments) {
+        if (!(item.weight > 0)) continue;
+        lastPositiveEntry = item.entry;
+        accumulated += (item.weight / totalWeight) * TWO_PI;
+        if (normalizedPointerOffset < accumulated) return item.entry;
       }
-
-      const seen = new Set();
-
-      for (const id of spinSeriesDropoutQueue) {
-        const normalizedId = String(id);
-        if (!activeIds.has(normalizedId)) return false;
-        if (seen.has(normalizedId)) return false;
-        seen.add(normalizedId);
-      }
-
-      if (spinSeriesFinalWinnerId && !activeIds.has(String(spinSeriesFinalWinnerId))) {
-        return false;
-      }
-
-      const expectedKey = getSpinSeriesEntryKey(entries.filter(entry => entry));
-      if (spinSeriesInitialEntryKey && spinSeriesInitialEntryKey !== expectedKey) {
-        return false;
-      }
-
-      return true;
+      return lastPositiveEntry;
     }
 
-    function ensureSpinSeriesDropoutQueue(activeEntries) {
-      const active = (Array.isArray(activeEntries) ? activeEntries : [])
-        .filter(entry => entry && !entry.eliminated);
+    function getWheelSegmentAtAngle(angle, weightedEntries) {
+      const pointerOffset = (TWO_PI - normalizeWheelAngleRad(angle)) % TWO_PI;
+      return getWheelSegmentByPointerOffset(pointerOffset, weightedEntries);
+    }
+    // End Reverse Plackett–Luce numerical core.
 
-      if (active.length === 0) {
-        spinSeriesDropoutQueue = [];
-        spinSeriesFinalWinnerId = null;
-        spinSeriesInitialEntryKey = '';
-        spinSeriesInitialCount = 0;
-        spinSeriesActive = false;
-        return null;
-      }
-
-      if (validateSpinSeriesQueue(active)) {
-        spinSeriesActive = true;
-        if (spinSeriesInitialWinChances.size === 0) {
-          ensureSpinSeriesSnapshot(active);
-        }
-        return spinSeriesDropoutQueue[0] || null;
-      }
-
-      const built = buildSpinSeriesDropoutQueue(active);
-      spinSeriesDropoutQueue = built.queue;
-      spinSeriesFinalWinnerId = built.finalWinnerId;
-      spinSeriesInitialEntryKey = built.initialEntryKey;
-      spinSeriesInitialCount = built.initialCount;
-      spinSeriesMode = SPIN_SERIES_MODE_POINTAUC_NEW;
-      spinSeriesInitialWinChances = calculateAmountWinChances(active);
-      spinSeriesActive = true;
-
-      return spinSeriesDropoutQueue[0] || null;
+    function createReversePlStateSignature(sourceEntries) {
+      const active = [];
+      const eliminated = [];
+      (Array.isArray(sourceEntries) ? sourceEntries : []).forEach(entry => {
+        if (!entry) return;
+        const pair = [String(entry.id), getEntryAmount(entry)];
+        (entry.eliminated ? eliminated : active).push(pair);
+      });
+      const comparePairs = (left, right) => {
+        if (left[0] < right[0]) return -1;
+        if (left[0] > right[0]) return 1;
+        return left[1] - right[1];
+      };
+      active.sort(comparePairs);
+      eliminated.sort(comparePairs);
+      return JSON.stringify({ active, eliminated });
     }
 
-    function shiftSpinSeriesQueueAfterVictim(victimRef) {
-      if (!victimRef) return;
-      if (String(spinSeriesDropoutQueue[0]) === String(victimRef.id)) {
-        spinSeriesDropoutQueue.shift();
-        return;
+    function ensureReversePlProbabilityState(sourceEntries = entries) {
+      const signature = createReversePlStateSignature(sourceEntries);
+      if (reversePlProbabilityCache.signature === signature) {
+        return reversePlProbabilityCache;
       }
-      resetSpinState();
+      const activeEntries = sourceEntries.filter(entry => entry && !entry.eliminated);
+      const eliminatedEntries = sourceEntries.filter(entry => entry && entry.eliminated);
+      const now = () => (
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : Date.now()
+      );
+      const startedAt = now();
+      const dropoutChances = calculateReversePlDropoutChances(activeEntries, eliminatedEntries);
+      const currentWinChances = calculateReversePlCurrentWinChances(activeEntries, eliminatedEntries);
+      reversePlProbabilityCache = {
+        signature,
+        dropoutChances,
+        currentWinChances,
+        calculationMs: now() - startedAt
+      };
+      wheelGeometryCache = { key: '', data: null };
+      return reversePlProbabilityCache;
+    }
+
+    function getCurrentWheelWeight(entry, dropoutChances) {
+      const weight = Number(dropoutChances instanceof Map ? dropoutChances.get(entry?.id) : 0);
+      return Number.isFinite(weight) && weight >= 0 ? weight : 0;
     }
 
     function calculateAuctionInitialWinChances(allEntries) {
       return calculateAmountWinChances((Array.isArray(allEntries) ? allEntries : []).filter(Boolean));
     }
 
-    function calculateCurrentWheelWinChances(activeEntries) {
-      return calculateAmountWinChances((Array.isArray(activeEntries) ? activeEntries : []).filter(entry => entry && !entry.eliminated));
+    function getAuctionWinChanceTooltip() {
+      return 'Изначальная безусловная вероятность лота занять первое место до начала выбываний.';
     }
 
-    function getWinChanceTooltip() {
-      return 'В Аукционе показан изначальный шанс победы по сумме лота. В Колесе показан текущий шанс победы среди оставшихся. Размер сектора на колесе показывает риск вылета на текущем прокруте.';
+    function getWheelWinChanceTooltip() {
+      return 'Текущая условная вероятность победы с учётом уже выбывших мест. Размер сектора показывает вероятность выбыть на следующем прокруте.';
     }
 
     function formatAuctionWinChancePercent(entry, winChances) {
@@ -5520,18 +5794,12 @@
       return (chance * 100).toFixed(WIN_CHANCE_DECIMALS);
     }
 
-    function formatInitialSeriesWinChancePercent(winner, fallbackActiveEntries) {
+    function formatInitialAuctionWinChancePercent(winner) {
       if (!winner) return '0.00';
-
-      const snapshotChance = Number(spinSeriesInitialWinChances.get(winner.id));
-      if (Number.isFinite(snapshotChance)) {
-        return (Math.max(0, Math.min(1, snapshotChance)) * 100).toFixed(2);
-      }
-
-      const fallbackChances = calculateCurrentWheelWinChances(fallbackActiveEntries);
-      const fallbackChance = Number(fallbackChances.get(winner.id));
-      return Number.isFinite(fallbackChance)
-        ? (Math.max(0, Math.min(1, fallbackChance)) * 100).toFixed(2)
+      const initialChances = calculateAuctionInitialWinChances(entries);
+      const chance = Number(initialChances.get(winner.id));
+      return Number.isFinite(chance)
+        ? (Math.max(0, Math.min(1, chance)) * 100).toFixed(2)
         : '0.00';
     }
 
@@ -5576,7 +5844,7 @@
       if (activeDonationAssignmentId && !entries.some(entry => !entry.eliminated)) {
         activeDonationAssignmentId = null;
       }
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       saveData();
       renderList();
       drawWheel();
@@ -5708,7 +5976,7 @@
     document.getElementById('btn-reset-all').onclick = () => {
       if (!canMutateAuctionState()) return;
       if (entries.length === 0) return;
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       cancelScheduledSpinResultClear();
       saveData();
       renderList();
@@ -5745,21 +6013,27 @@
               cancelAnimationFrame(shrinkAnimFrame);
               shrinkAnimFrame = null;
               shrinkingTarget = null;
+              shrinkingSpinContext = null;
               shrinkingProgress = 0;
               isDelaying = false;
               isSpinning = false;
+              document.body.classList.remove('is-spinning');
               updateAdminLeadershipUi();
               return;
           }
           cancelAnimationFrame(shrinkAnimFrame);
           shrinkAnimFrame = null;
-          shrinkingTarget.eliminated = true;
-          shiftSpinSeriesQueueAfterVictim(shrinkingTarget);
+          const interruptedVictim = shrinkingTarget;
+          const interruptedContext = shrinkingSpinContext;
+          const elimination = eliminateEntryAtCurrentPlace(interruptedVictim);
+          rememberCompletedSpinOutcome(interruptedContext, interruptedVictim, elimination.winner);
           const remainingAfterInterrupt = entries.filter(e => !e.eliminated);
           shrinkingTarget = null;
+          shrinkingSpinContext = null;
           shrinkingProgress = 0;
           isDelaying = false;
           isSpinning = false;
+          document.body.classList.remove('is-spinning');
           saveData();
           renderList();
           drawWheel();
@@ -5772,35 +6046,6 @@
 
       // Плашку результата кликом по странице не скрываем — снимается при новом «Крутить» и др. сценариях в коде
     }, true);
-
-    function restoreSpinSeriesState(rawSpinSeries) {
-      if (!rawSpinSeries || typeof rawSpinSeries !== 'object') {
-        resetSpinState();
-        return;
-      }
-
-      spinSeriesMode = rawSpinSeries.mode === SPIN_SERIES_MODE_POINTAUC_NEW
-        ? rawSpinSeries.mode
-        : SPIN_SERIES_MODE_POINTAUC_NEW;
-      spinSeriesDropoutQueue = Array.isArray(rawSpinSeries.dropoutQueue)
-        ? rawSpinSeries.dropoutQueue.map(id => String(id)).filter(Boolean)
-        : [];
-      spinSeriesFinalWinnerId = rawSpinSeries.finalWinnerId
-        ? String(rawSpinSeries.finalWinnerId)
-        : null;
-      spinSeriesInitialEntryKey = String(rawSpinSeries.initialEntryKey || '');
-      spinSeriesInitialCount = Math.max(0, Number(rawSpinSeries.initialCount) || 0);
-      spinSeriesActive = !!rawSpinSeries.active;
-      spinSeriesInitialWinChances = deserializeChanceMap(rawSpinSeries.initialWinChances);
-    }
-
-    function resetInvalidLoadedSpinSeriesIfNeeded() {
-      const activeEntries = entries.filter(entry => entry && !entry.eliminated);
-      if (spinSeriesDropoutQueue.length === 0 && !spinSeriesActive) return;
-      if (!validateSpinSeriesQueue(activeEntries)) {
-        resetSpinState();
-      }
-    }
 
     function migrateLegacyAiEntryName(entry) {
       if (!entry || entry.createdBy !== 'llm') return;
@@ -5870,7 +6115,14 @@
               entry.id = `${Date.now()}-${idx}-${cryptoRandomUint32().toString(16)}`;
             }
             entry.name = limitStoredText(entry.name, MAX_LOT_NAME_LENGTH);
-            entry.price = Math.max(0, Number(entry.price) || 0);
+            entry.price = getEntryAmount(entry);
+            entry.eliminated = !!entry.eliminated;
+            const assignedPlace = Number(entry.assignedPlace);
+            if (Number.isInteger(assignedPlace) && assignedPlace >= 1 && assignedPlace <= entries.length) {
+              entry.assignedPlace = assignedPlace;
+            } else {
+              delete entry.assignedPlace;
+            }
             delete entry.aliases;
             entry.source = limitStoredText(entry.source, 40);
             entry.externalId = limitStoredText(entry.externalId, 200);
@@ -5879,10 +6131,17 @@
             entry.imageUrl = limitStoredText(entry.imageUrl, 1000);
             migrateLegacyAiEntryName(entry);
           });
-          restoreSpinSeriesState(parsed.spinSeries);
-          pendingSpinOperation = parsed.pendingSpinOperation && typeof parsed.pendingSpinOperation === 'object'
-            ? { ...parsed.pendingSpinOperation }
-            : null;
+          const loadedActiveEntries = entries.filter(entry => entry && !entry.eliminated);
+          if (loadedActiveEntries.length === 1) {
+            loadedActiveEntries[0].assignedPlace = 1;
+          } else {
+            loadedActiveEntries.forEach(entry => {
+              if (entry.assignedPlace === 1) delete entry.assignedPlace;
+            });
+          }
+          // Legacy spinSeries/dropoutQueue/finalWinnerId fields are deliberately ignored.
+          invalidateReversePlProbabilityCache();
+          pendingSpinOperation = normalizePendingReversePlSpinOperation(parsed.pendingSpinOperation);
           lastSpinResult = parsed.lastSpinResult && typeof parsed.lastSpinResult === 'object'
             ? { ...parsed.lastSpinResult }
             : null;
@@ -5905,7 +6164,6 @@
           if (pendingSpinOperation?.spinRequestId) {
             handledSpinRequests.set(String(pendingSpinOperation.spinRequestId), { status: 'accepted', descriptor: pendingSpinOperation });
           }
-          resetInvalidLoadedSpinSeriesIfNeeded();
 
           donationsPending = Array.isArray(parsed.donationsPending)
             ? parsed.donationsPending
@@ -5987,7 +6245,7 @@
           }
         } else {
           entries = [];
-          resetSpinState();
+          invalidateReversePlProbabilityCache();
           donationsPending = [];
           donationsAdded = [];
           pendingSpinOperation = null;
@@ -6108,15 +6366,6 @@
         activeMainTab: appViewMode === 'admin' ? activeMainTab : persistedActiveMainTab,
         activeDonationsTab,
         timerState: getTimerStateSnapshot(),
-        spinSeries: {
-          mode: spinSeriesMode,
-          dropoutQueue: Array.isArray(spinSeriesDropoutQueue) ? spinSeriesDropoutQueue.map(id => String(id)) : [],
-          finalWinnerId: spinSeriesFinalWinnerId,
-          initialEntryKey: spinSeriesInitialEntryKey,
-          initialCount: spinSeriesInitialCount,
-          active: spinSeriesActive,
-          initialWinChances: serializeChanceMap(spinSeriesInitialWinChances)
-        },
         pendingSpinOperation,
         lastSpinResult,
         recentSpinResults: normalizeRecentSpinResults(
@@ -6200,7 +6449,7 @@
       activeDonationAssignmentId = null;
       pendingDeleteEntryId = null;
       llmJobsRevision = Math.max(0, Number(revision || 0));
-      resetSpinState();
+      invalidateReversePlProbabilityCache();
       pendingSpinOperation = null;
       lastSpinResult = null;
       recentSpinResults = [];
@@ -6218,6 +6467,7 @@
       pendingAuthoritativeSpinTimer = null;
       currentAngle = 0;
       shrinkingTarget = null;
+      shrinkingSpinContext = null;
       shrinkingProgress = 0;
       isSpinning = false;
       isDelaying = false;
@@ -6338,6 +6588,7 @@
       if (strikeActivationTimeout) clearTimeout(strikeActivationTimeout);
       strikeActivationTimeout = null;
       shrinkingTarget = null;
+      shrinkingSpinContext = null;
       shrinkingProgress = 0;
       isSpinning = false;
       isDelaying = false;
@@ -6358,7 +6609,7 @@
       rightColWidth = 380;
       auctionLeftWidth = 0;
       listItemHeight = 55;
-      resetSpinState();
+      invalidateReversePlProbabilityCache();
       seenDonationKeys.clear();
       donationAlertsBaselineReady = false;
       donationAlertsMaxSeenId = 0;
@@ -6566,7 +6817,7 @@
       const numericAmount = Number(amount);
       if (!entry || !Number.isFinite(numericAmount)) return false;
       entry.price += numericAmount;
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       if (!deferRefresh) {
         saveData();
         renderList();
@@ -7696,7 +7947,7 @@
         createdAt: new Date().toISOString()
       };
       entries.push(entry);
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       if (!deferRefresh) {
         saveData();
         renderList();
@@ -7766,13 +8017,13 @@
         entries.push(createdEntry);
         assignmentEntry = createdEntry;
         originalEntryPrice = 0;
-        resetSpinSeriesForCompositionChange();
+        resetAuctionProgressForCompositionChange();
         if (donation.llm) donation.llm.status = 'applied';
         const applied = assignDonationToEntry(donationId, createdEntry.id);
         if (applied) return true;
 
         entries = entries.filter(entry => entry.id !== createdEntry.id);
-        resetSpinSeriesForCompositionChange();
+        resetAuctionProgressForCompositionChange();
         if (donation.llm) donation.llm.status = 'done';
         saveData();
         renderList();
@@ -7785,7 +8036,7 @@
         }
         if (createdEntry) {
           entries = entries.filter(entry => entry.id !== createdEntry.id);
-          resetSpinSeriesForCompositionChange();
+          resetAuctionProgressForCompositionChange();
         }
         let donation = getPendingDonationById(donationId);
         const addedIndex = donationsAdded.findIndex(item => item.id === donationId);
@@ -10943,13 +11194,6 @@
       "01EZPGBXMR0001DCZS00AD662R", "01EZPHJ86R000C438200A44F1S", "01F031CCA80001TJB3006SVBHS", "01F125GGEG0009V7MP006J8KNZ", "01F42G1J400005W0EZC5BGMVRX", "01F5PFXXER000BAN36SW3N6P42", "01F6J3MNC8000CE64F7FH1YF7V", "01F6MQ33FG000FFJ97ZB8MWV52", "01F6ME7ADR0000WDA7ERT9H30R", "01F6N0CC5R0003R9X8PYE7ZJVK", "01F6NACCD80006SZ7ZW5FMWKWK", "01F6NMW2K80007X1R6PNS19MNJ", "01F6VKNENG000ECZXVKQBWS8DT", "01FAT81EG8000C0Z8TR69TJ930", "01FB55W7X0000EAYZC08B47GPW", "01F9C42KS80009N7XVDB6JDCAH", "01FH8JC3J800072TF42DHX4CF3", "01F7Q4GJYG0002BJ8PJ1T6SGX0", "01F6N6WQ5G00052X5637DQBJH4", "01F6P1E7QR0002RDNAW6FFQ1E0", "01EZPMV1Q800077NX500A43YF7", "01G87CZFM0000E3SNYRX5950FC", "01G7YR9X5G0003Z50SB3FM5WR4", "01G08M28KR000BNDCWZMDRQ24X", "01GEAMCZ00000D2JB9BX6A64AE", "01GEN8KD6R00091TVR6M4DY6A1", "01G8CMD8V0000DHSGW4YR57HF8", "01GH1MNRN00008XMM9ZCG7Y8F1", "01GCM7WXJ0000D8ZK13J8KVAV6", "01G70VHSB800068806HB3KDSG6", "01FE4E825R0003QYBS2MTTHVXX", "01G3WEGZN0000ET2J0MQP5YJ0G", "01GBFAYKGR000FWWN7MDZZ8XQN", "01GMAH9MB000066S7TTNVB1TGD", "01GHMH2C28000BCSECMMH7M0TD", "01GBPSCGR00007Q17796BDN5AJ"
     ];
 
-    function normalizeWheelAngleRad(a) {
-      let x = Number(a) % (Math.PI * 2);
-      if (!Number.isFinite(x)) return 0;
-      if (x < 0) x += Math.PI * 2;
-      return x;
-    }
-
     let currentAngle = 0;
     let isSpinning = false;
 
@@ -11106,10 +11350,8 @@
       if (!list || !summary || !totalLabel) return;
 
       const activeEntries = entries.filter(entry => entry && !entry.eliminated);
-      const totalAmount = entries.reduce((sum, entry) => {
-        return sum + Math.max(0, Number(entry?.price) || 0);
-      }, 0);
-      const chanceTooltip = getWinChanceTooltip();
+      const totalAmount = entries.reduce((sum, entry) => sum + getEntryAmount(entry), 0);
+      const chanceTooltip = getWheelWinChanceTooltip();
       summary.textContent = `${activeEntries.length} активных из ${entries.length}`;
       totalLabel.textContent = `${totalAmount.toLocaleString('ru-RU')} ₽`;
       list.replaceChildren();
@@ -11121,7 +11363,12 @@
         list.appendChild(empty);
         return;
       }
-      const winChances = calculateCurrentWheelWinChances(activeEntries);
+      let winChances = new Map();
+      try {
+        winChances = ensureReversePlProbabilityState(entries).currentWinChances;
+      } catch (error) {
+        console.error('Не удалось рассчитать текущие шансы победы', error);
+      }
       const rows = entries
         .map((entry, index) => ({ entry, index }))
         .sort((a, b) => {
@@ -11140,7 +11387,14 @@
 
         const number = document.createElement('span');
         number.className = 'wheel-readonly-number';
-        number.textContent = String(displayIndex + 1);
+        const assignedPlace = Number(entry.assignedPlace);
+        if (Number.isInteger(assignedPlace) && assignedPlace >= 1) {
+          number.textContent = `#${assignedPlace}`;
+          number.title = `Назначенное место: ${assignedPlace}`;
+        } else {
+          number.textContent = String(displayIndex + 1);
+          number.title = 'Позиция в текущем списке';
+        }
 
         const name = document.createElement('span');
         name.className = 'wheel-readonly-name';
@@ -11357,7 +11611,7 @@
       
       const auctionEntries = entries.filter(entry => entry);
       const winChances = calculateAuctionInitialWinChances(auctionEntries);
-      const chanceTooltip = getWinChanceTooltip();
+      const chanceTooltip = getAuctionWinChanceTooltip();
       const filterText = document.getElementById('search-filter').value.toLowerCase().trim();
       const isAssigningDonation = Boolean(activeDonationAssignmentId);
 
@@ -11506,7 +11760,7 @@
     window.updatePrice = function(index, val) {
       if (!canMutateAuctionState()) return;
       entries[index].price = Math.max(0, parseFloat(val) || 0);
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       saveData(); renderList(); drawWheel();
     };
 
@@ -11521,7 +11775,7 @@
       if (!Number.isFinite(amount) || amount <= 0) return;
       const sign = Number(direction) < 0 ? -1 : 1;
       entries[index].price = Math.max(0, (Number(entries[index].price) || 0) + sign * amount);
-      resetSpinSeriesForCompositionChange();
+      resetAuctionProgressForCompositionChange();
       saveData(); renderList(); drawWheel();
     };
 
@@ -11551,7 +11805,7 @@
         
         document.getElementById('new-name').value = '';
         document.getElementById('new-price').value = '0';
-        resetSpinSeriesForCompositionChange();
+        resetAuctionProgressForCompositionChange();
         saveData(); renderList(); drawWheel();
       }
     };
@@ -11561,26 +11815,21 @@
 
 
     // Вспомогательная функция для определения лота под стрелкой в процессе вращения
-    function getCurrentSegment(angle) {
-        const activeEntries = entries.filter(e => !e.eliminated);
-        if(activeEntries.length === 0) return null;
-        
-        let totalW = activeEntries.reduce((s, e) => s + getCurrentWheelWeight(e, activeEntries), 0);
-        
-        let normalizedAngle = angle % (Math.PI * 2);
-        if (normalizedAngle < 0) normalizedAngle += Math.PI * 2;
-        
-        let pointerOffset = (Math.PI * 2 - normalizedAngle) % (Math.PI * 2);
-        
-        let accum = 0;
-        for(let entry of activeEntries) {
-            const sliceAngle = (getCurrentWheelWeight(entry, activeEntries) / totalW) * Math.PI * 2;
-            accum += sliceAngle;
-            if (pointerOffset <= accum) {
-                return entry;
-            }
-        }
-        return activeEntries[activeEntries.length - 1];
+    function getCurrentSegment(angle, sourceActiveEntries = null, dropoutChances = null) {
+      const activeEntries = Array.isArray(sourceActiveEntries)
+        ? sourceActiveEntries.filter(entry => entry && !entry.eliminated)
+        : entries.filter(entry => entry && !entry.eliminated);
+      if (activeEntries.length === 0) return null;
+      const chances = dropoutChances instanceof Map
+        ? dropoutChances
+        : ensureReversePlProbabilityState(entries).dropoutChances;
+      return getWheelSegmentAtAngle(
+        angle,
+        activeEntries.map(entry => ({
+          entry,
+          weight: getCurrentWheelWeight(entry, chances)
+        }))
+      );
     }
 
     /** Текст вдоль биссектрисы: усечение с «…», пока строка не влезает в maxSpan (пиксели по оси x после поворота). */
@@ -11684,10 +11933,10 @@
       return null;
     }
 
-    function getWheelGeometryCacheKey(activeEntries, wheelLabelFontPx) {
+    function getWheelGeometryCacheKey(activeEntries, wheelLabelFontPx, probabilitySignature) {
       return JSON.stringify({
         font: wheelLabelFontPx,
-        initialCount: Number(spinSeriesInitialCount) || 0,
+        probabilitySignature,
         entries: activeEntries.map(entry => [
           String(entry.id),
           String(entry.name || ''),
@@ -11697,9 +11946,15 @@
       });
     }
 
-    function buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx) {
+    function buildWheelGeometryData(
+      activeEntries,
+      radius,
+      innerHoleRadiusLogical,
+      wheelLabelFontPx,
+      dropoutChances
+    ) {
       const wheelData = activeEntries.map(entry => {
-        let weight = getCurrentWheelWeight(entry, activeEntries);
+        let weight = getCurrentWheelWeight(entry, dropoutChances);
         if (shrinkingTarget && entry.id === shrinkingTarget.id) {
           weight *= (1 - shrinkingProgress);
         }
@@ -11727,13 +11982,22 @@
       return wheelData;
     }
 
-    function drawWheel() {
+    function drawWheel(probabilityStateOverride = null) {
       const LOGICAL = WHEEL_DRAW_LOGICAL_PX;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const activeEntries = entries.filter(e => !e.eliminated);
       if (activeEntries.length === 0) return;
+      let probabilityState = probabilityStateOverride;
+      if (!probabilityState || !(probabilityState.dropoutChances instanceof Map)) {
+        try {
+          probabilityState = ensureReversePlProbabilityState(entries);
+        } catch (error) {
+          console.error('Не удалось построить сектора Reverse Plackett–Luce', error);
+          return;
+        }
+      }
 
       const scale = (wheelDisplayCssPx * wheelDpr) / LOGICAL;
       if (scale <= 0) return;
@@ -11748,13 +12012,29 @@
 
       let wheelData = null;
       if (shrinkingTarget) {
-        wheelData = buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx);
+        wheelData = buildWheelGeometryData(
+          activeEntries,
+          radius,
+          innerHoleRadiusLogical,
+          wheelLabelFontPx,
+          probabilityState.dropoutChances
+        );
       } else {
-        const cacheKey = getWheelGeometryCacheKey(activeEntries, wheelLabelFontPx);
+        const cacheKey = getWheelGeometryCacheKey(
+          activeEntries,
+          wheelLabelFontPx,
+          probabilityState.signature
+        );
         if (wheelGeometryCache.key !== cacheKey || !wheelGeometryCache.data) {
           wheelGeometryCache = {
             key: cacheKey,
-            data: buildWheelGeometryData(activeEntries, radius, innerHoleRadiusLogical, wheelLabelFontPx)
+            data: buildWheelGeometryData(
+              activeEntries,
+              radius,
+              innerHoleRadiusLogical,
+              wheelLabelFontPx,
+              probabilityState.dropoutChances
+            )
           };
         }
         wheelData = wheelGeometryCache.data;
@@ -11892,45 +12172,57 @@
       };
     }
 
+    function normalizePendingReversePlSpinOperation(value) {
+      if (!value || typeof value !== 'object') return null;
+      const spinRequestId = String(value.spinRequestId || '');
+      const probabilityStateSignature = String(value.probabilityStateSignature || '');
+      const targetAngle = Number(value.targetAngle);
+      const finalAngle = Number(value.finalAngle);
+      if (
+        !spinRequestId
+        || !probabilityStateSignature
+        || !Number.isFinite(targetAngle)
+        || !Number.isFinite(finalAngle)
+        || String(value.victimId || '')
+        || String(value.winnerId || '')
+      ) {
+        return null;
+      }
+      return {
+        ...value,
+        spinId: String(value.spinId || spinRequestId),
+        spinRequestId,
+        probabilityStateSignature,
+        initialAngle: Number.isFinite(Number(value.initialAngle)) ? Number(value.initialAngle) : 0,
+        targetAngle,
+        finalAngle: normalizeWheelAngleRad(finalAngle),
+        durationMs: Math.min(60000, Math.max(1000, Number(value.durationMs) || 1000)),
+        generation: Math.max(0, Number(value.generation || 0)),
+        startedAt: Number(value.startedAt || 0),
+        finishAt: Number(value.finishAt || 0)
+      };
+    }
+
     function buildAuthoritativeSpinDescriptor(request) {
       const activeEntries = entries.filter(entry => entry && !entry.eliminated);
       if (!activeEntries.length) return null;
-      ensureSpinSeriesSnapshot(activeEntries);
+      const probabilityState = ensureReversePlProbabilityState(entries);
       const durationMs = Math.min(60000, Math.max(1000, (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000));
-      const initialAngle = currentAngle;
-      let victim = null;
-      let targetAngle = currentAngle + (Math.PI * 2 * 10) + cryptoRandomFloat() * Math.PI * 2;
-      if (activeEntries.length > 1) {
-        let victimId = ensureSpinSeriesDropoutQueue(activeEntries);
-        victim = activeEntries.find(entry => String(entry.id) === String(victimId));
-        if (!victim) return null;
-        const totalWeight = activeEntries.reduce((sum, entry) => sum + getCurrentWheelWeight(entry, activeEntries), 0);
-        let victimStartAngle = 0;
-        for (const entry of activeEntries) {
-          if (String(entry.id) === String(victim.id)) break;
-          victimStartAngle += (getCurrentWheelWeight(entry, activeEntries) / totalWeight) * Math.PI * 2;
-        }
-        const victimSliceSize = (getCurrentWheelWeight(victim, activeEntries) / totalWeight) * Math.PI * 2;
-        const targetOnWheel = victimStartAngle + cryptoRandomFloat() * victimSliceSize;
-        const baseTarget = (Math.PI * 2) - targetOnWheel;
-        let rotationNeeded = baseTarget - (currentAngle % (Math.PI * 2));
-        if (rotationNeeded < 0) rotationNeeded += Math.PI * 2;
-        targetAngle = currentAngle + rotationNeeded + Math.PI * 2 * 10;
-      }
+      const plan = buildWheelSpinPlan(currentAngle, durationMs, cryptoRandomFloat53(), 10);
+      const startedAt = Date.now();
       return {
         spinId: request.spinRequestId,
         spinRequestId: request.spinRequestId,
         requesterTabId: request.requesterTabId,
         collectionAction: normalizeSpinCollectionAction(request.collectionAction),
-        victimId: victim ? String(victim.id) : '',
-        winnerId: activeEntries.length === 1 ? String(activeEntries[0].id) : '',
-        initialAngle,
-        targetAngle,
-        finalAngle: normalizeWheelAngleRad(targetAngle),
-        durationMs,
+        probabilityStateSignature: probabilityState.signature,
+        initialAngle: plan.initialAngle,
+        targetAngle: plan.targetAngle,
+        finalAngle: plan.finalAngle,
+        durationMs: plan.durationMs,
         generation: currentAuctionGeneration,
-        startedAt: Date.now(),
-        finishAt: Date.now() + durationMs
+        startedAt,
+        finishAt: startedAt + plan.durationMs
       };
     }
 
@@ -11949,25 +12241,41 @@
       if (Number(descriptor.generation || 0) !== currentAuctionGeneration) return false;
       const operationClaim = createAdminOperationClaim(String(spinRequestId), currentAuctionGeneration);
       if (!operationClaim || !isAdminOperationStillAuthoritative(operationClaim)) return false;
-      const victim = descriptor.victimId
-        ? entries.find(entry => String(entry.id) === String(descriptor.victimId))
-        : null;
-      if (victim && !victim.eliminated) {
-        victim.eliminated = true;
-        shiftSpinSeriesQueueAfterVictim(victim);
+      const probabilityState = ensureReversePlProbabilityState(entries);
+      if (probabilityState.signature !== String(descriptor.probabilityStateSignature || '')) {
+        pendingSpinOperation = null;
+        saveData();
+        return false;
       }
       currentAngle = normalizeWheelAngleRad(Number(descriptor.finalAngle || descriptor.targetAngle || currentAngle));
+      const activeBefore = entries.filter(entry => entry && !entry.eliminated);
+      const victim = activeBefore.length > 1
+        ? getCurrentSegment(currentAngle, activeBefore, probabilityState.dropoutChances)
+        : null;
+      if (activeBefore.length > 1 && !victim) return false;
+      const elimination = victim
+        ? eliminateEntryAtCurrentPlace(victim)
+        : { assignedPlace: 0, winner: activeBefore.length === 1 ? activeBefore[0] : null };
+      if (elimination.winner && !Number.isInteger(elimination.winner.assignedPlace)) {
+        elimination.winner.assignedPlace = 1;
+      }
       const activeAfter = entries.filter(entry => entry && !entry.eliminated);
       const winner = activeAfter.length === 1 ? activeAfter[0] : null;
+      if (winner && !Number.isInteger(winner.assignedPlace)) winner.assignedPlace = 1;
+      const initialWinChances = winner ? calculateAuctionInitialWinChances(entries) : new Map();
       const result = {
         spinRequestId: descriptor.spinRequestId,
         spinId: descriptor.spinId,
         victimId: victim ? String(victim.id) : '',
         victimName: victim ? String(victim.name || '') : '',
-        winnerId: winner ? String(winner.id) : String(descriptor.winnerId || ''),
+        assignedPlace: victim ? Number(victim.assignedPlace || 0) : 0,
+        winnerId: winner ? String(winner.id) : '',
         winnerName: winner ? String(winner.name || '') : '',
+        winnerPlace: winner ? Number(winner.assignedPlace || 1) : 0,
+        winnerInitialChance: winner ? Number(initialWinChances.get(winner.id) || 0) : 0,
         final: !!winner,
         finalAngle: currentAngle,
+        probabilityStateSignature: String(descriptor.probabilityStateSignature || ''),
         generation: currentAuctionGeneration,
         finishedAt: new Date().toISOString()
       };
@@ -11985,6 +12293,14 @@
     function resumePendingAuthoritativeSpin() {
       if (!canRunAdminLeaderActions() || !pendingSpinOperation) return false;
       if (Number(pendingSpinOperation.generation || 0) !== currentAuctionGeneration) {
+        pendingSpinOperation = null;
+        saveData();
+        return false;
+      }
+      if (
+        String(pendingSpinOperation.probabilityStateSignature || '')
+        !== createReversePlStateSignature(entries)
+      ) {
         pendingSpinOperation = null;
         saveData();
         return false;
@@ -12113,7 +12429,18 @@
         handledSpinRequests.delete(requestId);
         return false;
       }
-      const descriptor = buildAuthoritativeSpinDescriptor(message);
+      let descriptor = null;
+      try {
+        descriptor = buildAuthoritativeSpinDescriptor(message);
+      } catch (error) {
+        console.error('Не удалось подготовить прокрут Reverse Plackett–Luce', error);
+        return postSpinRequestRejection(
+          message,
+          /WebCrypto|генератор/i.test(String(error?.message || ''))
+            ? 'random_unavailable'
+            : 'probability_calculation_failed'
+        );
+      }
       if (!descriptor) {
         handledSpinRequests.delete(requestId);
         return postSpinRequestRejection(message, 'no_active_entries');
@@ -12138,10 +12465,18 @@
       if (clearSpinId) activeWheelAnimationSpinId = '';
     }
 
-    function animateWheelSpinDescriptor(descriptor) {
-      if (appViewMode !== 'wheel' || !descriptor) return false;
+    function animateWheelSpinDescriptor(descriptor, probabilityState) {
+      if (
+        appViewMode !== 'wheel'
+        || !descriptor
+        || !(probabilityState?.dropoutChances instanceof Map)
+        || probabilityState.signature !== String(descriptor.probabilityStateSignature || '')
+      ) {
+        return false;
+      }
       const requestId = String(descriptor.spinRequestId || '');
       if (!shouldStartWheelSpinAnimation(activeWheelAnimationSpinId, requestId)) return false;
+      const activeEntries = entries.filter(entry => entry && !entry.eliminated);
       cancelWheelSpinAnimation();
       activeWheelAnimationSpinId = requestId;
       isSpinning = true;
@@ -12160,9 +12495,13 @@
         }
         const progress = Math.min((timestamp - started) / duration, 1);
         currentAngle = initial + (target - initial) * (1 - Math.pow(1 - progress, 4));
-        const segment = getCurrentSegment(currentAngle);
+        const segment = getCurrentSegment(
+          currentAngle,
+          activeEntries,
+          probabilityState.dropoutChances
+        );
         if (segment) document.getElementById('top-winner-text').textContent = segment.name;
-        drawWheel();
+        drawWheel(probabilityState);
         if (progress < 1) activeWheelAnimationFrame = requestAnimationFrame(animate);
       };
       activeWheelAnimationFrame = requestAnimationFrame(animate);
@@ -12188,7 +12527,14 @@
       document.body.classList.remove('is-spinning');
       applyExternalStateUpdate();
       if (result.final && result.winnerName) {
-        renderFinalWinnerOverlay(document.getElementById('center-text-overlay'), { winnerName: result.winnerName, singleWinner: true });
+        const initialChance = Number(result.winnerInitialChance);
+        renderFinalWinnerOverlay(document.getElementById('center-text-overlay'), {
+          winnerName: result.winnerName,
+          winChance: Number.isFinite(initialChance)
+            ? (Math.max(0, Math.min(1, initialChance)) * 100).toFixed(WIN_CHANCE_DECIMALS)
+            : '0.00',
+          singleWinner: true
+        });
       } else if (result.victimName) {
         renderStrikeOverlay(document.getElementById('center-text-overlay'), result.victimName);
       }
@@ -12228,6 +12574,7 @@
       pendingWheelSpinRequest = null;
       pendingWheelSpinTimeout = null;
       cancelWheelSpinAnimation();
+      document.getElementById('top-winner-text').textContent = '';
       alert('Результат вращения не получен. Проверьте активную вкладку управления.');
       return false;
     }
@@ -12240,7 +12587,23 @@
         pendingWheelSpinRequest.accepted = true;
         const remainingMs = Math.max(0, Number(message.descriptor?.finishAt || 0) - Date.now());
         scheduleWheelSpinRequestTimeout(remainingMs + ADMIN_LEASE_DURATION_MS + 2000);
-        animateWheelSpinDescriptor(message.descriptor);
+        let probabilityState;
+        try {
+          probabilityState = ensureReversePlProbabilityState(entries);
+          if (
+            String(message.descriptor?.probabilityStateSignature || '')
+            !== probabilityState.signature
+          ) {
+            throw new Error('Состояние лотов изменилось до начала прокрута.');
+          }
+          drawWheel(probabilityState);
+        } catch (error) {
+          console.error('Не удалось подготовить геометрию колеса', error);
+          document.getElementById('top-winner-text').textContent = '';
+          alert(error?.message || 'Не удалось подготовить сектора колеса.');
+          return true;
+        }
+        animateWheelSpinDescriptor(message.descriptor, probabilityState);
         return true;
       }
       if (pendingWheelSpinTimeout) clearTimeout(pendingWheelSpinTimeout);
@@ -12252,6 +12615,7 @@
       if (message.type === 'SPIN_RESULT') {
         setTimeout(() => applyWheelSpinResult(message), 0);
       } else {
+        document.getElementById('top-winner-text').textContent = '';
         if (message.reason === 'collection_active') {
           openSpinDonationsModal();
           return true;
@@ -12262,7 +12626,11 @@
             ? 'Колесо уже крутится.'
             : (message.reason === 'collection_pause_failed'
               ? 'Не удалось остановить приём донатов.'
-              : 'Активная вкладка управления не найдена'));
+              : (message.reason === 'random_unavailable'
+                ? 'Безопасный генератор WebCrypto недоступен. Прокрут отменён.'
+                : (message.reason === 'probability_calculation_failed'
+                  ? 'Не удалось рассчитать вероятности Reverse Plackett–Luce.'
+                  : 'Активная вкладка управления не найдена'))));
         alert(rejectionText);
       }
       return true;
@@ -12270,12 +12638,19 @@
 
     function requestSpinFromWheel(collectionAction = 'require_stopped') {
       if (appViewMode !== 'wheel' || pendingWheelSpinRequest || isSpinning) return false;
-      const request = createWheelSpinRequest(
-        adminTabId,
-        sharedStateAuctionGeneration || currentAuctionGeneration,
-        Date.now(),
-        collectionAction
-      );
+      let request;
+      try {
+        request = createWheelSpinRequest(
+          adminTabId,
+          sharedStateAuctionGeneration || currentAuctionGeneration,
+          Date.now(),
+          collectionAction
+        );
+      } catch (error) {
+        alert(error?.message || 'Безопасный генератор WebCrypto недоступен. Прокрут отменён.');
+        return false;
+      }
+      document.getElementById('top-winner-text').textContent = 'Расчёт вероятностей…';
       pendingWheelSpinRequest = request;
       postAppChannelMessage('SPIN_REQUEST', request);
       scheduleWheelSpinRequestTimeout(4000);
@@ -12286,123 +12661,60 @@
       if (!canRunAdminLeaderActions()) return;
       if (isSpinning || isDelaying || pendingSpinOperation) return;
       clearSpinResultOverlay({ redraw: false });
-      
+
       const activeEntries = entries.filter(e => !e.eliminated);
       if (activeEntries.length === 0) {
-          alert("Список пуст!");
-          return;
+        alert('Список пуст!');
+        return;
       }
-      ensureSpinSeriesSnapshot(activeEntries);
-
-      document.getElementById('top-winner-text').textContent = '';
-      document.getElementById('center-text-overlay').replaceChildren();
-
-      if (activeEntries.length === 1) {
-          document.getElementById('search-filter').value = '';
-          renderList();
-          
-          isSpinning = true;
-          document.body.classList.add('is-spinning');
-          document.body.classList.remove('show-result');
-          updateAdminLeadershipUi();
-          
-          const extraSpins = Math.PI * 2 * 10;
-          const targetAngle = currentAngle + cryptoRandomFloat() * Math.PI * 2 + extraSpins;
-          const initialAngle = currentAngle;
-          const duration = (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000;
-          const start = performance.now();
-
-          function easeOutQuart(x) { return 1 - Math.pow(1 - x, 4); }
-
-          function animateSingle(timestamp) {
-              if (!isSpinning) return;
-              if (!canRunAdminLeaderActions()) {
-                  isSpinning = false;
-                  document.body.classList.remove('is-spinning');
-                  updateAdminLeadershipUi();
-                  return;
-              }
-              const progress = Math.min((timestamp - start) / duration, 1);
-              currentAngle = initialAngle + (targetAngle - initialAngle) * easeOutQuart(progress);
-              
-              let currentSeg = getCurrentSegment(currentAngle);
-              if (currentSeg) document.getElementById('top-winner-text').textContent = currentSeg.name;
-
-              drawWheel();
-              
-              if (progress < 1) {
-                  requestAnimationFrame(animateSingle);
-              } else {
-                  currentAngle = currentAngle % (Math.PI * 2);
-                  drawWheel(); 
-                  
-                  const winner = activeEntries[0];
-                  const winChance = formatInitialSeriesWinChancePercent(winner, activeEntries);
-                  
-                  document.getElementById('top-winner-text').textContent = ''; // Скрываем верхний
-                  renderFinalWinnerOverlay(document.getElementById('center-text-overlay'), {
-                    winnerName: winner ? winner.name : '',
-                    winChance,
-                    singleWinner: true
-                  });
-                  document.body.classList.add('show-result');
-                  isSpinning = false;
-                  saveData();
-                  updateAdminLeadershipUi();
-              }
-          }
-          requestAnimationFrame(animateSingle);
-          return;
-      }
-
-      document.getElementById('search-filter').value = '';
-      renderList();
 
       isSpinning = true;
       document.body.classList.add('is-spinning');
       document.body.classList.remove('show-result');
       updateAdminLeadershipUi();
-      
-      let victimId = ensureSpinSeriesDropoutQueue(activeEntries);
-      let victim = activeEntries.find(entry => String(entry.id) === String(victimId));
-      if (!victim) {
-        resetSpinState();
-        victimId = ensureSpinSeriesDropoutQueue(activeEntries);
-        victim = activeEntries.find(entry => String(entry.id) === String(victimId));
-      }
-      if (!victim) {
+      const topWinnerText = document.getElementById('top-winner-text');
+      topWinnerText.textContent = 'Расчёт вероятностей…';
+      document.getElementById('center-text-overlay').replaceChildren();
+      await new Promise(resolve => requestAnimationFrame(() => resolve()));
+      if (!canRunAdminLeaderActions()) {
         isSpinning = false;
         document.body.classList.remove('is-spinning');
+        topWinnerText.textContent = '';
         updateAdminLeadershipUi();
         return;
       }
-      saveData();
 
-      const totalWheelWeight = activeEntries.reduce((s, e) => {
-        return s + getCurrentWheelWeight(e, activeEntries);
-      }, 0);
-      let victimStartAngle = 0;
-      
-      for (let i = 0; i < activeEntries.length; i++) {
-          if (activeEntries[i].id === victim.id) break;
-          victimStartAngle += (getCurrentWheelWeight(activeEntries[i], activeEntries) / totalWheelWeight) * Math.PI * 2;
+      let probabilityState;
+      let plan;
+      let spinContext;
+      try {
+        probabilityState = ensureReversePlProbabilityState(entries);
+        drawWheel(probabilityState);
+        const durationMs = Math.min(
+          60000,
+          Math.max(1000, (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000)
+        );
+        plan = buildWheelSpinPlan(currentAngle, durationMs, cryptoRandomFloat53(), 10);
+        const spinRequestId = `spin-${Date.now()}-${cryptoRandomUint32().toString(16)}`;
+        spinContext = {
+          spinRequestId,
+          spinId: spinRequestId,
+          finalAngle: plan.finalAngle,
+          probabilityStateSignature: probabilityState.signature,
+          generation: currentAuctionGeneration
+        };
+      } catch (error) {
+        console.error('Не удалось подготовить прокрут Reverse Plackett–Luce', error);
+        topWinnerText.textContent = '';
+        isSpinning = false;
+        document.body.classList.remove('is-spinning');
+        updateAdminLeadershipUi();
+        alert(error?.message || 'Не удалось рассчитать вероятности для прокрута.');
+        return;
       }
-      const victimSliceSize = (getCurrentWheelWeight(victim, activeEntries) / totalWheelWeight) * Math.PI * 2;
-      
-      const pointInsideVictim = cryptoRandomFloat(); 
-      const targetAngleOnWheel = victimStartAngle + (pointInsideVictim * victimSliceSize);
 
-      const baseTarget = (Math.PI * 2) - targetAngleOnWheel;
-      const currentMod = currentAngle % (Math.PI * 2);
-      
-      let rotationNeeded = baseTarget - currentMod;
-      if (rotationNeeded < 0) rotationNeeded += Math.PI * 2;
-      
-      const extraSpins = Math.PI * 2 * 10; 
-      const targetAngle = currentAngle + rotationNeeded + extraSpins;
-      const initialAngle = currentAngle;
-
-      const duration = (parseFloat(document.getElementById('spin-duration').value) || 10) * 1000;
+      document.getElementById('search-filter').value = '';
+      renderList();
       const start = performance.now();
 
       function easeOutQuart(x) { return 1 - Math.pow(1 - x, 4); }
@@ -12415,20 +12727,58 @@
           updateAdminLeadershipUi();
           return;
         }
-        const progress = Math.min((timestamp - start) / duration, 1);
-        currentAngle = initialAngle + (targetAngle - initialAngle) * easeOutQuart(progress);
-        
-        // Отображение текущего имени наверху (обновляется во время вращения)
-        let currentSeg = getCurrentSegment(currentAngle);
-        if (currentSeg) document.getElementById('top-winner-text').textContent = currentSeg.name;
+        const progress = Math.min((timestamp - start) / plan.durationMs, 1);
+        currentAngle = plan.initialAngle
+          + (plan.targetAngle - plan.initialAngle) * easeOutQuart(progress);
+        const currentSegment = getCurrentSegment(
+          currentAngle,
+          activeEntries,
+          probabilityState.dropoutChances
+        );
+        if (currentSegment) topWinnerText.textContent = currentSegment.name;
 
-        drawWheel();
+        drawWheel(probabilityState);
 
         if (progress < 1) {
           requestAnimationFrame(animate);
-        } else {
-          finishFakeSpin(victim);
+          return;
         }
+
+        currentAngle = plan.finalAngle;
+        drawWheel(probabilityState);
+        const finalActiveEntries = entries.filter(entry => entry && !entry.eliminated);
+        if (finalActiveEntries.length === 1) {
+          const winner = finalActiveEntries[0];
+          if (!Number.isInteger(winner.assignedPlace)) winner.assignedPlace = 1;
+          rememberCompletedSpinOutcome(spinContext, null, winner);
+          topWinnerText.textContent = '';
+          renderFinalWinnerOverlay(document.getElementById('center-text-overlay'), {
+            winnerName: winner.name,
+            winChance: formatInitialAuctionWinChancePercent(winner),
+            singleWinner: true
+          });
+          document.body.classList.add('show-result');
+          document.body.classList.remove('is-spinning');
+          isSpinning = false;
+          saveData();
+          updateAdminLeadershipUi();
+          return;
+        }
+
+        const victim = getCurrentSegment(
+          plan.finalAngle,
+          finalActiveEntries,
+          probabilityState.dropoutChances
+        );
+        if (!victim) {
+          topWinnerText.textContent = '';
+          document.body.classList.remove('is-spinning');
+          isSpinning = false;
+          updateAdminLeadershipUi();
+          alert('Не удалось определить сектор под стрелкой. Прокрут отменён.');
+          return;
+        }
+        finishSpinWithPointerVictim(victim, spinContext, probabilityState);
       }
       requestAnimationFrame(animate);
     }
@@ -12475,16 +12825,15 @@
       if (event.target === event.currentTarget) closeSpinDonationsModal();
     });
 
-    function finishFakeSpin(victimRef) {
-      currentAngle = currentAngle % (Math.PI * 2);
+    function finishSpinWithPointerVictim(victimRef, spinContext, probabilityState) {
+      currentAngle = normalizeWheelAngleRad(currentAngle);
       saveData();
-      const globalVictimIdx = entries.indexOf(victimRef);
       const activeEntries = entries.filter(e => !e.eliminated);
       
       // Является ли этот прокрут финальным (если останется 1 сегмент после удаления)
       const isFinal = activeEntries.length <= 2; 
 
-      drawWheel();
+      drawWheel(probabilityState);
       
       const overlay = document.getElementById('center-text-overlay');
       const topText = document.getElementById('top-winner-text');
@@ -12496,7 +12845,7 @@
       // ЕСЛИ ЭТО ПОСЛЕДНЕЕ УДАЛЕНИЕ (ФИНАЛ)
       if (isFinal) {
           const winner = activeEntries.find(e => e.id !== victimRef.id);
-          const winChance = formatInitialSeriesWinChancePercent(winner, activeEntries);
+          const winChance = formatInitialAuctionWinChancePercent(winner);
           
           topText.textContent = ''; // Убираем верхний, всё будет посередине
           renderFinalWinnerOverlay(overlay, {
@@ -12520,6 +12869,7 @@
 
       // Анимация плавного исчезновения сегмента на протяжении 1 секунды
       shrinkingTarget = victimRef;
+      shrinkingSpinContext = spinContext;
       shrinkingProgress = 0;
       
       const shrinkDuration = 1000;
@@ -12532,6 +12882,7 @@
           if (!isDelaying) return;
           if (!canRunAdminLeaderActions()) {
               shrinkingTarget = null;
+              shrinkingSpinContext = null;
               shrinkingProgress = 0;
               shrinkAnimFrame = null;
               isDelaying = false;
@@ -12544,27 +12895,29 @@
           const progress = Math.min((timestamp - shrinkStart) / shrinkDuration, 1);
           shrinkingProgress = easeInOutQuad(progress); 
           
-          drawWheel();
+          drawWheel(probabilityState);
           
           if (progress < 1) {
               shrinkAnimFrame = requestAnimationFrame(animateShrink);
           } else {
               // Естественное окончание 1 сек без прерывания
               shrinkingTarget = null;
+              const completedSpinContext = shrinkingSpinContext;
+              shrinkingSpinContext = null;
               shrinkingProgress = 0;
               shrinkAnimFrame = null;
-              victimRef.eliminated = true;
-              shiftSpinSeriesQueueAfterVictim(victimRef);
+              const elimination = eliminateEntryAtCurrentPlace(victimRef);
+              rememberCompletedSpinOutcome(completedSpinContext, victimRef, elimination.winner);
               isDelaying = false;
-              isSpinning = false; 
-              
+              isSpinning = false;
+              document.body.classList.remove('is-spinning');
               saveData();
-              renderList();
-              drawWheel(); 
               updateAdminLeadershipUi();
-              if (!isFinal) {
-                scheduleClearSpinResult(3000);
-              }
+              setTimeout(() => {
+                renderList();
+                drawWheel();
+                if (!isFinal) scheduleClearSpinResult(3000);
+              }, 0);
           }
       }
       // Сохраняем ID анимации, чтобы можно было прервать
